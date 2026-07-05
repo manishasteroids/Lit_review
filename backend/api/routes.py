@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from pipeline.orchestrator import RUNS, SamhitaPipeline
+from core.llm_client import LLMClient
 
 router = APIRouter(prefix="/api")
 
@@ -122,3 +123,44 @@ def get_run_state(run_id: str):
         "stage": run.stage,
         "side_modules": pipeline.side_modules(run) if run.synthesis else None,
     }
+
+class PaperChatBody(BaseModel):
+    paper_idx: int
+    question: str
+    history: list[dict] = []
+    api_key: str | None = None
+    model: str | None = None
+
+
+@router.post("/runs/{run_id}/chat")
+def chat_about_paper(run_id: str, body: PaperChatBody):
+    """Answer a question grounded in ONE specific paper from the run."""
+    run = get_run(run_id)
+    paper = next((p for p in run.approved_papers if p["idx"] == body.paper_idx), None)
+    if not paper:
+        raise HTTPException(404, "Paper not found in this run.")
+    e = next((x for x in run.extractions if x["idx"] == body.paper_idx), {})
+    context = (
+        f"Title: {paper.get('title','')}\nAuthors: {paper.get('authors','')}\n"
+        f"Year: {paper.get('year','')}\nVenue: {paper.get('venue','')}\n"
+        f"URL: {paper.get('url','')}\nAbstract: {paper.get('abstract','')}\n"
+        f"Method: {e.get('method','')}\nFinding: {e.get('finding','')}\n"
+        f"Metrics: {e.get('metrics','')}\nContribution: {e.get('contribution','')}\n"
+        f"Limitation: {e.get('limitation','')}\nSummary: {e.get('excerpt','')}\n"
+    )
+    system = (
+        "You are a research assistant answering questions about ONE specific paper. "
+        "Use only the paper information provided as context. If the answer isn't in the "
+        "provided information, say so plainly and suggest opening the paper link. "
+        "Be concise and precise. Never invent findings or numbers."
+    )
+    convo = ""
+    for turn in body.history[-6:]:
+        convo += f"\n{turn.get('role','user').upper()}: {turn.get('content','')}"
+    user_text = f"Paper context:\n{context}\n{convo}\n\nUSER: {body.question}"
+    llm = LLMClient(api_key=body.api_key, model=body.model)
+    try:
+        answer = llm.call(user_text=user_text, system=system, max_tokens=800)
+    except Exception as ex:  # noqa: BLE001
+        raise HTTPException(502, f"Paper chat failed: {ex}")
+    return {"answer": answer}
