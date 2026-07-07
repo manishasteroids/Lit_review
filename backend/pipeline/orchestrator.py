@@ -55,10 +55,24 @@ class SamhitaPipeline:
         self.evaluator = EvaluatorAgent(self.llm)
 
     # ---- stage 1+2: reformulate then search -----------------------------
-    def reformulate_and_search(self, topic: str) -> RunState:
+    def reformulate_and_search(self, topic: str, on_progress=None) -> RunState:
+        def emit(step, message, detail=None):
+            if on_progress:
+                on_progress({"step": step, "message": message, "detail": detail})
+
         run = RunState(run_id=str(uuid.uuid4()), topic=topic)
+
+        emit("reformulate", "Query Reformulator is analysing your research question…")
         run.reform = self.reformulator.run(topic)
-        run.papers = self.searcher.run(topic, run.reform.get("queries", []))
+        queries = run.reform.get("queries", [])
+        emit("reformulate", f"Expanded into {len(queries)} search strategies", queries)
+
+        emit("search", "Searching Semantic Scholar…", "semantic_scholar")
+        emit("search", "Searching arXiv…", "arxiv")
+        emit("search", "Searching PubMed & bioRxiv…", "pubmed")
+        run.papers = self.searcher.run(topic, queries)
+        emit("search", f"Found {len(run.papers)} papers — aggregating results…")
+
         run.stage = "filter"
         RUNS[run.run_id] = run
         return run
