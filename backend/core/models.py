@@ -28,7 +28,11 @@ class Extraction(BaseModel):
     method: Optional[str] = None
     finding: Optional[str] = None
     data: Optional[str] = None
+    metrics: Optional[str] = None
     limitation: Optional[str] = None
+    contribution: Optional[str] = None
+    excerpt: Optional[str] = None
+    relevance: Optional[str] = None
     concepts: list[str] = Field(default_factory=list)
 
 

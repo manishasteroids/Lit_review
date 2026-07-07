@@ -33,4 +33,7 @@ export const api = {
 
   evaluate: (runId, apiKey, model) =>
     request(`/api/runs/${runId}/evaluate`, { api_key: apiKey, model }),
+
+  chatAboutPaper: (runId, paperIdx, question, history, apiKey, model) =>
+    request(`/api/runs/${runId}/chat`, { paper_idx: paperIdx, question, history: history || [], api_key: apiKey, model }),
 };

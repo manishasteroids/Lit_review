@@ -206,7 +206,7 @@ export default function App() {
                   </div>
                   <div style={{ padding: "20px 0" }}>
                     {tab === "review" && <ReviewView topic={topic} sections={sections} citeOrder={citeOrder} />}
-                    {tab === "sources" && <SourcesView citeOrder={citeOrder} extractions={extractions} />}
+                    {tab === "sources" && <SourcesView citeOrder={citeOrder} extractions={extractions} runId={runId} apiKey={apiKey} model={model} />}
                     {tab === "critique" && <CritiqueView synth={synth} />}
                     {tab === "graph" && <KnowledgeGraphView concepts={sideModules?.knowledge_graph} citeNum={citeNum} />}
                     {tab === "data" && (

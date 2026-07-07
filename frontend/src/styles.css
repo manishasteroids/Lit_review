@@ -153,3 +153,58 @@ table.cmp td b{color:var(--txt);font-weight:500;}
   font-family:'JetBrains Mono',monospace;line-height:1.7;}
 .foot code{color:var(--muted);}
 a{color:var(--indigo);}
+
+/* ── paper table (Sources tab) ── */
+.col-picker{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:14px;}
+.col-chip{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--muted);background:var(--ink);
+  border:1px solid var(--line);border-radius:16px;padding:4px 10px;cursor:pointer;}
+.col-chip:hover{border-color:var(--indigo);color:var(--txt);}
+.col-chip.on{color:var(--txt);background:var(--indigo-soft);border-color:var(--indigo);}
+.col-chip:disabled{opacity:.7;cursor:default;}
+
+.ptable-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px;}
+.ptable{width:100%;border-collapse:collapse;font-size:12.5px;}
+.ptable thead th{position:sticky;top:0;background:var(--panel2);z-index:1;
+  font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--muted2);text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);font-weight:500;
+  white-space:nowrap;}
+.ptable tbody td{padding:12px;border-bottom:1px solid var(--line-soft);vertical-align:top;
+  color:var(--muted);line-height:1.5;}
+.ptable tbody tr:last-child td{border-bottom:none;}
+.ptable tbody tr:hover td{background:rgba(111,108,243,.04);}
+.pt-num{text-align:center;}
+.pt-title{color:var(--txt);font-weight:500;font-size:13px;line-height:1.35;margin-bottom:4px;}
+.pt-meta{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--muted);}
+.pt-link{font-family:'JetBrains Mono',monospace;font-size:10.5px;display:inline-block;margin-top:4px;}
+.pt-tags{margin-top:8px;}
+.pt-excerpt{color:var(--txt);}
+.pt-na{color:var(--muted2);font-style:italic;}
+
+/* ── paper chat panel ── */
+.chat-scrim{position:fixed;inset:0;background:rgba(10,11,15,.5);z-index:40;}
+.chat-panel{position:fixed;top:0;right:0;bottom:0;width:min(440px,92vw);z-index:41;
+  background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;
+  box-shadow:-16px 0 40px rgba(0,0,0,.35);animation:chatslide .22s ease;}
+@keyframes chatslide{from{transform:translateX(30px);opacity:.4;}to{transform:translateX(0);opacity:1;}}
+.chat-head{display:flex;gap:12px;align-items:flex-start;padding:16px 18px;border-bottom:1px solid var(--line);}
+.chat-paper-title{color:var(--txt);font-weight:500;font-size:14px;line-height:1.35;margin-top:5px;}
+.chat-paper-meta{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--muted);margin-top:3px;}
+.chat-close{margin-left:auto;background:none;border:none;color:var(--muted);font-size:16px;cursor:pointer;flex:0 0 auto;}
+.chat-close:hover{color:var(--txt);}
+.chat-log{flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:10px;}
+.chat-hint{color:var(--muted2);font-size:12.5px;line-height:1.6;font-style:italic;}
+.chat-msg{font-size:13.5px;line-height:1.55;padding:9px 12px;border-radius:10px;max-width:88%;}
+.chat-msg.user{align-self:flex-end;background:var(--indigo-soft);color:var(--txt);}
+.chat-msg.assistant{align-self:flex-start;background:var(--panel2);color:var(--muted);white-space:pre-wrap;}
+.chat-input{display:flex;gap:8px;padding:12px 14px;border-top:1px solid var(--line);}
+.chat-input input{flex:1;background:var(--ink);border:1px solid var(--line);border-radius:9px;color:var(--txt);
+  font-family:'Space Grotesk',sans-serif;font-size:13px;padding:9px 11px;outline:none;}
+.chat-input input:focus{border-color:var(--indigo);}
+.chat-input button{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#fff;background:var(--indigo);
+  border:none;border-radius:9px;padding:0 14px;cursor:pointer;}
+.chat-input button:disabled{opacity:.5;cursor:not-allowed;}
+.pt-actions{display:flex;gap:12px;align-items:center;margin-top:4px;}
+.pt-chat-btn{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--indigo);background:none;
+  border:none;cursor:pointer;padding:0;margin:0;line-height:1;display:inline-flex;align-items:center;}
+.pt-chat-btn:hover{text-decoration:underline;}
+.pt-actions .pt-link{line-height:1;display:inline-flex;align-items:center;}
