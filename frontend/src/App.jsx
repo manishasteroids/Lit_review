@@ -22,6 +22,15 @@ const SOURCE_ICON = {
   pubmed: "🧬",
 };
 
+const TOOLS = [
+  ["review", BookOpen, "Review"],
+  ["sources", Layers, "Sources"],
+  ["critique", Brain, "Critique"],
+  ["graph", Network, "Knowledge graph"],
+  ["data", BarChart3, "Data analysis"],
+  ["eval", FlaskConical, "Evaluation"],
+];
+
 export default function App() {
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("claude-sonnet-4-6");
@@ -42,6 +51,7 @@ export default function App() {
   const [evalRes, setEvalRes] = useState(null);
   const [tab, setTab] = useState("review");
   const reviewRef = useRef(null);
+  const isDone = stage === "done";
 
   // Live progress messages during search
   const [progressMsgs, setProgressMsgs] = useState([]);
@@ -115,18 +125,15 @@ export default function App() {
         (event) => {
           if (event.type === "progress") {
             setProgressMsgs((prev) => {
-              // Deduplicate by message text so search sources don't stack
               const last = prev[prev.length - 1];
               if (last?.message === event.message) return prev;
               return [...prev, event];
             });
-            // Light up pipeline rail as stages are announced
             if (event.step === "reformulate") setStage("reformulate");
             if (event.step === "search") setStage("search");
           }
         }
       );
-      // Final "done" event
       setRunId(res.run_id);
       setReform(res.reform);
       const p = res.papers || [];
@@ -188,9 +195,9 @@ export default function App() {
 
   return (
     <div className="sm-root">
-      <div className="sm-wrap" style={{ display: "flex", gap: 0, padding: 0 }}>
+      <div className="sm-wrap wide" style={{ display: "flex", gap: 0, padding: 0 }}>
 
-        {/* ── Session sidebar ─────────────────────────────────────────── */}
+        {/* ── Session sidebar (Search History) ─────────────────────────── */}
         <SessionSidebar
           sessions={sessions}
           currentRunId={runId}
@@ -211,20 +218,32 @@ export default function App() {
                 search the live web, filter sources, extract, critique, and write a cited review.
               </div>
             </div>
-            <ModelBar model={model} setModel={setModel} apiKey={apiKey} setApiKey={setApiKey} />
           </div>
 
-          <div className="grid">
-            <PipelineRail
-              stage={stage}
-              busy={busy}
-              done={done}
-              kg={sideModules?.knowledge_graph}
-              ranked={synth?.ranked?.length}
-              dataReady={!!sideModules}
-            />
+          <div className="grid3">
+            {/* LEFT: Tools */}
+            <div className="lcol">
+              <div className="panel">
+                <div className="eyebrow" style={{ marginBottom: 12 }}>Tools</div>
+                {TOOLS.map(([k, Ic, lab]) => (
+                  <button
+                    key={k}
+                    className={"tool-item" + (isDone && tab === k ? " on" : "") + (isDone ? "" : " disabled")}
+                    disabled={!isDone}
+                    onClick={() => isDone && setTab(k)}
+                  >
+                    <Ic size={14} /> {lab}
+                  </button>
+                ))}
+              </div>
+            </div>
 
-            <div>
+            {/* CENTER: Model selection + prompt / stage content */}
+            <div className="ccol">
+              <div style={{ marginBottom: 16, display: "flex", justifyContent: "flex-end" }}>
+                <ModelBar model={model} setModel={setModel} apiKey={apiKey} setApiKey={setApiKey} />
+              </div>
+
               {error && (
                 <div className="err" style={{ marginBottom: 16 }}>
                   <AlertTriangle size={18} style={{ flex: "0 0 18px", marginTop: 1 }} />
@@ -247,7 +266,6 @@ export default function App() {
                     <div className="ic"><RotateCw size={16} className="spin" /></div>
                     <h3>{stage === "reformulate" ? "Query Reformulator" : "Academic Search"}</h3>
                   </div>
-                  {/* Live progress feed */}
                   <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
                     {progressMsgs.length === 0 && (
                       <div className="muted tiny pulse">Starting up…</div>
@@ -298,36 +316,20 @@ export default function App() {
                 </div>
               )}
 
-              {stage === "done" && (
+              {isDone && (
                 <div ref={reviewRef}>
-                  <div className="card" style={{ paddingBottom: 0 }}>
-                    <div className="tabs">
-                      {[
-                        ["review", BookOpen, "Review"],
-                        ["sources", Layers, "Sources"],
-                        ["critique", Brain, "Critique"],
-                        ["graph", Network, "Knowledge graph"],
-                        ["data", BarChart3, "Data analysis"],
-                        ["eval", FlaskConical, "Evaluation"],
-                      ].map(([k, Ic, lab]) => (
-                        <button key={k} className={"tab" + (tab === k ? " on" : "")} onClick={() => setTab(k)}>
-                          <Ic size={13} /> {lab}
-                        </button>
-                      ))}
-                    </div>
-                    <div style={{ padding: "20px 0" }}>
-                      {tab === "review" && <ReviewView topic={topic} sections={sections} citeOrder={citeOrder} />}
-                      {tab === "sources" && <SourcesView citeOrder={citeOrder} extractions={extractions} runId={runId} apiKey={apiKey} model={model} />}
-                      {tab === "critique" && <CritiqueView synth={synth} />}
-                      {tab === "graph" && <KnowledgeGraphView concepts={sideModules?.knowledge_graph} citeNum={citeNum} />}
-                      {tab === "data" && (
-                        <DataAnalysisView
-                          yearDistribution={sideModules?.year_distribution}
-                          comparisonTable={sideModules?.comparison_table}
-                        />
-                      )}
-                      {tab === "eval" && <EvaluationView evalRes={evalRes} busy={busy} onEvaluate={runEvaluate} />}
-                    </div>
+                  <div className="card">
+                    {tab === "review" && <ReviewView topic={topic} sections={sections} citeOrder={citeOrder} />}
+                    {tab === "sources" && <SourcesView citeOrder={citeOrder} extractions={extractions} runId={runId} apiKey={apiKey} model={model} />}
+                    {tab === "critique" && <CritiqueView synth={synth} />}
+                    {tab === "graph" && <KnowledgeGraphView concepts={sideModules?.knowledge_graph} citeNum={citeNum} />}
+                    {tab === "data" && (
+                      <DataAnalysisView
+                        yearDistribution={sideModules?.year_distribution}
+                        comparisonTable={sideModules?.comparison_table}
+                      />
+                    )}
+                    {tab === "eval" && <EvaluationView evalRes={evalRes} busy={busy} onEvaluate={runEvaluate} />}
                   </div>
 
                   <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -346,6 +348,19 @@ export default function App() {
                 The Anthropic key lives server-side by default — only paste one above if you want to
                 override the server's key for this run.
               </div>
+            </div>
+
+            {/* RIGHT: Agent Pipeline status */}
+            <div className="rcol">
+              <PipelineRail
+                stage={stage}
+                busy={busy}
+                done={done}
+                kg={sideModules?.knowledge_graph}
+                ranked={synth?.ranked?.length}
+                dataReady={!!sideModules}
+                showMemory={false}
+              />
             </div>
           </div>
         </div>
