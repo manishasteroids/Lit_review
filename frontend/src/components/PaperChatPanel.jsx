@@ -19,7 +19,7 @@ export default function PaperChatPanel({ runId, paper, cite, apiKey, model, onCl
     const next = [...history, { role: "user", content: q }];
     setMessages(next); setDraft(""); setSending(true);
     try {
-      const res = await api.chatAboutPaper(runId, paper.idx, q, history, apiKey || undefined, model);
+      const res = await api.chatAboutPaper(runId, paper, q, history, apiKey || undefined, model);
       setMessages([...next, { role: "assistant", content: res.answer }]);
     } catch (err) {
       setMessages([...next, { role: "assistant", content: "⚠ " + err.message }]);

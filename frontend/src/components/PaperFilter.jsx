@@ -1,8 +1,10 @@
-import React from "react";
+import React, { useState } from "react";
 import { Filter, Check, X, ChevronRight, RotateCw } from "./icons.jsx";
+import PaperChatPanel from "./PaperChatPanel.jsx";
 
-export default function PaperFilter({ papers, approved, scope, busy, onToggle, onApprove, onRestart }) {
+export default function PaperFilter({ papers, approved, scope, busy, onToggle, onApprove, onRestart, runId, apiKey, model }) {
   const approvedCount = Object.values(approved).filter(Boolean).length;
+  const [chatPaper, setChatPaper] = useState(null);
 
   return (
     <div className="card">
@@ -22,6 +24,8 @@ export default function PaperFilter({ papers, approved, scope, busy, onToggle, o
                 {p.authors || "—"} · {p.year || "—"} · {p.venue || "preprint"}
                 {p.url ? " · " : ""}
                 {p.url && <a href={p.url} target="_blank" rel="noreferrer">link</a>}
+                {" · "}
+                <button className="pt-chat-btn" onClick={() => setChatPaper(p)}>chat</button>
               </div>
               {p.abstract && <div className="paper-abs">{p.abstract}</div>}
             </div>
@@ -40,6 +44,17 @@ export default function PaperFilter({ papers, approved, scope, busy, onToggle, o
           <RotateCw size={13} /> Restart
         </button>
       </div>
+
+      {chatPaper && (
+        <PaperChatPanel
+          runId={runId}
+          paper={chatPaper}
+          cite={chatPaper.idx + 1}
+          apiKey={apiKey}
+          model={model}
+          onClose={() => setChatPaper(null)}
+        />
+      )}
     </div>
   );
 }

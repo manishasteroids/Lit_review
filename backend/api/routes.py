@@ -40,6 +40,13 @@ class SynthesizeBody(BaseModel):
     api_key: str | None = None
     model: str | None = None
 
+class ChatBody(BaseModel):
+    paper_idx: int | None = None
+    paper: dict | None = None
+    question: str
+    history: list[dict] = []
+    api_key: str | None = None
+    model: str | None = None
 
 # ── Streaming search endpoint (SSE) ───────────────────────────────────────
 
@@ -188,6 +195,56 @@ def evaluate(run_id: str, body: SynthesizeBody):
         raise HTTPException(502, f"Evaluator failed: {e}")
     return {"run_id": run.run_id, "eval_result": result}
 
+@router.post("/runs/{run_id}/chat")
+def chat_about_paper(run_id: str, body: ChatBody):
+    """Answer questions about a single paper, grounded in what we know about it
+    (abstract/summary, plus extracted fields if extraction has already run)."""
+    run = RUNS.get(run_id)
+    idx = body.paper_idx if body.paper_idx is not None else (body.paper or {}).get("idx")
+    paper = body.paper
+    if paper is None and run:
+        paper = next((p for p in run.papers if p.get("idx") == idx), None)
+    if not paper:
+        raise HTTPException(404, "Paper not found. Reopen the paper and try again.")
+    ext = None
+    if run:
+        ext = next((e for e in (run.extractions or []) if e.get("idx") == idx), None)
+
+    lines = [
+        f"Title: {paper.get('title', '')}",
+        f"Authors: {paper.get('authors', '')}",
+        f"Year: {paper.get('year', '')}",
+        f"Venue: {paper.get('venue', '')}",
+        f"Abstract / summary: {paper.get('abstract', '') or 'n/a'}",
+    ]
+    if ext:
+        for k in ("method", "finding", "data", "metrics", "limitation",
+                  "contribution", "excerpt", "relevance"):
+            v = ext.get(k)
+            if v and v != "n/a":
+                lines.append(f"{k.capitalize()}: {v}")
+    context = "\n".join(lines)
+
+    convo = ""
+    for m in (body.history or []):
+        role = "User" if m.get("role") == "user" else "Assistant"
+        convo += f"{role}: {m.get('content', '')}\n"
+    convo += f"User: {body.question}\nAssistant:"
+
+    system = (
+        "You are a research assistant helping a reviewer decide whether to keep or discard "
+        "a paper during a literature review. Answer ONLY from the paper information provided "
+        "below. If the answer is not contained in that information, say so plainly (e.g. "
+        "\"The abstract doesn't cover that\") instead of guessing. Be concise and specific.\n\n"
+        "PAPER INFORMATION:\n" + context
+    )
+
+    llm = LLMClient(api_key=body.api_key, model=body.model)
+    try:
+        answer = llm.call(user_text=convo, system=system, max_tokens=700)
+    except Exception as e:
+        raise HTTPException(502, f"Chat failed: {e}")
+    return {"answer": answer}
 
 @router.get("/runs/{run_id}")
 def get_run_state(run_id: str):

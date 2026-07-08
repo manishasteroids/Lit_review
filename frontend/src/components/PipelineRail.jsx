@@ -1,7 +1,7 @@
 import React from "react";
 import {
   Sparkles, Filter, Search, Check, FileText, Brain, PenTool,
-  RotateCw, Network, ListOrdered, BarChart3, HelpCircle,
+  RotateCw, Network, ListOrdered, BarChart3,
 } from "./icons.jsx";
 
 export const STAGES = [
@@ -14,7 +14,7 @@ export const STAGES = [
   { key: "write", label: "Writer Agent", sub: "Structured literature review", icon: PenTool, kind: "output" },
 ];
 
-export default function PipelineRail({ stage, busy, done, kg, ranked, dataReady, memory, onRecall, showMemory = true }) {
+export default function PipelineRail({ stage, busy, done, kg, ranked, dataReady }) {
   const curIdx = STAGES.findIndex((s) => s.key === stage);
 
   return (
@@ -55,7 +55,7 @@ export default function PipelineRail({ stage, busy, done, kg, ranked, dataReady,
         <div className="side-chip">
           <BarChart3 size={14} color="var(--indigo)" /> Data analysis {dataReady ? "· ready" : "· idle"}
         </div>
-        {showMemory && (
+        {/* {showMemory && (
           <div className="oq" style={{ marginTop: 4 }}>
             <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4 }}>
               <HelpCircle size={12} /> MEMORY SYSTEM
@@ -72,7 +72,7 @@ export default function PipelineRail({ stage, busy, done, kg, ranked, dataReady,
               "In-session recall of past topics. Persistent memory = open design question."
             )}
           </div>
-        )}
+        )} */}
       </div>
     </div>
   );

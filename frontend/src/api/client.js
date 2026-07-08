@@ -70,6 +70,16 @@ export const api = {
   evaluate: (runId, apiKey, model) =>
     request(`/api/runs/${runId}/evaluate`, { api_key: apiKey, model }),
 
+  chatAboutPaper: (runId, paper, question, history, apiKey, model) =>
+    request(`/api/runs/${runId}/chat`, {
+      paper_idx: paper?.idx,
+      paper,
+      question,
+      history: history || [],
+      api_key: apiKey,
+      model,
+    }),
+
   // Session history — no LLM calls
   listSessions: () => fetch(BASE + "/api/sessions").then((r) => r.json()),
   getSession: (id) => fetch(BASE + "/api/sessions/" + id).then((r) => r.json()),

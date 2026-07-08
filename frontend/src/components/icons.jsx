@@ -28,6 +28,7 @@ function Ic({ name, size = 16, color, className, style }) {
     case "cpu": return <svg {...c}><rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" /><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3" /></svg>;
     case "filter": return <svg {...c}><polygon points="22 3 2 3 10 12.5 10 19 14 21 14 12.5" /></svg>;
     case "plus": return <svg {...c}><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>;
+    case "clock": return <svg {...c}><circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15 14" /></svg>;
     case "trash2": return <svg {...c}><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /><line x1="10" y1="11" x2="10" y2="17" /><line x1="14" y1="11" x2="14" y2="17" /></svg>;
     default: return <svg {...c}><circle cx="12" cy="12" r="9" /></svg>;
   }
@@ -55,3 +56,4 @@ export const Cpu = (p) => <Ic name="cpu" {...p} />;
 export const Filter = (p) => <Ic name="filter" {...p} />;
 export const Plus = (p) => <Ic name="plus" {...p} />;
 export const Trash2 = (p) => <Ic name="trash2" {...p} />;
+export const Clock = (p) => <Ic name="clock" {...p} />;
