@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { api } from "./api/client.js";
 
 import PipelineRail from "./components/PipelineRail.jsx";
@@ -11,8 +11,71 @@ import KnowledgeGraphView from "./components/KnowledgeGraphView.jsx";
 import DataAnalysisView from "./components/DataAnalysisView.jsx";
 import EvaluationView from "./components/EvaluationView.jsx";
 import {
-  RotateCw, AlertTriangle, BookOpen, Layers, Brain, Network, BarChart3, FlaskConical, Sparkles,
+  RotateCw, AlertTriangle, Sparkles,
+  BookOpen, Layers, Brain, Network, BarChart3, FlaskConical,
+  Plus, Trash2,
 } from "./components/icons.jsx";
+
+// Source icons shown in the progress feed
+const SOURCE_ICON = {
+  semantic_scholar: "🔬",
+  arxiv: "📄",
+  pubmed: "🧬",
+};
+
+const TOOLS = [
+  ["review", BookOpen, "Review"],
+  ["sources", Layers, "Sources"],
+  ["critique", Brain, "Critique"],
+  ["graph", Network, "Knowledge graph"],
+  ["data", BarChart3, "Data analysis"],
+  ["eval", FlaskConical, "Evaluation"],
+];
+
+// ── History helpers ──────────────────────────────────────────────
+function relativeTime(iso) {
+  if (!iso) return "";
+  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+  if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
+  if (diff < 2592000) return Math.floor(diff / 86400) + "d ago";
+  return new Date(iso).toLocaleDateString();
+}
+
+function groupSessions(sessions) {
+  const now = Date.now();
+  const buckets = { Today: [], Yesterday: [], "This week": [], Older: [] };
+  for (const s of sessions) {
+    const diff = (now - new Date(s.updated_at).getTime()) / 1000;
+    if (diff < 86400) buckets["Today"].push(s);
+    else if (diff < 172800) buckets["Yesterday"].push(s);
+    else if (diff < 604800) buckets["This week"].push(s);
+    else buckets["Older"].push(s);
+  }
+  return buckets;
+}
+
+// Inline styles for the History list (no extra CSS needed)
+const H = {
+  head: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
+  newBtn: { background: "none", border: "1px solid var(--line)", borderRadius: 7, color: "var(--muted)", cursor: "pointer", padding: "3px 5px", display: "flex", alignItems: "center" },
+  empty: { fontFamily: "'JetBrains Mono',monospace", fontSize: 11, color: "var(--muted2)", lineHeight: 1.6, padding: "8px 2px" },
+  scroll: { maxHeight: "calc(100vh - 340px)", overflowY: "auto", margin: "0 -4px", padding: "0 4px" },
+  bucket: { fontFamily: "'JetBrains Mono',monospace", fontSize: 9.5, fontWeight: 500, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted2)", padding: "10px 4px 4px" },
+  item: { padding: "8px 9px", borderRadius: 8, cursor: "pointer", marginBottom: 2 },
+  itemActive: { background: "var(--indigo-soft)" },
+  itemTop: { display: "flex", alignItems: "flex-start", gap: 4, justifyContent: "space-between" },
+  itemTopic: { fontSize: 12.5, color: "var(--txt)", lineHeight: 1.35, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", flex: 1, minWidth: 0 },
+  del: { background: "none", border: "none", cursor: "pointer", color: "var(--muted2)", padding: "2px 3px", borderRadius: 4, display: "flex", alignItems: "center", flexShrink: 0 },
+  delConfirm: { color: "#f08a8a" },
+  meta: { display: "flex", alignItems: "center", gap: 4, marginTop: 5, fontFamily: "'JetBrains Mono',monospace", fontSize: 10, color: "var(--muted)" },
+  dot: { color: "var(--muted2)" },
+  badge: { fontFamily: "'JetBrains Mono',monospace", fontSize: 9.5, fontWeight: 500, borderRadius: 4, padding: "1px 5px" },
+  badgeDone: { background: "var(--green-soft)", color: "var(--green)" },
+  badgeFilter: { background: "rgba(224,163,62,.14)", color: "var(--amber)" },
+  foot: { marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--line)", fontFamily: "'JetBrains Mono',monospace", fontSize: 9.5, color: "var(--muted2)", lineHeight: 1.5 },
+};
 
 export default function App() {
   const [apiKey, setApiKey] = useState("");
@@ -32,14 +95,62 @@ export default function App() {
   const [sections, setSections] = useState({});
   const [sideModules, setSideModules] = useState(null);
   const [evalRes, setEvalRes] = useState(null);
-  const [memory, setMemory] = useState([]);
   const [tab, setTab] = useState("review");
   const reviewRef = useRef(null);
+  const isDone = stage === "done";
+
+  // Live progress messages during search
+  const [progressMsgs, setProgressMsgs] = useState([]);
+
+  // Session list from backend (no LLM) + delete-confirm state
+  const [sessions, setSessions] = useState([]);
+  const [confirmId, setConfirmId] = useState(null);
+
+  const refreshSessions = useCallback(() => {
+    api.listSessions().then(setSessions).catch(() => {});
+  }, []);
+
+  useEffect(() => { refreshSessions(); }, [refreshSessions]);
 
   function reset() {
     setRunId(null); setReform(null); setPapers([]); setApproved({});
     setExtractions([]); setSynth(null); setSections({}); setSideModules(null);
-    setEvalRes(null); setError(null); setDone({}); setStage("query"); setTab("review");
+    setEvalRes(null); setError(null); setDone({}); setStage("query");
+    setTab("review"); setProgressMsgs([]);
+  }
+
+  // Restore a session — zero LLM calls
+  async function restoreSession(sessionId) {
+    if (busy) return;
+    try {
+      const s = await api.getSession(sessionId);
+      const d = s.data;
+      reset();
+      setTopic(d.topic || "");
+      setRunId(d.runId || null);
+      setReform(d.reform || null);
+      setPapers(d.papers || []);
+      setApproved(d.approved || {});
+      if (s.stage === "done") {
+        setExtractions(d.extractions || []);
+        setSynth(d.synth || null);
+        setSections(d.sections || {});
+        setSideModules(d.sideModules || null);
+        setDone({ query: true, reformulate: true, search: true, extract: true, synthesize: true, write: true });
+        setStage("done");
+        setTimeout(() => reviewRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
+      } else {
+        setDone({ query: true, reformulate: true, search: true });
+        setStage("filter");
+      }
+    } catch (e) {
+      setError({ stage: "Session restore", msg: e.message });
+    }
+  }
+
+  async function deleteSession(id) {
+    await api.deleteSession(id);
+    refreshSessions();
   }
 
   const approvedList = papers.filter((p) => approved[p.idx]);
@@ -52,20 +163,36 @@ export default function App() {
   citeOrder.forEach((p, i) => (citeNum[p.idx] = i + 1));
 
   async function runStart() {
-    setBusy(true); setError(null); setStage("reformulate");
+    setBusy(true); setError(null); setStage("reformulate"); setProgressMsgs([]);
     try {
-      const res = await api.createRun(topic, apiKey || undefined, model);
+      const res = await api.createRunStream(
+        topic.trim(),
+        apiKey || undefined,
+        model,
+        (event) => {
+          if (event.type === "progress") {
+            setProgressMsgs((prev) => {
+              const last = prev[prev.length - 1];
+              if (last?.message === event.message) return prev;
+              return [...prev, event];
+            });
+            if (event.step === "reformulate") setStage("reformulate");
+            if (event.step === "search") setStage("search");
+          }
+        }
+      );
       setRunId(res.run_id);
       setReform(res.reform);
-      setStage("search");
-      setDone((d) => ({ ...d, query: true, reformulate: true, search: true }));
       const p = res.papers || [];
       setPapers(p);
       const ap = {}; p.forEach((x) => (ap[x.idx] = true));
       setApproved(ap);
+      setDone((d) => ({ ...d, query: true, reformulate: true, search: true }));
       setStage("filter");
+      refreshSessions();
     } catch (e) {
       setError({ stage: "Query Reformulator / Academic Search", msg: e.message });
+      setStage("query");
     } finally {
       setBusy(false);
     }
@@ -92,7 +219,7 @@ export default function App() {
       setSideModules(writeRes.side_modules);
       setDone((d) => ({ ...d, write: true }));
       setStage("done");
-      setMemory((m) => (m.includes(topic) ? m : [topic, ...m].slice(0, 6)));
+      refreshSessions();
       setTimeout(() => reviewRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
     } catch (e) {
       setError({ stage: "Reader & Extractor / Critic & Synthesizer / Writer", msg: e.message });
@@ -113,9 +240,11 @@ export default function App() {
     }
   }
 
+  const grouped = groupSessions(sessions);
+
   return (
     <div className="sm-root">
-      <div className="sm-wrap">
+      <div className="sm-wrap wide">
         <div className="sm-head">
           <div>
             <div className="eyebrow" style={{ marginBottom: 8 }}>Multi-agent literature review · live pipeline</div>
@@ -125,22 +254,95 @@ export default function App() {
               search the live web, filter sources, extract, critique, and write a cited review.
             </div>
           </div>
-          <ModelBar model={model} setModel={setModel} apiKey={apiKey} setApiKey={setApiKey} />
         </div>
 
-        <div className="grid">
-          <PipelineRail
-            stage={stage}
-            busy={busy}
-            done={done}
-            kg={sideModules?.knowledge_graph}
-            ranked={synth?.ranked?.length}
-            dataReady={!!sideModules}
-            memory={memory}
-            onRecall={(m) => { if (!busy) { reset(); setTopic(m); } }}
-          />
+        <div className="grid3">
+          {/* LEFT: Tools + History */}
+          <div className="lcol">
+            <div className="panel">
+              <div className="eyebrow" style={{ marginBottom: 12 }}>Tools</div>
+              {TOOLS.map(([k, Ic, lab]) => (
+                <button
+                  key={k}
+                  className={"tool-item" + (isDone && tab === k ? " on" : "") + (isDone ? "" : " disabled")}
+                  disabled={!isDone}
+                  onClick={() => isDone && setTab(k)}
+                >
+                  <Ic size={14} /> {lab}
+                </button>
+              ))}
+            </div>
 
-          <div>
+            <div className="panel">
+              <div style={H.head}>
+                <span className="eyebrow">History</span>
+                <button
+                  style={H.newBtn}
+                  disabled={busy}
+                  onClick={() => { if (!busy) { reset(); setTopic(""); } }}
+                  title="New review"
+                >
+                  <Plus size={14} />
+                </button>
+              </div>
+
+              {sessions.length === 0 ? (
+                <div style={H.empty}>No runs yet. Run a search to start.</div>
+              ) : (
+                <div style={H.scroll}>
+                  {Object.entries(grouped).map(([bucket, items]) => (
+                    items.length ? (
+                      <div key={bucket}>
+                        <div style={H.bucket}>{bucket}</div>
+                        {items.map((s) => (
+                          <div
+                            key={s.id}
+                            style={{ ...H.item, ...(s.id === runId ? H.itemActive : {}) }}
+                            onClick={() => !busy && restoreSession(s.id)}
+                            onMouseLeave={() => setConfirmId(null)}
+                            title={s.topic}
+                          >
+                            <div style={H.itemTop}>
+                              <span style={H.itemTopic}>{s.topic}</span>
+                              <button
+                                style={{ ...H.del, ...(confirmId === s.id ? H.delConfirm : {}) }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (confirmId === s.id) { deleteSession(s.id); setConfirmId(null); }
+                                  else setConfirmId(s.id);
+                                }}
+                                title={confirmId === s.id ? "Click again to confirm" : "Delete"}
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            </div>
+                            <div style={H.meta}>
+                              <span style={{ ...H.badge, ...(s.stage === "done" ? H.badgeDone : H.badgeFilter) }}>
+                                {s.stage === "done" ? "✓ review" : "◦ filter"}
+                              </span>
+                              <span style={H.dot}>·</span>
+                              <span>{s.paper_count}p</span>
+                              <span style={H.dot}>·</span>
+                              <span>{relativeTime(s.updated_at)}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null
+                  ))}
+                </div>
+              )}
+
+              <div style={H.foot}>Sessions saved locally · no LLM needed to restore</div>
+            </div>
+          </div>
+
+          {/* CENTER: Model selection + prompt / stage content */}
+          <div className="ccol">
+            <div style={{ marginBottom: 16, display: "flex", justifyContent: "flex-end" }}>
+              <ModelBar model={model} setModel={setModel} apiKey={apiKey} setApiKey={setApiKey} />
+            </div>
+
             {error && (
               <div className="err" style={{ marginBottom: 16 }}>
                 <AlertTriangle size={18} style={{ flex: "0 0 18px", marginTop: 1 }} />
@@ -159,8 +361,33 @@ export default function App() {
 
             {busy && (stage === "reformulate" || stage === "search") && (
               <div className="card">
-                <div className="card-h"><div className="ic"><RotateCw size={16} className="spin" /></div><h3>Running search stages</h3></div>
-                <div className="muted tiny pulse">Reformulating the query and searching the live web for real papers…</div>
+                <div className="card-h">
+                  <div className="ic"><RotateCw size={16} className="spin" /></div>
+                  <h3>{stage === "reformulate" ? "Query Reformulator" : "Academic Search"}</h3>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
+                  {progressMsgs.length === 0 && (
+                    <div className="muted tiny pulse">Starting up…</div>
+                  )}
+                  {progressMsgs.map((ev, i) => {
+                    const isLatest = i === progressMsgs.length - 1;
+                    const icon = SOURCE_ICON[ev.detail] || (ev.step === "reformulate" ? "🤖" : "🔍");
+                    return (
+                      <div key={i} style={{
+                        display: "flex", alignItems: "flex-start", gap: 8,
+                        opacity: isLatest ? 1 : 0.45,
+                        fontSize: 12, lineHeight: 1.5,
+                        transition: "opacity 0.3s",
+                      }}>
+                        <span style={{ fontSize: 14, flexShrink: 0, marginTop: 1 }}>{icon}</span>
+                        <span style={{ color: isLatest ? "var(--fg)" : "var(--muted)" }}>
+                          {ev.message}
+                          {isLatest && <span className="pulse" style={{ marginLeft: 4 }}>…</span>}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             )}
 
@@ -173,13 +400,17 @@ export default function App() {
                 onToggle={(idx) => setApproved((a) => ({ ...a, [idx]: !a[idx] }))}
                 onApprove={runApprove}
                 onRestart={reset}
+                runId={runId}
+                apiKey={apiKey}
+                model={model}
               />
             )}
 
             {busy && (stage === "extract" || stage === "synthesize" || stage === "write") && (
               <div className="card">
-                <div className="card-h"><div className="ic"><RotateCw size={16} className="spin" /></div>
-                  <h3>{stage === "write" ? "Writing the review" : "Reading, critiquing & ranking sources"}</h3>
+                <div className="card-h">
+                  <div className="ic"><RotateCw size={16} className="spin" /></div>
+                  <h3>{stage === "write" ? "Writer Agent" : "Reader & Extractor / Critic & Synthesizer"}</h3>
                 </div>
                 <div className="muted tiny pulse">
                   {stage === "write" ? "Drafting cited sections…" : "Extracting structured info and detecting themes/gaps/biases…"}
@@ -187,36 +418,20 @@ export default function App() {
               </div>
             )}
 
-            {stage === "done" && (
+            {isDone && (
               <div ref={reviewRef}>
-                <div className="card" style={{ paddingBottom: 0 }}>
-                  <div className="tabs">
-                    {[
-                      ["review", BookOpen, "Review"],
-                      ["sources", Layers, "Sources"],
-                      ["critique", Brain, "Critique"],
-                      ["graph", Network, "Knowledge graph"],
-                      ["data", BarChart3, "Data analysis"],
-                      ["eval", FlaskConical, "Evaluation"],
-                    ].map(([k, Ic, lab]) => (
-                      <button key={k} className={"tab" + (tab === k ? " on" : "")} onClick={() => setTab(k)}>
-                        <Ic size={13} /> {lab}
-                      </button>
-                    ))}
-                  </div>
-                  <div style={{ padding: "20px 0" }}>
-                    {tab === "review" && <ReviewView topic={topic} sections={sections} citeOrder={citeOrder} />}
-                    {tab === "sources" && <SourcesView citeOrder={citeOrder} extractions={extractions} runId={runId} apiKey={apiKey} model={model} />}
-                    {tab === "critique" && <CritiqueView synth={synth} />}
-                    {tab === "graph" && <KnowledgeGraphView concepts={sideModules?.knowledge_graph} citeNum={citeNum} />}
-                    {tab === "data" && (
-                      <DataAnalysisView
-                        yearDistribution={sideModules?.year_distribution}
-                        comparisonTable={sideModules?.comparison_table}
-                      />
-                    )}
-                    {tab === "eval" && <EvaluationView evalRes={evalRes} busy={busy} onEvaluate={runEvaluate} />}
-                  </div>
+                <div className="card">
+                  {tab === "review" && <ReviewView topic={topic} sections={sections} citeOrder={citeOrder} />}
+                  {tab === "sources" && <SourcesView citeOrder={citeOrder} extractions={extractions} runId={runId} apiKey={apiKey} model={model} />}
+                  {tab === "critique" && <CritiqueView synth={synth} />}
+                  {tab === "graph" && <KnowledgeGraphView concepts={sideModules?.knowledge_graph} citeNum={citeNum} />}
+                  {tab === "data" && (
+                    <DataAnalysisView
+                      yearDistribution={sideModules?.year_distribution}
+                      comparisonTable={sideModules?.comparison_table}
+                    />
+                  )}
+                  {tab === "eval" && <EvaluationView evalRes={evalRes} busy={busy} onEvaluate={runEvaluate} />}
                 </div>
 
                 <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -235,6 +450,19 @@ export default function App() {
               The Anthropic key lives server-side by default — only paste one above if you want to
               override the server's key for this run.
             </div>
+          </div>
+
+          {/* Agent Pipeline status */}
+          <div className="rcol">
+            <PipelineRail
+              stage={stage}
+              busy={busy}
+              done={done}
+              kg={sideModules?.knowledge_graph}
+              ranked={synth?.ranked?.length}
+              dataReady={!!sideModules}
+              showMemory={false}
+            />
           </div>
         </div>
       </div>
