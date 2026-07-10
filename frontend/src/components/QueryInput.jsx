@@ -1,5 +1,5 @@
 import React from "react";
-import { Sparkles, Cpu, Play } from "./icons.jsx";
+import { Sparkles, Cpu, Play, ChevronRight } from "./icons.jsx";
 
 const BACKBONES = [
   { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", live: true },
@@ -21,17 +21,19 @@ export function ModelBar({ model, setModel, apiKey, setApiKey }) {
       <div className="eyebrow" style={{ display: "flex", gap: 6, alignItems: "center" }}>
         <Cpu size={11} /> Model layer · swappable backbone
       </div>
-      <div className="row">
-        {BACKBONES.map((b) => (
-          <button
-            key={b.id}
-            title={b.live ? "Available with your key" : "Not wired in this backend"}
-            className={"bb-chip" + (model === b.id ? " on" : "") + (b.live ? "" : " dead")}
-            onClick={() => b.live && setModel(b.id)}
-          >
-            {b.label}
-          </button>
-        ))}
+      <div className="model-select-wrap">
+        <select
+          className="model-select"
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+        >
+          {BACKBONES.map((b) => (
+            <option key={b.id} value={b.id} disabled={!b.live}>
+              {b.label}{b.live ? "" : " · not wired"}
+            </option>
+          ))}
+        </select>
+        <ChevronRight size={14} className="model-caret" />
       </div>
       <div className="keyrow">
         <input
