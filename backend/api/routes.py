@@ -24,7 +24,7 @@ def get_run(run_id: str):
     return run
 
 
-# ── Pydantic bodies ────────────────────────────────────────────────────────
+# ── Pydantic bodies ────────--
 
 class CreateRunBody(BaseModel):
     topic: str
@@ -39,6 +39,7 @@ class FilterBody(BaseModel):
 class SynthesizeBody(BaseModel):
     api_key: str | None = None
     model: str | None = None
+    notes: dict | None = None
 
 class ChatBody(BaseModel):
     paper_idx: int | None = None
@@ -47,8 +48,15 @@ class ChatBody(BaseModel):
     history: list[dict] = []
     api_key: str | None = None
     model: str | None = None
+    
+class AssessBody(BaseModel):
+    paper_idx: int | None = None
+    paper: dict | None = None
+    scope: str | None = None
+    api_key: str | None = None
+    model: str | None = None
 
-# ── Streaming search endpoint (SSE) ───────────────────────────────────────
+# ── Streaming search endpoint (SSE) ────--
 
 @router.post("/runs/stream")
 async def create_run_stream(body: CreateRunBody):
@@ -155,8 +163,23 @@ def synthesize(run_id: str, body: SynthesizeBody):
         pipeline.extract_and_synthesize(run)
     except Exception as e:
         raise HTTPException(502, f"Reader & Extractor / Critic & Synthesizer failed: {e}")
+
+    side = pipeline.side_modules(run)
+    approved_map = {p["idx"]: True for p in run.approved_papers}
+    save_session(
+        session_id=run.run_id,
+        topic=run.topic,
+        stage="done",
+        paper_count=len(run.approved_papers),
+        data={
+            "runId": run.run_id, "topic": run.topic, "reform": run.reform,
+            "papers": run.papers, "approved": approved_map,
+            "extractions": run.extractions, "synth": run.synthesis,
+            "sections": run.sections, "sideModules": side, "notes": body.notes or {},
+        },
+    )
     return {"run_id": run.run_id, "extractions": run.extractions,
-            "synthesis": run.synthesis, "stage": run.stage}
+            "synthesis": run.synthesis, "side_modules": side, "stage": run.stage}
 
 
 @router.post("/runs/{run_id}/write")
@@ -178,7 +201,7 @@ def write(run_id: str, body: SynthesizeBody):
             "runId": run.run_id, "topic": run.topic, "reform": run.reform,
             "papers": run.papers, "approved": approved_map,
             "extractions": run.extractions, "synth": run.synthesis,
-            "sections": run.sections, "sideModules": side,
+            "sections": run.sections, "sideModules": side, "notes": body.notes or {},
         },
     )
     return {"run_id": run.run_id, "sections": run.sections,
@@ -194,6 +217,42 @@ def evaluate(run_id: str, body: SynthesizeBody):
     except Exception as e:
         raise HTTPException(502, f"Evaluator failed: {e}")
     return {"run_id": run.run_id, "eval_result": result}
+
+@router.post("/runs/{run_id}/assess")
+def assess_paper(run_id: str, body: AssessBody):
+    """Quick triage of a single paper against the review scope: extract key
+    fields and judge relevance so the reviewer can decide keep/drop fast.
+    On-demand and abstract-based (cheap); full-text chat is for deep dives."""
+    run = RUNS.get(run_id)
+    idx = body.paper_idx if body.paper_idx is not None else (body.paper or {}).get("idx")
+    paper = body.paper
+    if paper is None and run:
+        paper = next((p for p in run.papers if p.get("idx") == idx), None)
+    if not paper:
+        raise HTTPException(404, "Paper not found. Reopen and try again.")
+    scope = body.scope or ((run.reform or {}).get("scope") if run else None) or "(no explicit scope provided)"
+
+    system = (
+        "You are a triage assistant for a literature review. Given the review SCOPE and one "
+        "paper's title + abstract, (1) extract key fields and (2) judge how relevant the paper "
+        "is to the scope. Respond with ONLY JSON (no markdown): "
+        '{"method":"approach in <=10 words","finding":"key result in <=14 words",'
+        '"metrics":"key numbers or n/a","contribution":"one sentence",'
+        '"verdict":"keep|maybe|skip","reason":"one sentence on relevance to the scope"}. '
+        "Ground everything in the abstract; use \"n/a\" if unknown."
+    )
+    user = (
+        f"SCOPE: {scope}\n\n"
+        f"PAPER: {paper.get('title', '')} ({paper.get('year', '?')})\n"
+        f"ABSTRACT: {paper.get('abstract', '') or 'n/a'}"
+    )
+    llm = LLMClient(api_key=body.api_key, model=body.model)
+    try:
+        data = LLMClient.parse_json(llm.call(user_text=user, system=system, max_tokens=400))
+    except Exception as e:
+        raise HTTPException(502, f"Assessment failed: {e}")
+    return {"assessment": data}
+
 
 @router.post("/runs/{run_id}/chat")
 def chat_about_paper(run_id: str, body: ChatBody):

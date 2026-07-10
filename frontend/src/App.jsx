@@ -11,7 +11,7 @@ import KnowledgeGraphView from "./components/KnowledgeGraphView.jsx";
 import DataAnalysisView from "./components/DataAnalysisView.jsx";
 import EvaluationView from "./components/EvaluationView.jsx";
 import {
-  RotateCw, AlertTriangle, Sparkles,
+  RotateCw, AlertTriangle, Sparkles, PenTool,
   BookOpen, Layers, Brain, Network, BarChart3, FlaskConical,
   Plus, Trash2,
 } from "./components/icons.jsx";
@@ -86,6 +86,8 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
+  const [notes, setNotes] = useState({}); // paper idx -> note text
+
   const [runId, setRunId] = useState(null);
   const [reform, setReform] = useState(null);
   const [papers, setPapers] = useState([]);
@@ -117,6 +119,7 @@ export default function App() {
     setExtractions([]); setSynth(null); setSections({}); setSideModules(null);
     setEvalRes(null); setError(null); setDone({}); setStage("query");
     setTab("review"); setProgressMsgs([]);
+    setTab("review"); setProgressMsgs([]); setNotes({});
   }
 
   // Restore a session — zero LLM calls
@@ -132,12 +135,16 @@ export default function App() {
       setPapers(d.papers || []);
       setApproved(d.approved || {});
       if (s.stage === "done") {
+        const secs = d.sections || {};
+        const hasReview = Object.keys(secs).length > 0;
         setExtractions(d.extractions || []);
         setSynth(d.synth || null);
-        setSections(d.sections || {});
+        setSections(secs);
         setSideModules(d.sideModules || null);
-        setDone({ query: true, reformulate: true, search: true, extract: true, synthesize: true, write: true });
+        setNotes(d.notes || {});
+        setDone({ query: true, reformulate: true, search: true, extract: true, synthesize: true, write: hasReview });
         setStage("done");
+        setTab(hasReview ? "review" : "sources");
         setTimeout(() => reviewRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
       } else {
         setDone({ query: true, reformulate: true, search: true });
@@ -208,21 +215,34 @@ export default function App() {
     try {
       await api.filterPapers(runId, approvedIndices);
       setStage("extract");
-      const synRes = await api.synthesize(runId, apiKey || undefined, model);
+      const synRes = await api.synthesize(runId, apiKey || undefined, model, notes);
       setExtractions(synRes.extractions);
       setSynth(synRes.synthesis);
+      setSideModules(synRes.side_modules);
       setDone((d) => ({ ...d, extract: true, synthesize: true }));
-
-      setStage("write");
-      const writeRes = await api.write(runId, apiKey || undefined, model);
-      setSections(writeRes.sections);
-      setSideModules(writeRes.side_modules);
-      setDone((d) => ({ ...d, write: true }));
       setStage("done");
+      setTab("sources");
       refreshSessions();
       setTimeout(() => reviewRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
     } catch (e) {
-      setError({ stage: "Reader & Extractor / Critic & Synthesizer / Writer", msg: e.message });
+      setError({ stage: "Reader & Extractor / Critic & Synthesizer", msg: e.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // generate the written cited review (Writer agent) on demand.
+  async function runWrite() {
+    setBusy(true); setError(null);
+    try {
+      const writeRes = await api.write(runId, apiKey || undefined, model, notes);
+      setSections(writeRes.sections);
+      if (writeRes.side_modules) setSideModules(writeRes.side_modules);
+      setDone((d) => ({ ...d, write: true }));
+      setTab("review");
+      refreshSessions();
+    } catch (e) {
+      setError({ stage: "Writer Agent", msg: e.message });
     } finally {
       setBusy(false);
     }
@@ -237,6 +257,59 @@ export default function App() {
       setError({ stage: "Evaluator", msg: e.message });
     } finally {
       setBusy(false);
+    }
+  }
+
+  function download(filename, text, type = "text/plain;charset=utf-8") {
+    const blob = new Blob([text], { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function exportShortlist(fmt) {
+    const extByIdx = {};
+    (extractions || []).forEach((e) => (extByIdx[e.idx] = e));
+    const rows = citeOrder.map((p, i) => ({
+      n: i + 1, ...p, ...(extByIdx[p.idx] || {}), note: notes[p.idx] || "",
+    }));
+    const slug = (topic || "shortlist").replace(/[^\w]+/g, "-").slice(0, 40).replace(/^-|-$/g, "") || "shortlist";
+
+    if (fmt === "md") {
+      let md = `# Literature shortlist — ${topic}\n\n_${rows.length} papers_\n\n`;
+      rows.forEach((r) => {
+        md += `## [${r.n}] ${r.title}\n`;
+        md += `${r.authors || "—"} · ${r.year || "—"} · ${r.venue || "preprint"}\n`;
+        if (r.url) md += `${r.url}\n`;
+        md += "\n";
+        if (r.method && r.method !== "n/a") md += `- **Method:** ${r.method}\n`;
+        if (r.finding && r.finding !== "n/a") md += `- **Finding:** ${r.finding}\n`;
+        if (r.metrics && r.metrics !== "n/a") md += `- **Metrics:** ${r.metrics}\n`;
+        if (r.contribution && r.contribution !== "n/a") md += `- **Contribution:** ${r.contribution}\n`;
+        if (r.note) md += `- **My notes:** ${r.note}\n`;
+        md += "\n";
+      });
+      download(`${slug}.md`, md, "text/markdown;charset=utf-8");
+    } else if (fmt === "csv") {
+      const cols = ["n", "title", "authors", "year", "venue", "url", "method", "finding", "metrics", "contribution", "relevance", "note"];
+      const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+      const csv = [cols.join(",")].concat(rows.map((r) => cols.map((c) => esc(r[c])).join(","))).join("\n");
+      download(`${slug}.csv`, csv, "text/csv;charset=utf-8");
+    } else if (fmt === "bib") {
+      const bib = rows.map((r) => {
+        const first = (r.authors || "unknown").split(/[ ,]/)[0].toLowerCase().replace(/[^a-z]/g, "") || "ref";
+        const key = `${first}${r.year || ""}_${r.idx}`;
+        return `@article{${key},
+  title   = {${r.title || ""}},
+  author  = {${r.authors || ""}},
+  year    = {${r.year || ""}},
+  journal = {${r.venue || ""}},
+  url     = {${r.url || ""}},
+  note    = {${(r.note || "").replace(/[{}]/g, "")}}
+}`;
+      }).join("\n\n");
+      download(`${slug}.bib`, bib, "application/x-bibtex;charset=utf-8");
     }
   }
 
@@ -403,6 +476,8 @@ export default function App() {
                 runId={runId}
                 apiKey={apiKey}
                 model={model}
+                notes={notes}
+                onNote={(idx, text) => setNotes((n) => ({ ...n, [idx]: text }))}
               />
             )}
 
@@ -421,7 +496,24 @@ export default function App() {
             {isDone && (
               <div ref={reviewRef}>
                 <div className="card">
-                  {tab === "review" && <ReviewView topic={topic} sections={sections} citeOrder={citeOrder} />}
+                  {tab === "review" && (
+                    Object.keys(sections || {}).length > 0
+                      ? <ReviewView topic={topic} sections={sections} citeOrder={citeOrder} />
+                      : (
+                        <div style={{ textAlign: "center", padding: "28px 16px" }}>
+                          <div className="eyebrow" style={{ marginBottom: 8 }}></div>
+                          <h3 style={{ margin: "0 0 8px", fontSize: 16 }}>No written review yet</h3>
+                          <div className="muted tiny" style={{ maxWidth: 460, margin: "0 auto 16px", lineHeight: 1.6 }}>
+                            Your papers are reviewed and ready to explore in Sources, Critique and the
+                            other tools. If you'd like, the Writer agent can draft a cited literature
+                            review from your kept papers.
+                          </div>
+                          <button className="btn" disabled={busy} onClick={runWrite}>
+                            <PenTool size={15} /> Generate cited review
+                          </button>
+                        </div>
+                      )
+                  )}
                   {tab === "sources" && <SourcesView citeOrder={citeOrder} extractions={extractions} runId={runId} apiKey={apiKey} model={model} />}
                   {tab === "critique" && <CritiqueView synth={synth} />}
                   {tab === "graph" && <KnowledgeGraphView concepts={sideModules?.knowledge_graph} citeNum={citeNum} />}
@@ -441,6 +533,10 @@ export default function App() {
                   <button className="btn ghost" onClick={() => { reset(); setTopic(""); }}>
                     <Sparkles size={14} /> New topic
                   </button>
+                  <span style={{ width: 1, alignSelf: "stretch", background: "var(--line)", margin: "0 2px" }} />
+                  <button className="btn ghost sm" disabled={!citeOrder.length} onClick={() => exportShortlist("md")}>Export .md</button>
+                  <button className="btn ghost sm" disabled={!citeOrder.length} onClick={() => exportShortlist("csv")}>Export .csv</button>
+                  <button className="btn ghost sm" disabled={!citeOrder.length} onClick={() => exportShortlist("bib")}>Export .bib</button>
                 </div>
               </div>
             )}

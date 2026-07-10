@@ -61,11 +61,11 @@ export const api = {
   filterPapers: (runId, approvedIndices) =>
     request(`/api/runs/${runId}/filter`, { approved_indices: approvedIndices }),
 
-  synthesize: (runId, apiKey, model) =>
-    request(`/api/runs/${runId}/synthesize`, { api_key: apiKey, model }),
+  synthesize: (runId, apiKey, model, notes) =>
+    request(`/api/runs/${runId}/synthesize`, { api_key: apiKey, model, notes }),
 
-  write: (runId, apiKey, model) =>
-    request(`/api/runs/${runId}/write`, { api_key: apiKey, model }),
+  write: (runId, apiKey, model, notes) =>
+    request(`/api/runs/${runId}/write`, { api_key: apiKey, model, notes }),
 
   evaluate: (runId, apiKey, model) =>
     request(`/api/runs/${runId}/evaluate`, { api_key: apiKey, model }),
@@ -76,6 +76,15 @@ export const api = {
       paper,
       question,
       history: history || [],
+      api_key: apiKey,
+      model,
+    }),
+
+    assessPaper: (runId, paper, scope, apiKey, model) =>
+    request(`/api/runs/${runId}/assess`, {
+      paper_idx: paper?.idx,
+      paper,
+      scope,
       api_key: apiKey,
       model,
     }),
