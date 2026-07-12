@@ -4,6 +4,8 @@ frontend's pipeline rail can light up node by node as each call returns.
 """
 import asyncio
 import json
+import base64
+
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
@@ -13,6 +15,8 @@ from pydantic import BaseModel
 from core.db import delete_session, get_session, list_sessions, save_session
 from core.llm_client import LLMClient
 from pipeline.orchestrator import RUNS, SamhitaPipeline
+
+from core.paper_text import fetch_paper_pdf, fetch_paper_text
 
 router = APIRouter(prefix="/api")
 
@@ -46,6 +50,7 @@ class ChatBody(BaseModel):
     paper: dict | None = None
     question: str
     history: list[dict] = []
+    images: list[dict] = []  # [{media_type, data(base64)}]
     api_key: str | None = None
     model: str | None = None
     
@@ -290,20 +295,75 @@ def chat_about_paper(run_id: str, body: ChatBody):
         convo += f"{role}: {m.get('content', '')}\n"
     convo += f"User: {body.question}\nAssistant:"
 
-    system = (
-        "You are a research assistant helping a reviewer decide whether to keep or discard "
-        "a paper during a literature review. Answer ONLY from the paper information provided "
-        "below. If the answer is not contained in that information, say so plainly (e.g. "
-        "\"The abstract doesn't cover that\") instead of guessing. Be concise and specific.\n\n"
-        "PAPER INFORMATION:\n" + context
-    )
-
     llm = LLMClient(api_key=body.api_key, model=body.model)
+    pdf_bytes = fetch_paper_pdf(paper.get("url"))
+
+    image_blocks = []
+    for img in (body.images or []):
+        mt, data = img.get("media_type"), img.get("data")
+        if mt and data:
+            image_blocks.append({"type": "image",
+                "source": {"type": "base64", "media_type": mt, "data": data}})
+
     try:
-        answer = llm.call(user_text=convo, system=system, max_tokens=700)
+        if pdf_bytes or image_blocks:
+            # Multimodal: attach the PDF (figures/tables) and/or the user's images.
+            blocks, parts = [], []
+            if pdf_bytes:
+                b64 = base64.standard_b64encode(pdf_bytes).decode("ascii")
+                blocks.append({"type": "document", "source": {"type": "base64",
+                    "media_type": "application/pdf", "data": b64}})
+                parts.append("full_pdf")
+            blocks.extend(image_blocks)
+            if image_blocks:
+                parts.append("image")
+
+            text = f"PAPER METADATA:\n{context}\n\n"
+            if not pdf_bytes:
+                full_text = fetch_paper_text(paper.get("url"))
+                if full_text:
+                    text += "FULL PAPER TEXT (extracted; figures not included):\n" + full_text + "\n\n"
+                    parts.append("full_text")
+                else:
+                    parts.append("abstract")
+            if image_blocks:
+                text += ("The user attached the image(s) shown above — use them to answer "
+                         "(e.g. explain a figure or compare it with the paper). ")
+            text += f"\nCONVERSATION:\n{convo}"
+            blocks.append({"type": "text", "text": text})
+
+            system = (
+                "You are a research assistant helping a reviewer understand a paper. "
+                + ("The full paper is attached as a PDF — read all of it, including figures, "
+                   "tables and equations. " if pdf_bytes else "")
+                + ("The user also attached image(s) — explain or compare them in the context of "
+                   "the paper as asked. " if image_blocks else "")
+                + "Answer thoroughly and ground every claim in the paper (or the attached "
+                "images); don't invent facts. When asked for a summary, cover objective, method, "
+                "data, key results (with numbers), and limitations."
+            )
+            answer = llm.call(content=blocks, system=system, max_tokens=1000)
+            source = "+".join(parts) or "abstract"
+        else:
+            full_text = fetch_paper_text(paper.get("url"))
+            if full_text:
+                context += "\n\nFULL PAPER TEXT (extracted; figures not included, may be truncated):\n" + full_text
+                source = "full_text"
+                note = ("You have the full text of this paper below. Answer from it and cite "
+                        "specific sections/results when relevant.")
+            else:
+                source = "abstract"
+                note = ("Only the abstract/summary is available (the full paper couldn't be "
+                        "fetched — it may be paywalled). Answer from the abstract and say plainly "
+                        "when it doesn't cover the question rather than guessing.")
+            system = (
+                "You are a research assistant helping a reviewer understand a paper. " + note +
+                " Be concise and specific.\n\nPAPER INFORMATION:\n" + context
+            )
+            answer = llm.call(user_text=convo, system=system, max_tokens=800)
     except Exception as e:
         raise HTTPException(502, f"Chat failed: {e}")
-    return {"answer": answer}
+    return {"answer": answer, "source": source}
 
 @router.get("/runs/{run_id}")
 def get_run_state(run_id: str):
