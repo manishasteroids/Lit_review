@@ -20,6 +20,7 @@ from agents.paper_filter import PaperFilterAgent
 from agents.query_reformulator import QueryReformulator
 from agents.reader_extractor import ReaderExtractorAgent
 from agents.writer import WriterAgent
+from core.config import settings
 from core.llm_client import LLMClient
 from pipeline.data_analysis import comparison_table, year_distribution
 from pipeline.knowledge_graph import build_knowledge_graph
@@ -46,7 +47,14 @@ class SamhitaPipeline:
     """One instance per request; agents are cheap to construct."""
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
-        self.llm = LLMClient(api_key=api_key, model=model)
+        # The pipeline (esp. Academic Search) relies on Anthropic's web-search
+        # tool and strict JSON, so it always runs on Claude. If a non-Claude
+        # backbone (e.g. Gemini) is selected, fall back to the default Claude
+        # model here — the selected model is still used for the paper chat/assess.
+        pipeline_model = model
+        if model and "gemini" in model.lower():
+            pipeline_model = settings.model
+        self.llm = LLMClient(api_key=api_key, model=pipeline_model)
         self.reformulator = QueryReformulator(self.llm)
         self.searcher = AcademicSearchAgent(self.llm)
         self.extractor = ReaderExtractorAgent(self.llm)
@@ -127,3 +135,4 @@ class SamhitaPipeline:
             if ordered:
                 return ordered
         return run.approved_papers
+

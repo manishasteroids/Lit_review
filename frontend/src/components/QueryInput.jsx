@@ -6,7 +6,7 @@ const BACKBONES = [
   { id: "claude-opus-4-8", label: "Claude Opus 4.8", live: true },
   { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5", live: true },
   { id: "gpt5", label: "OpenAI GPT-5", live: false },
-  { id: "gemini", label: "Gemini 2.5 Pro", live: false },
+  { id: "gemini", label: "Gemini 2.5 flash", live: true },
 ];
 
 const EXAMPLES = [

@@ -70,12 +70,13 @@ export const api = {
   evaluate: (runId, apiKey, model) =>
     request(`/api/runs/${runId}/evaluate`, { api_key: apiKey, model }),
 
-  chatAboutPaper: (runId, paper, question, history, apiKey, model) =>
+  chatAboutPaper: (runId, paper, question, history, apiKey, model, images) =>
     request(`/api/runs/${runId}/chat`, {
       paper_idx: paper?.idx,
       paper,
       question,
       history: history || [],
+      images: images || [],
       api_key: apiKey,
       model,
     }),
