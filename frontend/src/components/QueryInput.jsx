@@ -1,5 +1,6 @@
 import React from "react";
-import { Sparkles, Cpu, Play, ChevronRight } from "./icons.jsx";
+import { Sparkles, Cpu, Play, ChevronRight, Brain } from "./icons.jsx";
+import { tierOf, TIER_META } from "../modelTiers.js";
 
 const BACKBONES = [
   { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", live: true },
@@ -15,11 +16,34 @@ const EXAMPLES = [
   "Single-cell multi-omics integration methods",
 ];
 
+// Colored "thinking depth" indicator — turns red when a heavy deep-thinking
+// model (e.g. Opus) is selected, so the token-cost risk is visible at a glance.
+export function ModelTierBadge({ model, size = 13 }) {
+  const tier = tierOf(model);
+  const meta = TIER_META[tier];
+  return (
+    <span
+      title={`${meta.label} model — ${meta.note}`}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 5,
+        fontFamily: "'JetBrains Mono',monospace", fontSize: 10, fontWeight: 600,
+        color: meta.color, background: meta.bg, borderRadius: 5, padding: "2px 7px",
+      }}
+    >
+      <Brain size={size} color={meta.color} />
+      {meta.label}
+    </span>
+  );
+}
+
 export function ModelBar({ model, setModel, apiKey, setApiKey }) {
   return (
     <div className="backbone">
-      <div className="eyebrow" style={{ display: "flex", gap: 6, alignItems: "center" }}>
-        <Cpu size={11} /> Model layer · swappable backbone
+      <div className="eyebrow" style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <Cpu size={11} /> Model layer · swappable backbone
+        </span>
+        <ModelTierBadge model={model} />
       </div>
       <div className="model-select-wrap">
         <select

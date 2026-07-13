@@ -10,10 +10,11 @@ import CritiqueView from "./components/CritiqueView.jsx";
 import KnowledgeGraphView from "./components/KnowledgeGraphView.jsx";
 import DataAnalysisView from "./components/DataAnalysisView.jsx";
 import EvaluationView from "./components/EvaluationView.jsx";
+import UsageView from "./components/UsageView.jsx";
 import {
   RotateCw, AlertTriangle, Sparkles, PenTool,
   BookOpen, Layers, Brain, Network, BarChart3, FlaskConical,
-  Plus, Trash2,
+  Plus, Trash2, Coins,
 } from "./components/icons.jsx";
 
 // Source icons shown in the progress feed
@@ -30,6 +31,7 @@ const TOOLS = [
   ["graph", Network, "Knowledge graph"],
   ["data", BarChart3, "Data analysis"],
   ["eval", FlaskConical, "Evaluation"],
+  ["usage", Coins, "Token usage"],
 ];
 
 // ── History helpers ──────────────────────────────────────────────
@@ -233,7 +235,10 @@ export default function App() {
 
   // generate the written cited review (Writer agent) on demand.
   async function runWrite() {
-    setBusy(true); setError(null);
+    // switch to the "write" stage so the Writer Agent progress card shows while
+    // the review is being drafted (otherwise the pipeline is already "done" and
+    // no status is visible during generation).
+    setBusy(true); setError(null); setStage("write");
     try {
       const writeRes = await api.write(runId, apiKey || undefined, model, notes);
       setSections(writeRes.sections);
@@ -244,7 +249,7 @@ export default function App() {
     } catch (e) {
       setError({ stage: "Writer Agent", msg: e.message });
     } finally {
-      setBusy(false);
+      setBusy(false); setStage("done");
     }
   }
 
@@ -488,7 +493,7 @@ export default function App() {
                   <h3>{stage === "write" ? "Writer Agent" : "Reader & Extractor / Critic & Synthesizer"}</h3>
                 </div>
                 <div className="muted tiny pulse">
-                  {stage === "write" ? "Drafting cited sections…" : "Extracting structured info and detecting themes/gaps/biases…"}
+                  {stage === "write" ? "Reading your kept papers and drafting the review — introduction, thematic synthesis, gaps, and conclusion…" : "Extracting structured info and detecting themes/gaps/biases…"}
                 </div>
               </div>
             )}
@@ -524,6 +529,7 @@ export default function App() {
                     />
                   )}
                   {tab === "eval" && <EvaluationView evalRes={evalRes} busy={busy} onEvaluate={runEvaluate} />}
+                  {tab === "usage" && <UsageView runId={runId} />}
                 </div>
 
                 <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>

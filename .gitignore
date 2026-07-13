@@ -5,3 +5,13 @@ __pycache__/
 node_modules/
 dist/
 .DS_Store
+
+# test / tooling caches
+.pytest_cache/
+
+# scratch preview images generated when rendering docs
+_v*.jpg
+_nd*.jpg
+
+# local SQLite DB (runtime state — don't commit)
+*.db
