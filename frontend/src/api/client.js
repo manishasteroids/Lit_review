@@ -90,6 +90,9 @@ export const api = {
       model,
     }),
 
+  // Token usage & cost for a session — no LLM calls
+  getUsage: (runId) => fetch(BASE + "/api/sessions/" + runId + "/usage").then((r) => r.json()),
+
   // Session history — no LLM calls
   listSessions: () => fetch(BASE + "/api/sessions").then((r) => r.json()),
   getSession: (id) => fetch(BASE + "/api/sessions/" + id).then((r) => r.json()),
