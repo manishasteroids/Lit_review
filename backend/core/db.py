@@ -96,6 +96,9 @@ def init_db() -> None:
                 data        TEXT NOT NULL
             )
         """)
+    # token/cost ledger lives in its own module but shares this DB
+    from core.usage import init_usage_table
+    init_usage_table()
 
 
 # ── Write ───────────────────────────────────────────────────────────────────

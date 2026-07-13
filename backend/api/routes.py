@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from core.db import delete_session, get_session, list_sessions, save_session
 from core.llm_client import LLMClient
+from core.usage import get_usage
 from pipeline.orchestrator import RUNS, SamhitaPipeline
 
 from core.paper_text import fetch_paper_pdf, fetch_paper_text
@@ -251,7 +252,7 @@ def assess_paper(run_id: str, body: AssessBody):
         f"PAPER: {paper.get('title', '')} ({paper.get('year', '?')})\n"
         f"ABSTRACT: {paper.get('abstract', '') or 'n/a'}"
     )
-    llm = LLMClient(api_key=body.api_key, model=body.model)
+    llm = LLMClient(api_key=body.api_key, model=body.model, run_id=run_id, stage="assess")
     try:
         data = LLMClient.parse_json(llm.call(user_text=user, system=system, max_tokens=400))
     except Exception as e:
@@ -295,7 +296,7 @@ def chat_about_paper(run_id: str, body: ChatBody):
         convo += f"{role}: {m.get('content', '')}\n"
     convo += f"User: {body.question}\nAssistant:"
 
-    llm = LLMClient(api_key=body.api_key, model=body.model)
+    llm = LLMClient(api_key=body.api_key, model=body.model, run_id=run_id, stage="chat")
     pdf_bytes = fetch_paper_pdf(paper.get("url"))
 
     image_blocks = []
@@ -383,6 +384,15 @@ def get_run_state(run_id: str):
 @router.get("/sessions")
 def sessions_list():
     return list_sessions()
+
+
+# ── Token usage & cost (no LLM) ──────────────────────────────────────────
+
+@router.get("/sessions/{session_id}/usage")
+def session_usage(session_id: str):
+    """Token counts + dollar cost for one session, broken down by stage and
+    model. Pure DB read — no model calls."""
+    return get_usage(session_id)
 
 
 @router.get("/sessions/{session_id}")

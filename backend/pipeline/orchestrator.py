@@ -69,8 +69,10 @@ class SamhitaPipeline:
                 on_progress({"step": step, "message": message, "detail": detail})
 
         run = RunState(run_id=str(uuid.uuid4()), topic=topic)
+        self.llm.run_id = run.run_id  # attribute every call below to this session
 
         emit("reformulate", "Query Reformulator is analysing your research question…")
+        self.llm.stage = "reformulate"
         run.reform = self.reformulator.run(topic)
         queries = run.reform.get("queries", [])
         emit("reformulate", f"Expanded into {len(queries)} search strategies", queries)
@@ -78,6 +80,7 @@ class SamhitaPipeline:
         emit("search", "Searching Semantic Scholar…", "semantic_scholar")
         emit("search", "Searching arXiv…", "arxiv")
         emit("search", "Searching PubMed & bioRxiv…", "pubmed")
+        self.llm.stage = "search"
         run.papers = self.searcher.run(topic, queries)
         emit("search", f"Found {len(run.papers)} papers — aggregating results…")
 
@@ -93,13 +96,18 @@ class SamhitaPipeline:
 
     # ---- stage 4+5: extract then critique/synthesize/rank ---------------
     def extract_and_synthesize(self, run: RunState) -> RunState:
+        self.llm.run_id = run.run_id
+        self.llm.stage = "extract"
         run.extractions = self.extractor.run(run.approved_papers)
+        self.llm.stage = "synthesize"
         run.synthesis = self.synthesizer.run(run.extractions)
         run.stage = "write"
         return run
 
     # ---- stage 6: write -----------------------------------------------
     def write(self, run: RunState) -> RunState:
+        self.llm.run_id = run.run_id
+        self.llm.stage = "write"
         ordered = self._ordered_papers(run)
         extractions_by_idx = {e["idx"]: e for e in run.extractions}
         run.sections = self.writer.run(run.topic, ordered, extractions_by_idx, run.synthesis or {})
@@ -108,6 +116,8 @@ class SamhitaPipeline:
 
     # ---- evaluation (open question module) -------------------------------
     def evaluate(self, run: RunState) -> dict:
+        self.llm.run_id = run.run_id
+        self.llm.stage = "evaluate"
         run.eval_result = self.evaluator.run(
             run.topic, run.sections, len(run.approved_papers)
         )
