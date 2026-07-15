@@ -9,6 +9,14 @@ const VERDICT = {
   skip:  { label: "Probably skip",   bg: "rgba(240,138,138,.14)", fg: "#f08a8a" },
 };
 
+// Where the paper record came from - real database vs. model fallback.
+const SOURCE = {
+  semantic_scholar: { label: "Semantic Scholar", fg: "var(--muted)", bg: "var(--panel2)", title: "Verified record from Semantic Scholar" },
+  arxiv:            { label: "arXiv",            fg: "var(--muted)", bg: "var(--panel2)", title: "Verified record from arXiv" },
+  model:            { label: "⚠ unverified",     fg: "#b3261e",      bg: "rgba(240,138,138,.16)", title: "Model-generated (databases unreachable) — verify before citing" },
+  pubmed:           { label: "PubMed",           fg: "var(--muted)", bg: "var(--panel2)", title: "Verified record from PubMed" },
+};
+
 function Kv({ k, v }) {
   if (!v || v === "n/a") return null;
   return (
@@ -49,11 +57,21 @@ export default function PaperFilter({ papers, approved, scope, busy, onToggle, o
       {papers.map((p) => {
         const a = assess[p.idx];
         const v = a?.data?.verdict && VERDICT[a.data.verdict];
+        const src = SOURCE[p.source];
         return (
           <div key={p.idx} className={"paper" + (approved[p.idx] ? "" : " off")}>
             <div className="paper-top">
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div className="paper-title">{p.title}</div>
+                <div className="paper-title">
+                  {p.title}
+                  {src && (
+                    <span title={src.title} style={{
+                      fontFamily: "'JetBrains Mono',monospace", fontSize: 9.5, fontWeight: 500,
+                      padding: "1px 6px", borderRadius: 5, marginLeft: 8, whiteSpace: "nowrap",
+                      background: src.bg, color: src.fg, verticalAlign: "middle",
+                    }}>{src.label}</span>
+                  )}
+                </div>
                 <div className="paper-meta">
                   {p.authors || "—"} · {p.year || "—"} · {p.venue || "preprint"}
                   {p.url ? " · " : ""}

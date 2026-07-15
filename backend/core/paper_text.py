@@ -66,27 +66,67 @@ def _pdf_to_text(data: bytes) -> str:
         return ""
 
 
-def fetch_paper_pdf(url: str | None) -> bytes | None:
-    """Return the raw PDF bytes for a paper URL (open-access only), or None.
+_DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>&]+", re.I)
 
-    Used to hand the actual PDF to a vision model so it can read figures and
-    tables — not just extracted text. Cached per-URL for the process lifetime."""
+
+def _fetch_pdf_bytes(url: str) -> bytes | None:
+    """GET a URL and return the bytes only if it's actually a PDF."""
+    try:
+        with httpx.Client(follow_redirects=True, timeout=TIMEOUT, headers=HEADERS) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            ctype = resp.headers.get("content-type", "").lower()
+            if "pdf" in ctype or url.lower().split("?")[0].endswith(".pdf"):
+                return resp.content
+    except Exception:
+        return None
+    return None
+
+
+def _extract_doi(url: str) -> str | None:
+    m = _DOI_RE.search(url or "")
+    return m.group(0).rstrip(").,;") if m else None
+
+
+def _unpaywall_pdf_url(doi: str) -> str | None:
+    """Ask Unpaywall for an open-access PDF for a DOI (any repository / PMC / publisher OA)."""
+    email = getattr(settings, "unpaywall_email", "") or "research@example.com"
+    try:
+        with httpx.Client(follow_redirects=True, timeout=TIMEOUT, headers=HEADERS) as client:
+            r = client.get(f"https://api.unpaywall.org/v2/{doi}", params={"email": email})
+            r.raise_for_status()
+            j = r.json()
+    except Exception:
+        return None
+    best = j.get("best_oa_location") or {}
+    if best.get("url_for_pdf"):
+        return best["url_for_pdf"]
+    for loc in (j.get("oa_locations") or []):
+        if loc.get("url_for_pdf"):
+            return loc["url_for_pdf"]
+    return None
+
+
+def fetch_paper_pdf(url: str | None) -> bytes | None:
+    """Return the raw PDF bytes for a paper (open-access), or None.
+
+    Tries the link directly (handles arXiv abs→pdf and any .pdf); if that isn't
+    a PDF, resolves an open-access copy via Unpaywall using the DOI. Lets the
+    chat read the WHOLE paper (figures + tables) for far more papers, falling
+    back to text/abstract only when no OA PDF exists anywhere."""
     if not url or not url.startswith(("http://", "https://")):
         return None
     if url in _PDF_CACHE:
         return _PDF_CACHE[url]
 
-    target = _arxiv_pdf_url(url)
-    data: bytes | None = None
-    try:
-        with httpx.Client(follow_redirects=True, timeout=TIMEOUT, headers=HEADERS) as client:
-            resp = client.get(target)
-            resp.raise_for_status()
-            ctype = resp.headers.get("content-type", "").lower()
-            if "pdf" in ctype or target.lower().endswith(".pdf"):
-                data = resp.content
-    except Exception:
-        data = None
+    data = _fetch_pdf_bytes(_arxiv_pdf_url(url))
+
+    if not data:
+        doi = _extract_doi(url)
+        if doi:
+            oa = _unpaywall_pdf_url(doi)
+            if oa:
+                data = _fetch_pdf_bytes(oa)
 
     if data and len(data) > MAX_PDF_BYTES:
         data = None
