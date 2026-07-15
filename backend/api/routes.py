@@ -343,7 +343,7 @@ def chat_about_paper(run_id: str, body: ChatBody):
                 "images); don't invent facts. When asked for a summary, cover objective, method, "
                 "data, key results (with numbers), and limitations."
             )
-            answer = llm.call(content=blocks, system=system, max_tokens=1000)
+            answer = llm.call(content=blocks, system=system, max_tokens=1500)
             source = "+".join(parts) or "abstract"
         else:
             full_text = fetch_paper_text(paper.get("url"))
