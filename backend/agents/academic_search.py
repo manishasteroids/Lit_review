@@ -32,6 +32,8 @@ UA = {"User-Agent": "Samhita-LitReview/1.0 (research assistant)"}
 PUBMED_ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
+OPENALEX_API = "https://api.openalex.org/works"
+
 
 class AcademicSearchAgent(Agent):
     name = "academic_search"
@@ -40,7 +42,7 @@ class AcademicSearchAgent(Agent):
         terms = _uniq([topic, *(queries or [])])[:3]
 
         merged: dict[str, dict] = {}
-        for source in (self._semantic_scholar, self._pubmed, self._arxiv):
+        for source in (self._openalex, self._semantic_scholar, self._pubmed, self._arxiv):
             try:
                 for p in source(terms):
                     key = (p.get("title") or "").strip().lower()
@@ -59,6 +61,36 @@ class AcademicSearchAgent(Agent):
             p["idx"] = i
             p.pop("cites", None)
         return papers
+    
+    def _openalex(self, terms: list[str]) -> list[dict]:
+        email = getattr(settings, "unpaywall_email", "") or "research@example.com"
+        out = []
+        with httpx.Client(timeout=25, headers=UA) as client:
+            for q in terms[:2]:
+                try:
+                    r = client.get(OPENALEX_API, params={"search": q, "per_page": 15, "mailto": email})
+                    r.raise_for_status()
+                    results = r.json().get("results") or []
+                except Exception:
+                    continue
+                for w in results:
+                    title = _clean(w.get("title") or w.get("display_name") or "")
+                    if not title:
+                        continue
+                    names = [(a.get("author") or {}).get("display_name") for a in (w.get("authorships") or [])]
+                    src = (w.get("primary_location") or {}).get("source") or {}
+                    oa = w.get("open_access") or {}
+                    out.append({
+                        "title": title,
+                        "authors": _fmt_authors(names),
+                        "year": w.get("publication_year"),
+                        "venue": _clean(src.get("display_name") or ""),
+                        "url": oa.get("oa_url") or w.get("doi") or w.get("id") or "",
+                        "abstract": _reconstruct_abstract(w.get("abstract_inverted_index")),
+                        "cites": w.get("cited_by_count") or 0,
+                        "source": "openalex",
+                    })
+        return out
 
     def _semantic_scholar(self, terms: list[str]) -> list[dict]:
         headers = dict(UA)
@@ -210,6 +242,15 @@ def _uniq(items: list[str]) -> list[str]:
 
 def _clean(s: str) -> str:
     return " ".join((s or "").split())
+
+def _reconstruct_abstract(inv: dict) -> str:
+    """OpenAlex returns abstracts as an inverted index {word: [positions]}."""
+    if not inv:
+        return ""
+    positions = [(pos, word) for word, idxs in inv.items() for pos in idxs]
+    positions.sort()
+    return _clean(" ".join(word for _, word in positions))
+
 
 def _parse_pubmed_article(art) -> dict | None:
     def _itext(el) -> str:
