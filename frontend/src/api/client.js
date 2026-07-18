@@ -1,9 +1,17 @@
+import { getAccessToken } from "../supabase.js";
+
 const BASE = import.meta.env.VITE_API_BASE || "http://localhost:8015";
+
+// Attach the signed-in user's token so the backend scopes data to them.
+async function authHeaders(extra = {}) {
+  const token = await getAccessToken();
+  return token ? { ...extra, Authorization: `Bearer ${token}` } : extra;
+}
 
 async function request(path, body) {
   const res = await fetch(BASE + path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body || {}),
   });
   if (!res.ok) {
@@ -25,7 +33,7 @@ async function request(path, body) {
 async function streamRun(topic, apiKey, model, onEvent) {
   const res = await fetch(BASE + "/api/runs/stream", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ topic, api_key: apiKey || undefined, model }),
   });
   if (!res.ok) {
@@ -54,7 +62,7 @@ async function streamRun(topic, apiKey, model, onEvent) {
   }
 }
 
-/* One function per pipeline stage — mirrors backend/api/routes.py 1:1 */
+/* One function per pipeline stage â€” mirrors backend/api/routes.py 1:1 */
 export const api = {
   createRunStream: streamRun,
 
@@ -81,7 +89,7 @@ export const api = {
       model,
     }),
 
-    assessPaper: (runId, paper, scope, apiKey, model) =>
+  assessPaper: (runId, paper, scope, apiKey, model) =>
     request(`/api/runs/${runId}/assess`, {
       paper_idx: paper?.idx,
       paper,
@@ -90,11 +98,13 @@ export const api = {
       model,
     }),
 
-  // Token usage & cost for a session — no LLM calls
-  getUsage: (runId) => fetch(BASE + "/api/sessions/" + runId + "/usage").then((r) => r.json()),
-
-  // Session history — no LLM calls
-  listSessions: () => fetch(BASE + "/api/sessions").then((r) => r.json()),
-  getSession: (id) => fetch(BASE + "/api/sessions/" + id).then((r) => r.json()),
-  deleteSession: (id) => fetch(BASE + "/api/sessions/" + id, { method: "DELETE" }).then((r) => r.json()),
+  // Session history â€” no LLM calls
+  listSessions: async () =>
+    fetch(BASE + "/api/sessions", { headers: await authHeaders() }).then((r) => r.json()),
+  getSession: async (id) =>
+    fetch(BASE + "/api/sessions/" + id, { headers: await authHeaders() }).then((r) => r.json()),
+  deleteSession: async (id) =>
+    fetch(BASE + "/api/sessions/" + id, { method: "DELETE", headers: await authHeaders() }).then((r) => r.json()),
+  deleteAllSessions: async () =>
+    fetch(BASE + "/api/sessions", { method: "DELETE", headers: await authHeaders() }).then((r) => r.json()),
 };

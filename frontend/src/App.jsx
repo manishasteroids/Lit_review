@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { api } from "./api/client.js";
-
+import { ensureAuth, AuthButtons, useSession } from "./Auth.jsx";
+import { authEnabled } from "./supabase.js";
+ 
 import PipelineRail from "./components/PipelineRail.jsx";
 import QueryInput, { ModelBar } from "./components/QueryInput.jsx";
 import PaperFilter from "./components/PaperFilter.jsx";
@@ -16,14 +18,14 @@ import {
   BookOpen, Layers, Brain, Network, BarChart3, FlaskConical,
   Plus, Trash2, Coins,
 } from "./components/icons.jsx";
-
+ 
 // Source icons shown in the progress feed
 const SOURCE_ICON = {
   semantic_scholar: "🔬",
   arxiv: "📄",
   pubmed: "🧬",
 };
-
+ 
 const TOOLS = [
   ["review", BookOpen, "Review"],
   ["sources", Layers, "Sources"],
@@ -33,7 +35,7 @@ const TOOLS = [
   ["eval", FlaskConical, "Evaluation"],
   ["usage", Coins, "Token usage"],
 ];
-
+ 
 // ── History helpers ──────────────────────────────────────────────
 function relativeTime(iso) {
   if (!iso) return "";
@@ -44,7 +46,7 @@ function relativeTime(iso) {
   if (diff < 2592000) return Math.floor(diff / 86400) + "d ago";
   return new Date(iso).toLocaleDateString();
 }
-
+ 
 function groupSessions(sessions) {
   const now = Date.now();
   const buckets = { Today: [], Yesterday: [], "This week": [], Older: [] };
@@ -57,7 +59,7 @@ function groupSessions(sessions) {
   }
   return buckets;
 }
-
+ 
 // Inline styles for the History list (no extra CSS needed)
 const H = {
   head: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
@@ -77,9 +79,15 @@ const H = {
   badgeDone: { background: "var(--green-soft)", color: "var(--green)" },
   badgeFilter: { background: "rgba(224,163,62,.14)", color: "var(--amber)" },
   foot: { marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--line)", fontFamily: "'JetBrains Mono',monospace", fontSize: 9.5, color: "var(--muted2)", lineHeight: 1.5 },
+  // Signed-out history prompt (SciSpace-style)
+  loginCard: { border: "1px solid var(--line)", borderRadius: 10, padding: "12px 12px 13px", background: "var(--indigo-soft)" },
+  loginText: { fontSize: 12, color: "var(--txt)", lineHeight: 1.5, marginBottom: 10 },
 };
-
+ 
 export default function App() {
+  const session = useSession();
+  const signedOut = authEnabled && !session;
+ 
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("claude-sonnet-4-6");
   const [topic, setTopic] = useState("");
@@ -87,9 +95,9 @@ export default function App() {
   const [done, setDone] = useState({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-
+ 
   const [notes, setNotes] = useState({}); // paper idx -> note text
-
+ 
   const [runId, setRunId] = useState(null);
   const [reform, setReform] = useState(null);
   const [papers, setPapers] = useState([]);
@@ -102,28 +110,31 @@ export default function App() {
   const [tab, setTab] = useState("review");
   const reviewRef = useRef(null);
   const isDone = stage === "done";
-
+ 
   // Live progress messages during search
   const [progressMsgs, setProgressMsgs] = useState([]);
-
+ 
   // Session list from backend (no LLM) + delete-confirm state
   const [sessions, setSessions] = useState([]);
   const [confirmId, setConfirmId] = useState(null);
-
+ 
+  // History is per-user: skip the fetch entirely while signed out.
   const refreshSessions = useCallback(() => {
-    api.listSessions().then(setSessions).catch(() => {});
-  }, []);
-
+    if (signedOut) { setSessions([]); return; }
+    api.listSessions()
+      .then((d) => setSessions(Array.isArray(d) ? d : []))
+      .catch(() => {});
+  }, [signedOut]);
+ 
   useEffect(() => { refreshSessions(); }, [refreshSessions]);
-
+ 
   function reset() {
     setRunId(null); setReform(null); setPapers([]); setApproved({});
     setExtractions([]); setSynth(null); setSections({}); setSideModules(null);
     setEvalRes(null); setError(null); setDone({}); setStage("query");
-    setTab("review"); setProgressMsgs([]);
     setTab("review"); setProgressMsgs([]); setNotes({});
   }
-
+ 
   // Restore a session — zero LLM calls
   async function restoreSession(sessionId) {
     if (busy) return;
@@ -156,12 +167,12 @@ export default function App() {
       setError({ stage: "Session restore", msg: e.message });
     }
   }
-
+ 
   async function deleteSession(id) {
     await api.deleteSession(id);
     refreshSessions();
   }
-
+ 
   const approvedList = papers.filter((p) => approved[p.idx]);
   const citeOrder = approvedList.length
     ? (synth?.ranked?.length
@@ -170,8 +181,11 @@ export default function App() {
     : [];
   const citeNum = {};
   citeOrder.forEach((p, i) => (citeNum[p.idx] = i + 1));
-
+ 
   async function runStart() {
+    // Gated action: anyone can browse, but running the pipeline needs an account.
+    if (!(await ensureAuth())) return;
+ 
     setBusy(true); setError(null); setStage("reformulate"); setProgressMsgs([]);
     try {
       const res = await api.createRunStream(
@@ -206,7 +220,7 @@ export default function App() {
       setBusy(false);
     }
   }
-
+ 
   async function runApprove() {
     const approvedIndices = Object.entries(approved).filter(([, v]) => v).map(([k]) => Number(k));
     if (approvedIndices.length < 2) {
@@ -232,7 +246,7 @@ export default function App() {
       setBusy(false);
     }
   }
-
+ 
   // generate the written cited review (Writer agent) on demand.
   async function runWrite() {
     // switch to the "write" stage so the Writer Agent progress card shows while
@@ -252,7 +266,7 @@ export default function App() {
       setBusy(false); setStage("done");
     }
   }
-
+ 
   async function runEvaluate() {
     setBusy(true); setError(null);
     try {
@@ -264,7 +278,7 @@ export default function App() {
       setBusy(false);
     }
   }
-
+ 
   function download(filename, text, type = "text/plain;charset=utf-8") {
     const blob = new Blob([text], { type });
     const url = URL.createObjectURL(blob);
@@ -272,7 +286,7 @@ export default function App() {
     a.href = url; a.download = filename; a.click();
     URL.revokeObjectURL(url);
   }
-
+ 
   function exportShortlist(fmt) {
     const extByIdx = {};
     (extractions || []).forEach((e) => (extByIdx[e.idx] = e));
@@ -280,7 +294,7 @@ export default function App() {
       n: i + 1, ...p, ...(extByIdx[p.idx] || {}), note: notes[p.idx] || "",
     }));
     const slug = (topic || "shortlist").replace(/[^\w]+/g, "-").slice(0, 40).replace(/^-|-$/g, "") || "shortlist";
-
+ 
     if (fmt === "md") {
       let md = `# Literature shortlist — ${topic}\n\n_${rows.length} papers_\n\n`;
       rows.forEach((r) => {
@@ -317,13 +331,13 @@ export default function App() {
       download(`${slug}.bib`, bib, "application/x-bibtex;charset=utf-8");
     }
   }
-
+ 
   const grouped = groupSessions(sessions);
-
+ 
   return (
     <div className="sm-root">
       <div className="sm-wrap wide">
-        <div className="sm-head">
+        <div className="sm-head" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 20 }}>
           <div>
             <div className="eyebrow" style={{ marginBottom: 8 }}>Multi-agent literature review · live pipeline</div>
             <div className="sm-title"><b>Saṃhitā</b> <span style={{ color: "var(--muted)", fontWeight: 400 }}>/ lit-review agent</span></div>
@@ -332,8 +346,26 @@ export default function App() {
               search the live web, filter sources, extract, critique, and write a cited review.
             </div>
           </div>
+          <div style={{ flexShrink: 0, paddingTop: 4 }}>
+            <AuthButtons
+              extraItems={[{
+                label: "Delete all my data",
+                danger: true,
+                onClick: async () => {
+                  if (!window.confirm("Permanently delete all your saved runs? This cannot be undone.")) return;
+                  try {
+                    await api.deleteAllSessions();
+                    reset(); setTopic("");
+                    refreshSessions();
+                  } catch (e) {
+                    setError({ stage: "Delete data", msg: e.message });
+                  }
+                },
+              }]}
+            />
+          </div>
         </div>
-
+ 
         <div className="grid3">
           {/* LEFT: Tools + History */}
           <div className="lcol">
@@ -350,7 +382,7 @@ export default function App() {
                 </button>
               ))}
             </div>
-
+ 
             <div className="panel">
               <div style={H.head}>
                 <span className="eyebrow">History</span>
@@ -363,8 +395,17 @@ export default function App() {
                   <Plus size={14} />
                 </button>
               </div>
-
-              {sessions.length === 0 ? (
+ 
+              {signedOut ? (
+                <div style={H.loginCard}>
+                  <div style={H.loginText}>
+                    Log in to save your runs and access your history and library.
+                  </div>
+                  <button className="btn sm" style={{ width: "100%" }} onClick={() => ensureAuth()}>
+                    Log in
+                  </button>
+                </div>
+              ) : sessions.length === 0 ? (
                 <div style={H.empty}>No runs yet. Run a search to start.</div>
               ) : (
                 <div style={H.scroll}>
@@ -410,17 +451,21 @@ export default function App() {
                   ))}
                 </div>
               )}
-
-              <div style={H.foot}>Sessions saved locally · no LLM needed to restore</div>
+ 
+              <div style={H.foot}>
+                {signedOut
+                  ? "Your runs are saved to your account · nothing is stored while signed out"
+                  : "Sessions saved to your account · no LLM needed to restore"}
+              </div>
             </div>
           </div>
-
+ 
           {/* CENTER: Model selection + prompt / stage content */}
           <div className="ccol">
             <div style={{ marginBottom: 16, display: "flex", justifyContent: "flex-end" }}>
               <ModelBar model={model} setModel={setModel} apiKey={apiKey} setApiKey={setApiKey} />
             </div>
-
+ 
             {error && (
               <div className="err" style={{ marginBottom: 16 }}>
                 <AlertTriangle size={18} style={{ flex: "0 0 18px", marginTop: 1 }} />
@@ -434,9 +479,9 @@ export default function App() {
                 </div>
               </div>
             )}
-
+ 
             {stage === "query" && <QueryInput topic={topic} setTopic={setTopic} busy={busy} onRun={runStart} />}
-
+ 
             {busy && (stage === "reformulate" || stage === "search") && (
               <div className="card">
                 <div className="card-h">
@@ -468,7 +513,7 @@ export default function App() {
                 </div>
               </div>
             )}
-
+ 
             {stage === "filter" && papers.length > 0 && (
               <PaperFilter
                 papers={papers}
@@ -485,7 +530,7 @@ export default function App() {
                 onNote={(idx, text) => setNotes((n) => ({ ...n, [idx]: text }))}
               />
             )}
-
+ 
             {busy && (stage === "extract" || stage === "synthesize" || stage === "write") && (
               <div className="card">
                 <div className="card-h">
@@ -497,7 +542,7 @@ export default function App() {
                 </div>
               </div>
             )}
-
+ 
             {isDone && (
               <div ref={reviewRef}>
                 <div className="card">
@@ -531,7 +576,7 @@ export default function App() {
                   {tab === "eval" && <EvaluationView evalRes={evalRes} busy={busy} onEvaluate={runEvaluate} />}
                   {tab === "usage" && <UsageView runId={runId} />}
                 </div>
-
+ 
                 <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>
                   <button className="btn ghost" onClick={() => { const old = topic; reset(); setTopic(old); }}>
                     <RotateCw size={14} /> New run
@@ -546,14 +591,14 @@ export default function App() {
                 </div>
               </div>
             )}
-
+ 
             <div className="foot">
               Talks to the Saṃhitā backend (FastAPI) running at the address in <code>VITE_API_BASE</code>.
               The Anthropic key lives server-side by default — only paste one above if you want to
               override the server's key for this run.
             </div>
           </div>
-
+ 
           {/* Agent Pipeline status */}
           <div className="rcol">
             <PipelineRail

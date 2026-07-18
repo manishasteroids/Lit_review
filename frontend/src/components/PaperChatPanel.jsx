@@ -1,6 +1,12 @@
 import React, { useState, useRef, useEffect } from "react";
 import { api } from "../api/client.js";
 
+import { marked } from "marked";
+import DOMPurify from "dompurify";
+
+marked.setOptions({ breaks: true });
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;  // 5 MB per attached image
+
 export default function PaperChatPanel({ runId, paper, cite, apiKey, model, onClose }) {
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
@@ -11,7 +17,6 @@ export default function PaperChatPanel({ runId, paper, cite, apiKey, model, onCl
 
   const storeKey = `samhita-chat:${runId}:${paper?.idx}`;
 
-  // Load this paper's saved chat when the panel opens / paper changes.
   useEffect(() => {
     setDraft(""); setImages([]);
     try {
@@ -23,13 +28,11 @@ export default function PaperChatPanel({ runId, paper, cite, apiKey, model, onCl
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId, paper?.idx]);
 
-  // Persist the chat so it survives a refresh.
   useEffect(() => {
     if (!paper) return;
     try {
       localStorage.setItem(storeKey, JSON.stringify(messages));
     } catch {
-      // quota exceeded (big images) — save text-only as a fallback
       try {
         localStorage.setItem(storeKey, JSON.stringify(messages.map((m) => ({ role: m.role, content: m.content }))));
       } catch { /* give up quietly */ }
@@ -45,6 +48,10 @@ export default function PaperChatPanel({ runId, paper, cite, apiKey, model, onCl
     const files = Array.from(e.target.files || []);
     files.forEach((f) => {
       if (!f.type.startsWith("image/")) return;
+      if (f.size > MAX_IMAGE_BYTES) {
+        alert(`"${f.name}" is too large (max 5 MB).`);
+        return;
+      }
       const reader = new FileReader();
       reader.onload = () => {
         const dataUrl = String(reader.result);         // data:image/png;base64,XXXX
@@ -106,7 +113,9 @@ export default function PaperChatPanel({ runId, paper, cite, apiKey, model, onCl
                   ))}
                 </div>
               )}
-              {m.content}
+              {m.role === "assistant" && m.content
+                ? <div className="chat-md" dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(marked.parse(m.content)) }} />
+                : m.content}
             </div>
           ))}
           {sending && <div className="chat-msg assistant chat-hint">thinking…</div>}
