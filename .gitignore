@@ -1,9 +1,18 @@
+# Python
 __pycache__/
 *.pyc
 .venv/
+
+# local env
 .env
+.env.*
+!.env.example
+
+# Node / build output
 node_modules/
 dist/
+
+# OS / editor
 .DS_Store
 
 # test / tooling caches
@@ -13,5 +22,7 @@ dist/
 _v*.jpg
 _nd*.jpg
 
-# local SQLite DB (runtime state — don't commit)
+# Local databases
 *.db
+*.sqlite
+*.sqlite3

@@ -6,6 +6,10 @@ from html.parser import HTMLParser
 
 import httpx
 
+import ipaddress
+import socket
+from urllib.parse import urlparse
+
 _CACHE: dict[str, str | None] = {}
 _PDF_CACHE: dict[str, bytes | None] = {}
 MAX_CHARS = 40_000          # ~10k tokens; keeps text prompts affordable
@@ -13,6 +17,30 @@ MAX_PDF_BYTES = 25_000_000  # stay under Anthropic's PDF request limit
 TIMEOUT = 25.0
 HEADERS = {"User-Agent": "Samhita-LitReview/1.0 (research assistant)"}
 
+
+def _is_safe_url(url: str | None) -> bool:
+    """SSRF guard: allow only http(s) URLs whose host resolves to a public IP."""
+    if not url:
+        return False
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False
+    if p.scheme not in ("http", "https") or not p.hostname:
+        return False
+    try:
+        infos = socket.getaddrinfo(p.hostname, None)
+    except Exception:
+        return False
+    for info in infos:
+        try:
+            addr = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast or addr.is_unspecified):
+            return False
+    return True
 
 def _arxiv_pdf_url(url: str) -> str:
     """Turn an arXiv abstract link into its PDF link (full text lives there)."""
@@ -71,6 +99,8 @@ _DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>&]+", re.I)
 
 def _fetch_pdf_bytes(url: str) -> bytes | None:
     """GET a URL and return the bytes only if it's actually a PDF."""
+    if not _is_safe_url(url):
+        return None
     try:
         with httpx.Client(follow_redirects=True, timeout=TIMEOUT, headers=HEADERS) as client:
             resp = client.get(url)
@@ -142,6 +172,9 @@ def fetch_paper_text(url: str | None) -> str | None:
         return _CACHE[url]
 
     target = _arxiv_pdf_url(url)
+    if not _is_safe_url(target):
+        _CACHE[url] = None
+        return None
     text: str | None = None
     try:
         with httpx.Client(follow_redirects=True, timeout=TIMEOUT, headers=HEADERS) as client:

@@ -88,6 +88,7 @@ def init_db() -> None:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id          TEXT PRIMARY KEY,
+                user_id     TEXT,
                 topic       TEXT NOT NULL,
                 stage       TEXT NOT NULL,
                 paper_count INTEGER DEFAULT 0,
@@ -96,9 +97,15 @@ def init_db() -> None:
                 data        TEXT NOT NULL
             )
         """)
-    # token/cost ledger lives in its own module but shares this DB
-    from core.usage import init_usage_table
-    init_usage_table()
+        # Upgrade older databases that predate the user_id column.
+        try:
+            conn.execute("ALTER TABLE sessions ADD COLUMN user_id TEXT")
+        except Exception:
+            pass
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id)")
+        except Exception:
+            pass
 
 
 # ── Write ───────────────────────────────────────────────────────────────────
@@ -109,15 +116,16 @@ def save_session(
     stage: str,
     paper_count: int,
     data: dict,
+    user_id: str,
     created_at: Optional[str] = None,
 ) -> None:
-    """Insert or update a session. No LLM calls needed to restore later."""
+    """Insert or update a session owned by user_id. No LLM calls to restore."""
     now = datetime.now(timezone.utc).isoformat()
     created = created_at or now
     ph = _PH
     sql = f"""
-        INSERT INTO sessions (id, topic, stage, paper_count, created_at, updated_at, data)
-        VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+        INSERT INTO sessions (id, user_id, topic, stage, paper_count, created_at, updated_at, data)
+        VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
         ON CONFLICT(id) DO UPDATE SET
             stage       = excluded.stage,
             paper_count = excluded.paper_count,
@@ -125,31 +133,43 @@ def save_session(
             data        = excluded.data
     """
     with _conn() as conn:
-        conn.execute(sql, (session_id, topic, stage, paper_count, created, now, json.dumps(data)))
+        conn.execute(sql, (session_id, user_id, topic, stage, paper_count, created, now, json.dumps(data)))
 
 
-def delete_session(session_id: str) -> None:
+def delete_session(session_id: str, user_id: str) -> None:
     with _conn() as conn:
-        conn.execute(f"DELETE FROM sessions WHERE id = {_PH}", (session_id,))
+        conn.execute(
+            f"DELETE FROM sessions WHERE id = {_PH} AND user_id = {_PH}",
+            (session_id, user_id),
+        )
+
+
+def delete_all_for_user(user_id: str) -> int:
+    """Delete every session owned by a user (data-deletion control)."""
+    with _conn() as conn:
+        cur = conn.execute(f"DELETE FROM sessions WHERE user_id = {_PH}", (user_id,))
+        return cur.rowcount if cur.rowcount is not None else 0
 
 
 # ── Read ────────────────────────────────────────────────────────────────────
 
-def list_sessions() -> list[dict]:
-    """Summary rows only — no data blob. No LLM calls."""
+def list_sessions(user_id: str) -> list[dict]:
+    """Summary rows for one user only — no data blob. No LLM calls."""
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT id, topic, stage, paper_count, created_at, updated_at "
-            "FROM sessions ORDER BY updated_at DESC"
+            f"SELECT id, topic, stage, paper_count, created_at, updated_at "
+            f"FROM sessions WHERE user_id = {_PH} ORDER BY updated_at DESC",
+            (user_id,),
         ).fetchall()
     return [_row_to_dict(r) for r in rows]
 
 
-def get_session(session_id: str) -> Optional[dict]:
-    """Full session data for UI restore. No LLM calls."""
+def get_session(session_id: str, user_id: str) -> Optional[dict]:
+    """Full session data for UI restore — only if owned by user_id. No LLM calls."""
     with _conn() as conn:
         row = conn.execute(
-            f"SELECT * FROM sessions WHERE id = {_PH}", (session_id,)
+            f"SELECT * FROM sessions WHERE id = {_PH} AND user_id = {_PH}",
+            (session_id, user_id),
         ).fetchone()
     if not row:
         return None
