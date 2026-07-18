@@ -1,13 +1,13 @@
 import { getAccessToken } from "../supabase.js";
-
+ 
 const BASE = import.meta.env.VITE_API_BASE || "http://localhost:8015";
-
+ 
 // Attach the signed-in user's token so the backend scopes data to them.
 async function authHeaders(extra = {}) {
   const token = await getAccessToken();
   return token ? { ...extra, Authorization: `Bearer ${token}` } : extra;
 }
-
+ 
 async function request(path, body) {
   const res = await fetch(BASE + path, {
     method: "POST",
@@ -24,7 +24,7 @@ async function request(path, body) {
   }
   return res.json();
 }
-
+ 
 /**
  * Stream progress events from the search stage via SSE.
  * onEvent(event) is called for each parsed event object.
@@ -41,11 +41,11 @@ async function streamRun(topic, apiKey, model, onEvent) {
     try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
     throw new Error(detail);
   }
-
+ 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-
+ 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -61,23 +61,35 @@ async function streamRun(topic, apiKey, model, onEvent) {
     }
   }
 }
-
-/* One function per pipeline stage â€” mirrors backend/api/routes.py 1:1 */
+ 
+/* One function per pipeline stage — mirrors backend/api/routes.py 1:1 */
 export const api = {
   createRunStream: streamRun,
-
+ 
   filterPapers: (runId, approvedIndices) =>
     request(`/api/runs/${runId}/filter`, { approved_indices: approvedIndices }),
-
+ 
   synthesize: (runId, apiKey, model, notes) =>
     request(`/api/runs/${runId}/synthesize`, { api_key: apiKey, model, notes }),
-
+ 
   write: (runId, apiKey, model, notes) =>
     request(`/api/runs/${runId}/write`, { api_key: apiKey, model, notes }),
-
+ 
   evaluate: (runId, apiKey, model) =>
     request(`/api/runs/${runId}/evaluate`, { api_key: apiKey, model }),
-
+ 
+  // Sources-page editing
+  resolvePaper: (runId, identifier) =>
+    request(`/api/runs/${runId}/resolve`, { identifier }),
+ 
+  addPaper: (runId, paper, apiKey, model, notes) =>
+    request(`/api/runs/${runId}/add_paper`, { paper, api_key: apiKey, model, notes }),
+ 
+  reanalyze: (runId, includedIndices, apiKey, model, notes) =>
+    request(`/api/runs/${runId}/reanalyze`, {
+      included_indices: includedIndices, api_key: apiKey, model, notes,
+    }),
+ 
   chatAboutPaper: (runId, paper, question, history, apiKey, model, images) =>
     request(`/api/runs/${runId}/chat`, {
       paper_idx: paper?.idx,
@@ -88,7 +100,7 @@ export const api = {
       api_key: apiKey,
       model,
     }),
-
+ 
   assessPaper: (runId, paper, scope, apiKey, model) =>
     request(`/api/runs/${runId}/assess`, {
       paper_idx: paper?.idx,
@@ -97,8 +109,8 @@ export const api = {
       api_key: apiKey,
       model,
     }),
-
-  // Session history â€” no LLM calls
+ 
+  // Session history — no LLM calls
   listSessions: async () =>
     fetch(BASE + "/api/sessions", { headers: await authHeaders() }).then((r) => r.json()),
   getSession: async (id) =>

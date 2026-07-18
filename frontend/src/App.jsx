@@ -111,6 +111,11 @@ export default function App() {
   const reviewRef = useRef(null);
   const isDone = stage === "done";
  
+  // Editable Sources state (post-synthesis): which papers are included, and
+  // whether the downstream analysis (synth/critique/graph/data/draft) is stale.
+  const [included, setIncluded] = useState({}); // idx -> bool
+  const [analysisStale, setAnalysisStale] = useState(false);
+ 
   // Live progress messages during search
   const [progressMsgs, setProgressMsgs] = useState([]);
  
@@ -133,6 +138,7 @@ export default function App() {
     setExtractions([]); setSynth(null); setSections({}); setSideModules(null);
     setEvalRes(null); setError(null); setDone({}); setStage("query");
     setTab("review"); setProgressMsgs([]); setNotes({});
+    setIncluded({}); setAnalysisStale(false);
   }
  
   // Restore a session — zero LLM calls
@@ -155,6 +161,10 @@ export default function App() {
         setSections(secs);
         setSideModules(d.sideModules || null);
         setNotes(d.notes || {});
+        const inc = {};
+        Object.entries(d.approved || {}).forEach(([k, v]) => { if (v) inc[Number(k)] = true; });
+        setIncluded(inc);
+        setAnalysisStale(false);
         setDone({ query: true, reformulate: true, search: true, extract: true, synthesize: true, write: hasReview });
         setStage("done");
         setTab(hasReview ? "review" : "sources");
@@ -173,12 +183,22 @@ export default function App() {
     refreshSessions();
   }
  
-  const approvedList = papers.filter((p) => approved[p.idx]);
-  const citeOrder = approvedList.length
-    ? (synth?.ranked?.length
-        ? synth.ranked.map((r) => approvedList.find((p) => p.idx === r.idx)).filter(Boolean)
-        : approvedList)
-    : [];
+  const includedPapers = papers.filter((p) => included[p.idx]);
+  let citeOrder;
+  if (!includedPapers.length) {
+    citeOrder = [];
+  } else if (synth?.ranked?.length) {
+    // Ranked papers first, then any included papers not yet in the ranking
+    // (e.g. a just-added paper) appended — so they show before Update analysis.
+    const ranked = synth.ranked
+      .map((r) => includedPapers.find((p) => p.idx === r.idx))
+      .filter(Boolean);
+    const rankedIdx = new Set(ranked.map((p) => p.idx));
+    const rest = includedPapers.filter((p) => !rankedIdx.has(p.idx));
+    citeOrder = [...ranked, ...rest];
+  } else {
+    citeOrder = includedPapers;
+  }
   const citeNum = {};
   citeOrder.forEach((p, i) => (citeNum[p.idx] = i + 1));
  
@@ -235,6 +255,10 @@ export default function App() {
       setExtractions(synRes.extractions);
       setSynth(synRes.synthesis);
       setSideModules(synRes.side_modules);
+      // Everything approved at the filter stage starts "included" on the Sources page.
+      const inc = {}; approvedIndices.forEach((i) => (inc[i] = true));
+      setIncluded(inc);
+      setAnalysisStale(false);
       setDone((d) => ({ ...d, extract: true, synthesize: true }));
       setStage("done");
       setTab("sources");
@@ -242,6 +266,52 @@ export default function App() {
       setTimeout(() => reviewRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
     } catch (e) {
       setError({ stage: "Reader & Extractor / Critic & Synthesizer", msg: e.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+ 
+  // ── Sources page editing ────────────────────────────────────────────
+  function removeSources(indices) {
+    setIncluded((prev) => {
+      const n = { ...prev };
+      indices.forEach((i) => { n[i] = false; });
+      return n;
+    });
+    setAnalysisStale(true);
+  }
+ 
+  async function addPaperToSources(paper) {
+    const res = await api.addPaper(runId, paper, apiKey || undefined, model, notes);
+    const np = { ...res.paper, added: true };
+    setPapers((prev) => [...prev, np]);
+    if (res.extraction) {
+      setExtractions((prev) => [...prev.filter((e) => e.idx !== np.idx), res.extraction]);
+    }
+    setIncluded((prev) => ({ ...prev, [np.idx]: true }));
+    setAnalysisStale(true);
+    refreshSessions();
+    return np;
+  }
+ 
+  async function reanalyzeSources() {
+    const includedIndices = papers.filter((p) => included[p.idx]).map((p) => p.idx);
+    if (includedIndices.length < 1) {
+      setError({ stage: "Update analysis", msg: "Include at least one source." });
+      return;
+    }
+    setBusy(true); setError(null);
+    try {
+      const r = await api.reanalyze(runId, includedIndices, apiKey || undefined, model, notes);
+      setExtractions(r.extractions);
+      setSynth(r.synthesis);
+      setSideModules(r.side_modules);
+      setSections(r.sections || {});
+      setDone((d) => ({ ...d, write: Object.keys(r.sections || {}).length > 0 }));
+      setAnalysisStale(false);
+      refreshSessions();
+    } catch (e) {
+      setError({ stage: "Update analysis", msg: e.message });
     } finally {
       setBusy(false);
     }
@@ -558,13 +628,28 @@ export default function App() {
                             other tools. If you'd like, the Writer agent can draft a cited literature
                             review from your kept papers.
                           </div>
-                          <button className="btn" disabled={busy} onClick={runWrite}>
+                          <button className="btn" disabled={busy || analysisStale} onClick={runWrite}>
                             <PenTool size={15} /> Generate cited review
                           </button>
+                          {analysisStale && (
+                            <div className="muted tiny" style={{ marginTop: 10 }}>
+                              Update the analysis on the Sources tab first.
+                            </div>
+                          )}
                         </div>
                       )
                   )}
-                  {tab === "sources" && <SourcesView citeOrder={citeOrder} extractions={extractions} runId={runId} apiKey={apiKey} model={model} />}
+                  {tab === "sources" && (
+                    <SourcesView
+                      citeOrder={citeOrder} extractions={extractions}
+                      runId={runId} apiKey={apiKey} model={model}
+                      papers={papers} included={included} scope={reform?.scope}
+                      analysisStale={analysisStale} busy={busy}
+                      onRemove={removeSources} onAdd={addPaperToSources}
+                      onReanalyze={reanalyzeSources} onGenerate={runWrite}
+                      hasReview={Object.keys(sections || {}).length > 0}
+                    />
+                  )}
                   {tab === "critique" && <CritiqueView synth={synth} />}
                   {tab === "graph" && <KnowledgeGraphView concepts={sideModules?.knowledge_graph} citeNum={citeNum} />}
                   {tab === "data" && (
