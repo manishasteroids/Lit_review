@@ -5,22 +5,23 @@ frontend's pipeline rail can light up node by node as each call returns.
 import asyncio
 import base64
 import json
+import re
 from datetime import datetime, timezone
-
+ 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-
+ 
 from core.auth import require_user
 from core.db import (delete_all_for_user, delete_session, get_session,
                      list_sessions, save_session)
 from core.llm_client import LLMClient
 from core.paper_text import fetch_paper_pdf, fetch_paper_text
 from pipeline.orchestrator import RUNS, RunState, SamhitaPipeline
-
+ 
 router = APIRouter(prefix="/api")
-
-
+ 
+ 
 def get_run(run_id: str, user_id: str):
     run = RUNS.get(run_id)
     if run:
@@ -33,10 +34,10 @@ def get_run(run_id: str, user_id: str):
     d = s.get("data") or {}
     approved = d.get("approved") or {}
     papers = d.get("papers") or []
-
+ 
     def _approved(idx):
         return bool(approved.get(str(idx)) or approved.get(idx))
-
+ 
     run = RunState(
         run_id=run_id,
         topic=d.get("topic", ""),
@@ -50,26 +51,26 @@ def get_run(run_id: str, user_id: str):
     )
     RUNS[run_id] = run
     return run
-
-
+ 
+ 
 # ── Pydantic bodies ────────────────────────────────────────────────────────
-
+ 
 class CreateRunBody(BaseModel):
     topic: str
     api_key: str | None = None
     model: str | None = None
-
-
+ 
+ 
 class FilterBody(BaseModel):
     approved_indices: list[int]
-
-
+ 
+ 
 class SynthesizeBody(BaseModel):
     api_key: str | None = None
     model: str | None = None
     notes: dict | None = None
-
-
+ 
+ 
 class ChatBody(BaseModel):
     paper_idx: int | None = None
     paper: dict | None = None
@@ -78,34 +79,52 @@ class ChatBody(BaseModel):
     images: list[dict] = []  # [{media_type, data(base64)}]
     api_key: str | None = None
     model: str | None = None
-
-
+ 
+ 
 class AssessBody(BaseModel):
     paper_idx: int | None = None
     paper: dict | None = None
     scope: str | None = None
     api_key: str | None = None
     model: str | None = None
-
-
+ 
+ 
+class ResolveBody(BaseModel):
+    identifier: str
+ 
+ 
+class AddPaperBody(BaseModel):
+    paper: dict
+    api_key: str | None = None
+    model: str | None = None
+    notes: dict | None = None
+ 
+ 
+class ReanalyzeBody(BaseModel):
+    included_indices: list[int]
+    api_key: str | None = None
+    model: str | None = None
+    notes: dict | None = None
+ 
+ 
 # ── Streaming search endpoint (SSE) ───────────────────────────────────────
-
+ 
 @router.post("/runs/stream")
 async def create_run_stream(body: CreateRunBody, user_id: str = Depends(require_user)):
     """
     SSE endpoint. Streams progress events during reformulate+search, then
     emits a final 'done' event with the full run data.
-
+ 
     Frontend consumes with fetch() + ReadableStream — no EventSource needed
     (EventSource doesn't support POST).
     """
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_event_loop()
-
+ 
     def on_progress(event: dict):
         """Called from a worker thread — pushes into the async queue."""
         loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", **event})
-
+ 
     async def run_pipeline():
         try:
             pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model)
@@ -138,25 +157,25 @@ async def create_run_stream(body: CreateRunBody, user_id: str = Depends(require_
             })
         except Exception as e:  # noqa: BLE001
             await queue.put({"type": "error", "message": str(e)})
-
+ 
     asyncio.create_task(run_pipeline())
-
+ 
     async def generate():
         while True:
             event = await queue.get()
             yield f"data: {json.dumps(event)}\n\n"
             if event["type"] in ("done", "error"):
                 break
-
+ 
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
+ 
+ 
 # ── Non-streaming search (kept for compatibility) ─────────────────────────
-
+ 
 @router.post("/runs")
 def create_run(body: CreateRunBody, user_id: str = Depends(require_user)):
     pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model)
@@ -176,10 +195,10 @@ def create_run(body: CreateRunBody, user_id: str = Depends(require_user)):
               "papers": run.papers, "approved": ap},
     )
     return {"run_id": run.run_id, "reform": run.reform, "papers": run.papers, "stage": run.stage}
-
-
+ 
+ 
 # ── Remaining pipeline stages ──────────────────────────────────────────────
-
+ 
 @router.post("/runs/{run_id}/filter")
 def filter_papers(run_id: str, body: FilterBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
@@ -187,8 +206,30 @@ def filter_papers(run_id: str, body: FilterBody, user_id: str = Depends(require_
         raise HTTPException(400, "Approve at least 2 papers to build a review.")
     SamhitaPipeline().apply_filter(run, body.approved_indices)
     return {"run_id": run.run_id, "approved_count": len(run.approved_papers), "stage": run.stage}
-
-
+ 
+ 
+def _persist_done(run, user_id, notes=None, side=None):
+    """Save a run in its 'done' state (post-synthesis / post-write)."""
+    pipeline = SamhitaPipeline()
+    if side is None:
+        side = pipeline.side_modules(run)
+    approved_map = {p["idx"]: True for p in run.approved_papers}
+    save_session(
+        session_id=run.run_id,
+        topic=run.topic,
+        stage="done",
+        paper_count=len(run.approved_papers),
+        user_id=user_id,
+        data={
+            "runId": run.run_id, "topic": run.topic, "reform": run.reform,
+            "papers": run.papers, "approved": approved_map,
+            "extractions": run.extractions, "synth": run.synthesis,
+            "sections": run.sections, "sideModules": side, "notes": notes or {},
+        },
+    )
+    return side
+ 
+ 
 @router.post("/runs/{run_id}/synthesize")
 def synthesize(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
@@ -197,28 +238,11 @@ def synthesize(run_id: str, body: SynthesizeBody, user_id: str = Depends(require
         pipeline.extract_and_synthesize(run)
     except Exception as e:
         raise HTTPException(502, f"Reader & Extractor / Critic & Synthesizer failed: {e}")
-    # Side modules only need extractions + synthesis, so they're ready now —
-    # no need to write the review first. Persist the session so the reviewed
-    # papers survive a restart even if the user never generates a review.
-    side = pipeline.side_modules(run)
-    approved_map = {p["idx"]: True for p in run.approved_papers}
-    save_session(
-        session_id=run.run_id,
-        topic=run.topic,
-        stage="done",
-        paper_count=len(run.approved_papers),
-        user_id=user_id,
-        data={
-            "runId": run.run_id, "topic": run.topic, "reform": run.reform,
-            "papers": run.papers, "approved": approved_map,
-            "extractions": run.extractions, "synth": run.synthesis,
-            "sections": run.sections, "sideModules": side, "notes": body.notes or {},
-        },
-    )
+    side = _persist_done(run, user_id, notes=body.notes)
     return {"run_id": run.run_id, "extractions": run.extractions,
             "synthesis": run.synthesis, "side_modules": side, "stage": run.stage}
-
-
+ 
+ 
 @router.post("/runs/{run_id}/write")
 def write(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
@@ -227,25 +251,89 @@ def write(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user
         pipeline.write(run)
     except Exception as e:
         raise HTTPException(502, f"Writer Agent failed: {e}")
-    side = pipeline.side_modules(run)
-    approved_map = {p["idx"]: True for p in run.approved_papers}
-    save_session(
-        session_id=run.run_id,
-        topic=run.topic,
-        stage="done",
-        paper_count=len(run.approved_papers),
-        user_id=user_id,
-        data={
-            "runId": run.run_id, "topic": run.topic, "reform": run.reform,
-            "papers": run.papers, "approved": approved_map,
-            "extractions": run.extractions, "synth": run.synthesis,
-            "sections": run.sections, "sideModules": side, "notes": body.notes or {},
-        },
-    )
+    side = _persist_done(run, user_id, notes=body.notes)
     return {"run_id": run.run_id, "sections": run.sections,
             "side_modules": side, "stage": run.stage}
-
-
+ 
+ 
+# ── Editable source set (Sources page) ─────────────────────────────────────
+ 
+def _norm_title(t: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (t or "").lower()).strip()
+ 
+ 
+def _url_doi(url: str) -> str:
+    m = re.search(r"10\.\d{4,9}/[^\s\"&?#]+", url or "")
+    return m.group(0).lower() if m else ""
+ 
+ 
+def _is_duplicate(run: RunState, paper: dict) -> bool:
+    nt = _norm_title(paper.get("title"))
+    pd = _url_doi(paper.get("url"))
+    for p in run.papers:
+        if nt and _norm_title(p.get("title")) == nt:
+            return True
+        if pd and _url_doi(p.get("url")) == pd:
+            return True
+    return False
+ 
+ 
+@router.post("/runs/{run_id}/resolve")
+def resolve_paper(run_id: str, body: ResolveBody, user_id: str = Depends(require_user)):
+    """Look up a DOI / PMID / arXiv id / URL / title and return candidate
+    papers, each flagged if it duplicates a paper already in the run."""
+    run = get_run(run_id, user_id)
+    try:
+        candidates = SamhitaPipeline().resolve_candidates(body.identifier)
+    except Exception as e:
+        raise HTTPException(502, f"Lookup failed: {e}")
+    existing_titles = {_norm_title(p.get("title")) for p in run.papers}
+    existing_dois = {_url_doi(p.get("url")) for p in run.papers if _url_doi(p.get("url"))}
+    for c in candidates:
+        dupe = _norm_title(c.get("title")) in existing_titles
+        cd = _url_doi(c.get("url"))
+        if cd and cd in existing_dois:
+            dupe = True
+        c["duplicate"] = dupe
+    return {"candidates": candidates}
+ 
+ 
+@router.post("/runs/{run_id}/add_paper")
+def add_paper(run_id: str, body: AddPaperBody, user_id: str = Depends(require_user)):
+    """Add one resolved paper and run extraction on it. Marks downstream
+    analysis stale (frontend), so the user runs Update analysis afterwards."""
+    run = get_run(run_id, user_id)
+    if not (body.paper or {}).get("title"):
+        raise HTTPException(400, "That paper has no title — pick a different result.")
+    if _is_duplicate(run, body.paper):
+        raise HTTPException(409, "This paper is already in your sources.")
+    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model)
+    try:
+        res = pipeline.add_paper(run, body.paper)
+    except Exception as e:
+        raise HTTPException(502, f"Adding paper failed: {e}")
+    _persist_done(run, user_id, notes=body.notes)
+    return res
+ 
+ 
+@router.post("/runs/{run_id}/reanalyze")
+def reanalyze(run_id: str, body: ReanalyzeBody, user_id: str = Depends(require_user)):
+    """Recompute synthesis + side modules for the current included set,
+    without re-searching or re-extracting. Clears the draft review."""
+    run = get_run(run_id, user_id)
+    if len(body.included_indices) < 1:
+        raise HTTPException(400, "Include at least one source before updating the analysis.")
+    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model)
+    try:
+        pipeline.reanalyze(run, body.included_indices)
+    except Exception as e:
+        raise HTTPException(502, f"Update analysis failed: {e}")
+    side = _persist_done(run, user_id, notes=body.notes)
+    return {"run_id": run.run_id, "extractions": run.extractions,
+            "synthesis": run.synthesis, "sections": run.sections,
+            "side_modules": side, "stage": run.stage}
+ 
+ 
 @router.post("/runs/{run_id}/evaluate")
 def evaluate(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
@@ -255,8 +343,8 @@ def evaluate(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_u
     except Exception as e:
         raise HTTPException(502, f"Evaluator failed: {e}")
     return {"run_id": run.run_id, "eval_result": result}
-
-
+ 
+ 
 @router.post("/runs/{run_id}/assess")
 def assess_paper(run_id: str, body: AssessBody, user_id: str = Depends(require_user)):
     """Quick triage of a single paper against the review scope: extract key
@@ -270,7 +358,7 @@ def assess_paper(run_id: str, body: AssessBody, user_id: str = Depends(require_u
     if not paper:
         raise HTTPException(404, "Paper not found. Reopen and try again.")
     scope = body.scope or ((run.reform or {}).get("scope") if run else None) or "(no explicit scope provided)"
-
+ 
     system = (
         "You are a triage assistant for a literature review. Given the review SCOPE and one "
         "paper's title + abstract, (1) extract key fields and (2) judge how relevant the paper "
@@ -291,13 +379,13 @@ def assess_paper(run_id: str, body: AssessBody, user_id: str = Depends(require_u
     except Exception as e:
         raise HTTPException(502, f"Assessment failed: {e}")
     return {"assessment": data}
-
-
+ 
+ 
 @router.post("/runs/{run_id}/chat")
 def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require_user)):
     """Answer questions about a single paper, grounded in what we know about it
     (abstract/summary, plus extracted fields if extraction has already run).
-
+ 
     The paper data can be sent in the request body, so chat works even when the
     run is no longer in memory (e.g. a session restored from History)."""
     run = RUNS.get(run_id)
@@ -310,7 +398,7 @@ def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require
     ext = None
     if run:
         ext = next((e for e in (run.extractions or []) if e.get("idx") == idx), None)
-
+ 
     lines = [
         f"Title: {paper.get('title', '')}",
         f"Authors: {paper.get('authors', '')}",
@@ -325,23 +413,23 @@ def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require
             if v and v != "n/a":
                 lines.append(f"{k.capitalize()}: {v}")
     context = "\n".join(lines)
-
+ 
     convo = ""
     for m in (body.history or []):
         role = "User" if m.get("role") == "user" else "Assistant"
         convo += f"{role}: {m.get('content', '')}\n"
     convo += f"User: {body.question}\nAssistant:"
-
+ 
     llm = LLMClient(api_key=body.api_key, model=body.model)
     pdf_bytes = fetch_paper_pdf(paper.get("url"))
-
+ 
     image_blocks = []
     for img in (body.images or [])[:6]:  # cap count
         mt, data = img.get("media_type"), img.get("data")
         if mt and data and len(data) < 9_000_000:  # ~6.5 MB decoded per image
             image_blocks.append({"type": "image",
                 "source": {"type": "base64", "media_type": mt, "data": data}})
-
+ 
     try:
         if pdf_bytes or image_blocks:
             # Multimodal: attach the PDF (figures/tables) and/or the user's images.
@@ -354,7 +442,7 @@ def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require
             blocks.extend(image_blocks)
             if image_blocks:
                 parts.append("image")
-
+ 
             text = f"PAPER METADATA:\n{context}\n\n"
             if not pdf_bytes:
                 full_text = fetch_paper_text(paper.get("url"))
@@ -368,7 +456,7 @@ def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require
                          "(e.g. explain a figure or compare it with the paper). ")
             text += f"\nCONVERSATION:\n{convo}"
             blocks.append({"type": "text", "text": text})
-
+ 
             system = (
                 "You are a research assistant helping a reviewer understand a paper. "
                 + ("The full paper is attached as a PDF — read all of it, including figures, "
@@ -402,8 +490,8 @@ def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require
     except Exception as e:
         raise HTTPException(502, f"Chat failed: {e}")
     return {"answer": answer, "source": source}
-
-
+ 
+ 
 @router.get("/runs/{run_id}")
 def get_run_state(run_id: str, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
@@ -415,31 +503,32 @@ def get_run_state(run_id: str, user_id: str = Depends(require_user)):
         "sections": run.sections, "eval_result": run.eval_result, "stage": run.stage,
         "side_modules": pipeline.side_modules(run) if run.synthesis else None,
     }
-
-
+ 
+ 
 # ── Session history endpoints (no LLM) ───────────────────────────────────
-
+ 
 @router.get("/sessions")
 def sessions_list(user_id: str = Depends(require_user)):
     return list_sessions(user_id)
-
-
+ 
+ 
 @router.get("/sessions/{session_id}")
 def session_get(session_id: str, user_id: str = Depends(require_user)):
     s = get_session(session_id, user_id)
     if not s:
         raise HTTPException(404, "Session not found.")
     return s
-
-
+ 
+ 
 @router.delete("/sessions/{session_id}")
 def session_delete(session_id: str, user_id: str = Depends(require_user)):
     delete_session(session_id, user_id)
     return {"ok": True}
-
-
+ 
+ 
 @router.delete("/sessions")
 def sessions_delete_all(user_id: str = Depends(require_user)):
     """Data-deletion control: wipe every session owned by the signed-in user."""
     deleted = delete_all_for_user(user_id)
     return {"ok": True, "deleted": deleted}
+ 

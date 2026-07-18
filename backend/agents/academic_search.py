@@ -2,45 +2,50 @@
 Academic Search Agent — real sources
 ------------------------------------
 Diagram node: "Semantic Scholar · arXiv · PubMed"
-
+ 
 Pulls REAL paper records from academic APIs instead of asking the model to
 recall papers, then merges + de-duplicates them and maps everything onto the
 {idx,title,authors,year,venue,url,abstract} shape the rest of the pipeline
 already expects — so nothing downstream changes.
-
+ 
 Sources:
   - Semantic Scholar Graph API (200M+ papers; real abstract, DOI, OA PDF,
     citation count). Free but rate-limited without a key (S2_API_KEY).
   - arXiv API (keyless, reliable; abstract + PDF link for preprints).
-
+ 
 If both sources come up empty (offline / throttled), it falls back to the
 model's web search (the previous behaviour) so the pipeline never hard-fails.
+ 
+`resolve(identifier)` is a second entry point used by the Sources page: it
+turns a single DOI / PMID / arXiv id / URL / free-text title into candidate
+papers so a user can add a specific paper by hand.
 """
+import re
 import time
 import xml.etree.ElementTree as ET
-
+ 
 import httpx
-
+ 
 from agents.base import Agent
 from core.config import settings
-
+ 
 S2_SEARCH = "https://api.semanticscholar.org/graph/v1/paper/search"
 S2_FIELDS = "title,abstract,year,venue,authors,externalIds,openAccessPdf,citationCount,url"
 ARXIV_API = "http://export.arxiv.org/api/query"
 UA = {"User-Agent": "Samhita-LitReview/1.0 (research assistant)"}
-
+ 
 PUBMED_ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-
+ 
 OPENALEX_API = "https://api.openalex.org/works"
-
-
+ 
+ 
 class AcademicSearchAgent(Agent):
     name = "academic_search"
-
+ 
     def run(self, topic: str, queries: list[str], limit: int = 8) -> list[dict]:
         terms = _uniq([topic, *(queries or [])])[:3]
-
+ 
         merged: dict[str, dict] = {}
         for source in (self._openalex, self._semantic_scholar, self._pubmed, self._arxiv):
             try:
@@ -50,53 +55,159 @@ class AcademicSearchAgent(Agent):
                         merged[key] = p
             except Exception:
                 continue
-            
+ 
         papers = list(merged.values())
         if not papers:
             return self._llm_fallback(topic, queries)
-
+ 
         papers.sort(key=lambda p: (bool(p.get("abstract")), p.get("cites") or 0), reverse=True)
         papers = papers[:limit]
         for i, p in enumerate(papers):
             p["idx"] = i
             p.pop("cites", None)
         return papers
-    
+ 
+    # ── Single-paper resolution (Sources page "Add paper") ────────────────
+    def resolve(self, identifier: str) -> list[dict]:
+        """Resolve a DOI / PMID / arXiv id / URL / free-text title into a list
+        of candidate papers (0..n). Never raises — returns [] on failure."""
+        q = (identifier or "").strip()
+        if not q:
+            return []
+        kind, value = _classify_identifier(q)
+        try:
+            if kind == "arxiv":
+                return self._resolve_arxiv(value)
+            if kind == "doi":
+                return self._resolve_doi(value)
+            if kind == "pmid":
+                return self._resolve_pmid(value)
+            if kind == "pmcid":
+                return self._resolve_pmcid(value)
+            return self._resolve_title(q)
+        except Exception:
+            # For an id lookup that failed, fall back to a title search so the
+            # user still gets something to pick from.
+            try:
+                return self._resolve_title(q)
+            except Exception:
+                return []
+ 
+    def _resolve_arxiv(self, arxiv_id: str) -> list[dict]:
+        arxiv_id = re.sub(r"v\d+$", "", arxiv_id.strip())
+        ns = {"a": "http://www.w3.org/2005/Atom"}
+        with httpx.Client(timeout=25, headers=UA) as client:
+            r = client.get(ARXIV_API, params={"id_list": arxiv_id, "max_results": 1})
+            if r.status_code != 200:
+                return []
+            root = ET.fromstring(r.text)
+        out = []
+        for e in root.findall("a:entry", ns):
+            title = _clean(e.findtext("a:title", "", ns))
+            if not title:
+                continue
+            published = e.findtext("a:published", "", ns) or ""
+            year = int(published[:4]) if published[:4].isdigit() else None
+            names = [a.findtext("a:name", "", ns) for a in e.findall("a:author", ns)]
+            url = ""
+            for link in e.findall("a:link", ns):
+                if link.get("title") == "pdf" or link.get("type") == "application/pdf":
+                    url = link.get("href") or ""
+                    break
+            if not url:
+                url = e.findtext("a:id", "", ns) or ""
+            out.append({
+                "title": title, "authors": _fmt_authors(names), "year": year,
+                "venue": "arXiv", "url": url,
+                "abstract": _clean(e.findtext("a:summary", "", ns)),
+                "cites": 0, "source": "arxiv",
+            })
+        return out
+ 
+    def _resolve_doi(self, doi: str) -> list[dict]:
+        doi = doi.strip().lower()
+        with httpx.Client(timeout=25, headers=UA) as client:
+            r = client.get(f"{OPENALEX_API}/doi:{doi}",
+                           params={"mailto": _mailto()})
+            if r.status_code != 200:
+                return []
+            w = r.json()
+        rec = _map_openalex(w)
+        return [rec] if rec else []
+ 
+    def _resolve_pmcid(self, pmcid: str) -> list[dict]:
+        """PMC id -> PMID/DOI, then resolve that. Tries the id converter API
+        (whose URL now 301-redirects), then falls back to a PubMed esearch."""
+        base = _pubmed_base()
+        # 1) id converter (new URL; follow_redirects covers the 301 either way)
+        try:
+            with httpx.Client(timeout=25, headers=UA, follow_redirects=True) as client:
+                r = client.get(
+                    "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/",
+                    params={**base, "ids": f"PMC{pmcid}", "format": "json"},
+                )
+                if r.status_code == 200:
+                    recs = (r.json() or {}).get("records") or []
+                    if recs:
+                        rec = recs[0]
+                        # pmid comes back as an int — cast before resolving.
+                        if rec.get("pmid"):
+                            return self._resolve_pmid(str(rec["pmid"]))
+                        if rec.get("doi"):
+                            return self._resolve_doi(str(rec["doi"]))
+        except Exception:
+            pass
+        return []
+ 
+    def _resolve_pmid(self, pmid: str) -> list[dict]:
+        base = _pubmed_base()
+        with httpx.Client(timeout=25, headers=UA) as client:
+            r = client.get(PUBMED_EFETCH, params={
+                **base, "db": "pubmed", "id": pmid.strip(), "retmode": "xml"})
+            if r.status_code != 200:
+                return []
+            root = ET.fromstring(r.text)
+        out = []
+        for art in root.findall(".//PubmedArticle"):
+            rec = _parse_pubmed_article(art)
+            if rec and rec.get("title"):
+                out.append(rec)
+        return out
+ 
+    def _resolve_title(self, title: str) -> list[dict]:
+        out = []
+        with httpx.Client(timeout=25, headers=UA) as client:
+            r = client.get(OPENALEX_API, params={
+                "search": title, "per_page": 6, "mailto": _mailto()})
+            if r.status_code != 200:
+                return []
+            for w in (r.json().get("results") or []):
+                rec = _map_openalex(w)
+                if rec:
+                    out.append(rec)
+        return out
+ 
     def _openalex(self, terms: list[str]) -> list[dict]:
-        email = getattr(settings, "unpaywall_email", "") or "research@example.com"
         out = []
         with httpx.Client(timeout=25, headers=UA) as client:
             for q in terms[:2]:
                 try:
-                    r = client.get(OPENALEX_API, params={"search": q, "per_page": 15, "mailto": email})
+                    r = client.get(OPENALEX_API, params={"search": q, "per_page": 15, "mailto": _mailto()})
                     r.raise_for_status()
                     results = r.json().get("results") or []
                 except Exception:
                     continue
                 for w in results:
-                    title = _clean(w.get("title") or w.get("display_name") or "")
-                    if not title:
-                        continue
-                    names = [(a.get("author") or {}).get("display_name") for a in (w.get("authorships") or [])]
-                    src = (w.get("primary_location") or {}).get("source") or {}
-                    oa = w.get("open_access") or {}
-                    out.append({
-                        "title": title,
-                        "authors": _fmt_authors(names),
-                        "year": w.get("publication_year"),
-                        "venue": _clean(src.get("display_name") or ""),
-                        "url": oa.get("oa_url") or w.get("doi") or w.get("id") or "",
-                        "abstract": _reconstruct_abstract(w.get("abstract_inverted_index")),
-                        "cites": w.get("cited_by_count") or 0,
-                        "source": "openalex",
-                    })
+                    rec = _map_openalex(w)
+                    if rec:
+                        out.append(rec)
         return out
-
+ 
     def _semantic_scholar(self, terms: list[str]) -> list[dict]:
         headers = dict(UA)
         if getattr(settings, "s2_api_key", ""):
             headers["x-api-key"] = settings.s2_api_key
-
+ 
         out = []
         with httpx.Client(timeout=25, headers=headers) as client:
             for q in terms:
@@ -114,7 +225,7 @@ class AcademicSearchAgent(Agent):
                         "source": "semantic_scholar",
                     })
         return out
-
+ 
     def _s2_once(self, client: httpx.Client, query: str) -> list[dict]:
         for _ in range(2):
             try:
@@ -127,7 +238,7 @@ class AcademicSearchAgent(Agent):
             except Exception:
                 time.sleep(0.4)
         return []
-
+ 
     def _arxiv(self, terms: list[str]) -> list[dict]:
         ns = {"a": "http://www.w3.org/2005/Atom"}
         out = []
@@ -165,15 +276,9 @@ class AcademicSearchAgent(Agent):
                         "source": "arxiv",
                     })
         return out
-    
+ 
     def _pubmed(self, terms: list[str]) -> list[dict]:
-        base = {"tool": getattr(settings, "ncbi_tool", "") or "samhita"}
-        email = getattr(settings, "ncbi_email", "") or getattr(settings, "unpaywall_email", "")
-        if email:
-            base["email"] = email
-        if getattr(settings, "ncbi_api_key", ""):
-            base["api_key"] = settings.ncbi_api_key
-
+        base = _pubmed_base()
         pmids: list[str] = []
         out = []
         with httpx.Client(timeout=25, headers=UA) as client:
@@ -187,7 +292,7 @@ class AcademicSearchAgent(Agent):
                             pmids.append(pid)
                 except Exception:
                     continue
-
+ 
             if not pmids:
                 return []
             try:
@@ -197,13 +302,13 @@ class AcademicSearchAgent(Agent):
                 root = ET.fromstring(r.text)
             except Exception:
                 return []
-
+ 
         for art in root.findall(".//PubmedArticle"):
             rec = _parse_pubmed_article(art)
             if rec and rec.get("title"):
                 out.append(rec)
         return out
-
+ 
     def _llm_fallback(self, topic: str, queries: list[str]) -> list[dict]:
         user_text = (
             "Search the web for real, recent academic papers on this topic, preferring "
@@ -228,8 +333,78 @@ class AcademicSearchAgent(Agent):
             p["idx"] = i
             p["source"] = "model"  # unverified - model web search, not a database
         return papers
-
-
+ 
+ 
+# ── Identifier classification ──────────────────────────────────────────────
+ 
+def _classify_identifier(q: str) -> tuple[str, str]:
+    """Return (kind, value) where kind is arxiv|doi|pmid|title."""
+    s = q.strip()
+    low = s.lower()
+ 
+    m = re.search(r"arxiv\.org/(?:abs|pdf)/([^\s?#]+)", low)
+    if m:
+        return "arxiv", m.group(1).replace(".pdf", "")
+    m = re.match(r"arxiv:\s*(\S+)", low)
+    if m:
+        return "arxiv", m.group(1)
+    if re.fullmatch(r"\d{4}\.\d{4,5}(v\d+)?", s):
+        return "arxiv", s
+ 
+    # PMC id (e.g. PMC11006387, or a pmc.ncbi.nlm.nih.gov/articles/PMC… URL)
+    m = re.search(r"pmc(\d{5,})", low)
+    if m:
+        return "pmcid", m.group(1)
+ 
+    # DOI — bare (10.xxxx/…), a doi.org URL, or embedded in any publisher URL
+    m = re.search(r"(10\.\d{4,9}/[^\s\"<>]+)", s)
+    if m and ("doi" in low or s.startswith("10.") or low.startswith("http")):
+        return "doi", m.group(1).rstrip(").,;")
+ 
+    m = re.search(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)", low)
+    if m:
+        return "pmid", m.group(1)
+    if re.fullmatch(r"\d{1,8}", s):
+        return "pmid", s
+ 
+    return "title", s
+ 
+ 
+# ── Shared helpers ─────────────────────────────────────────────────────────
+ 
+def _mailto() -> str:
+    return getattr(settings, "unpaywall_email", "") or "research@example.com"
+ 
+ 
+def _pubmed_base() -> dict:
+    base = {"tool": getattr(settings, "ncbi_tool", "") or "samhita"}
+    email = getattr(settings, "ncbi_email", "") or getattr(settings, "unpaywall_email", "")
+    if email:
+        base["email"] = email
+    if getattr(settings, "ncbi_api_key", ""):
+        base["api_key"] = settings.ncbi_api_key
+    return base
+ 
+ 
+def _map_openalex(w: dict) -> dict | None:
+    title = _clean(w.get("title") or w.get("display_name") or "")
+    if not title:
+        return None
+    names = [(a.get("author") or {}).get("display_name") for a in (w.get("authorships") or [])]
+    src = (w.get("primary_location") or {}).get("source") or {}
+    oa = w.get("open_access") or {}
+    return {
+        "title": title,
+        "authors": _fmt_authors(names),
+        "year": w.get("publication_year"),
+        "venue": _clean(src.get("display_name") or ""),
+        "url": oa.get("oa_url") or w.get("doi") or w.get("id") or "",
+        "abstract": _reconstruct_abstract(w.get("abstract_inverted_index")),
+        "cites": w.get("cited_by_count") or 0,
+        "source": "openalex",
+    }
+ 
+ 
 def _uniq(items: list[str]) -> list[str]:
     seen, out = set(), []
     for q in items:
@@ -238,11 +413,12 @@ def _uniq(items: list[str]) -> list[str]:
             seen.add(k)
             out.append(q.strip())
     return out
-
-
+ 
+ 
 def _clean(s: str) -> str:
     return " ".join((s or "").split())
-
+ 
+ 
 def _reconstruct_abstract(inv: dict) -> str:
     """OpenAlex returns abstracts as an inverted index {word: [positions]}."""
     if not inv:
@@ -250,22 +426,22 @@ def _reconstruct_abstract(inv: dict) -> str:
     positions = [(pos, word) for word, idxs in inv.items() for pos in idxs]
     positions.sort()
     return _clean(" ".join(word for _, word in positions))
-
-
+ 
+ 
 def _parse_pubmed_article(art) -> dict | None:
     def _itext(el) -> str:
         return _clean("".join(el.itertext())) if el is not None else ""
-
+ 
     title = _itext(art.find(".//ArticleTitle"))
     abstract = _clean(" ".join(_itext(ab) for ab in art.findall(".//Abstract/AbstractText")))
-
+ 
     names = []
     for a in art.findall(".//AuthorList/Author"):
         last = (a.findtext("LastName") or "").strip()
         init = (a.findtext("Initials") or "").strip()
         if last:
             names.append(f"{last} {init}".strip())
-
+ 
     year = None
     y = art.findtext(".//JournalIssue/PubDate/Year") or art.findtext(".//PubDate/Year")
     if not y:
@@ -273,7 +449,7 @@ def _parse_pubmed_article(art) -> dict | None:
         y = md[:4]
     if y and y[:4].isdigit():
         year = int(y[:4])
-
+ 
     venue = art.findtext(".//Journal/ISOAbbreviation") or art.findtext(".//Journal/Title") or ""
     pmid = art.findtext(".//PMID") or ""
     doi = ""
@@ -282,7 +458,7 @@ def _parse_pubmed_article(art) -> dict | None:
             doi = (aid.text or "").strip()
             break
     url = f"https://doi.org/{doi}" if doi else (f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else "")
-
+ 
     return {
         "title": title,
         "authors": _fmt_authors(names),
@@ -293,14 +469,15 @@ def _parse_pubmed_article(art) -> dict | None:
         "cites": 0,
         "source": "pubmed",
     }
-
+ 
+ 
 def _fmt_authors(names) -> str:
     names = [n for n in (names or []) if n]
     if not names:
         return ""
     return names[0] if len(names) == 1 else f"{names[0]} et al."
-
-
+ 
+ 
 def _s2_url(p: dict) -> str:
     oa = p.get("openAccessPdf") or {}
     if oa.get("url"):
@@ -311,3 +488,4 @@ def _s2_url(p: dict) -> str:
     if ext.get("DOI"):
         return f"https://doi.org/{ext['DOI']}"
     return p.get("url") or ""
+ 
