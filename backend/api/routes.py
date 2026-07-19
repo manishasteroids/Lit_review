@@ -83,6 +83,7 @@ class ChatBody(BaseModel):
     images: list[dict] = []  # [{media_type, data(base64)}]
     api_key: str | None = None
     model: str | None = None
+    chat_mode: str | None = None  # "quick" (Gemini, cheap) | "deep" (Sonnet)
  
  
 class AssessBody(BaseModel):
@@ -386,6 +387,83 @@ def assess_paper(run_id: str, body: AssessBody, user_id: str = Depends(require_u
     return {"assessment": data}
  
  
+_STOP = {"the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "is", "are",
+         "was", "were", "this", "that", "these", "those", "it", "its", "with", "by",
+         "as", "at", "be", "how", "what", "why", "which", "does", "do", "did", "can",
+         "paper", "study", "authors", "their", "they", "from", "into", "about"}
+
+
+def _keywords(question: str) -> list[str]:
+    toks = re.findall(r"[a-z0-9][a-z0-9\-]{2,}", (question or "").lower())
+    return [t for t in toks if t not in _STOP]
+
+
+def select_passages(full_text: str, question: str, max_chars: int = 22000) -> str:
+    """Cheap local retrieval: split the paper into paragraph chunks, score each by
+    how many question keywords it contains, and return the top chunks (in original
+    order) up to max_chars. Avoids sending the whole paper for a specific question.
+    Falls back to the head of the text if nothing scores."""
+    kws = _keywords(question)
+    # paragraph-ish chunks
+    raw = re.split(r"\n\s*\n", full_text)
+    chunks, buf = [], ""
+    for para in raw:
+        para = para.strip()
+        if not para:
+            continue
+        if len(buf) + len(para) < 1400:
+            buf = f"{buf}\n\n{para}" if buf else para
+        else:
+            if buf:
+                chunks.append(buf)
+            buf = para
+    if buf:
+        chunks.append(buf)
+    if not kws or not chunks:
+        return full_text[:max_chars]
+
+    def score(c: str) -> int:
+        low = c.lower()
+        return sum(low.count(k) for k in kws)
+
+    ranked = sorted(range(len(chunks)), key=lambda i: score(chunks[i]), reverse=True)
+    keep, total = set(), 0
+    for i in ranked:
+        if score(chunks[i]) == 0:
+            break
+        if total + len(chunks[i]) > max_chars:
+            continue
+        keep.add(i)
+        total += len(chunks[i])
+    if not keep:                       # no keyword hits — send the opening
+        return full_text[:max_chars]
+    return "\n\n[…]\n\n".join(chunks[i] for i in sorted(keep))
+
+
+# Questions that need the whole paper rather than a few passages.
+_BROAD = ("summar", "overview", "overall", "tl;dr", "tldr", "everything", "whole paper",
+          "entire paper", "main point", "main contribution", "key point", "key finding",
+          "limitation", "in detail", "walk me through", "what is this paper")
+
+
+def _needs_pdf(question: str) -> bool:
+    q = (question or "").lower()
+    return any(w in q for w in ("figure", "fig.", "fig ", "table", "chart", "plot",
+                                "graph", "diagram", "equation", "panel", "image", "photo"))
+
+
+CHAT_FORMAT = (
+    "\n\nFORMAT — you are writing into a narrow chat panel, so keep it tight and "
+    "scannable:\n"
+    "- Open with one plain-sentence direct answer. No title, no 'Here is…' preamble.\n"
+    "- For structure use bold lead-ins (**Method.** …) or level-4 headings (#### ), "
+    "NEVER # or ## — big headers look broken here.\n"
+    "- Prefer short bullet points over long paragraphs; keep bullets to 1–2 lines.\n"
+    "- Put metrics, numbers and short quotes inline; bold the key figures.\n"
+    "- Don't pad. Aim for the shortest answer that fully covers the question."
+)
+
+
 @router.post("/runs/{run_id}/chat")
 def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require_user)):
     """Answer questions about a single paper, grounded in what we know about it
@@ -425,8 +503,11 @@ def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require
         convo += f"{role}: {m.get('content', '')}\n"
     convo += f"User: {body.question}\nAssistant:"
  
-    llm = LLMClient(api_key=body.api_key, model=body.model, run_id=run_id, stage="chat")
-    pdf_bytes = fetch_paper_pdf(paper.get("url"))
+    # Chat mode picks the model: Quick = Gemini (cheap), Deep = Sonnet (stronger
+    # reasoning). Grounding source (text/excerpts/PDF) is chosen below by cost.
+    chat_models = {"quick": settings.gemini_model or "gemini-2.5-flash", "deep": "claude-sonnet-4-6"}
+    chat_model = chat_models.get(body.chat_mode) if body.chat_mode else body.model
+    llm = LLMClient(api_key=body.api_key, model=chat_model, run_id=run_id, stage="chat")
  
     image_blocks = []
     for img in (body.images or [])[:6]:  # cap count
@@ -435,63 +516,65 @@ def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require
             image_blocks.append({"type": "image",
                 "source": {"type": "base64", "media_type": mt, "data": data}})
  
+    # Cost strategy: prefer cheap extracted TEXT over the token-heavy PDF (only
+    # attach the PDF for images or figure/table questions); RETRIEVE only the
+    # relevant passages for specific questions; CACHE the paper block so
+    # multi-turn follow-ups reuse it at 0.1x input.
+    q = body.question or ""
+    broad = (len(q.strip()) < 40) or any(w in q.lower() for w in _BROAD)
+    want_pdf = bool(image_blocks) or _needs_pdf(q)
+    full_text = fetch_paper_text(paper.get("url")) or ""
+    pdf_bytes = fetch_paper_pdf(paper.get("url")) if want_pdf else None
+
     try:
-        if pdf_bytes or image_blocks:
-            # Multimodal: attach the PDF (figures/tables) and/or the user's images.
-            blocks, parts = [], []
-            if pdf_bytes:
-                b64 = base64.standard_b64encode(pdf_bytes).decode("ascii")
-                blocks.append({"type": "document", "source": {"type": "base64",
-                    "media_type": "application/pdf", "data": b64}})
-                parts.append("full_pdf")
-            blocks.extend(image_blocks)
-            if image_blocks:
-                parts.append("image")
+        blocks, parts = [], []
+        if pdf_bytes:
+            b64 = base64.standard_b64encode(pdf_bytes).decode("ascii")
+            blocks.append({"type": "document", "source": {"type": "base64",
+                "media_type": "application/pdf", "data": b64}})
+            parts.append("full_pdf")
+        blocks.extend(image_blocks)
+        if image_blocks:
+            parts.append("image")
  
-            text = f"PAPER METADATA:\n{context}\n\n"
-            if not pdf_bytes:
-                full_text = fetch_paper_text(paper.get("url"))
-                if full_text:
-                    text += "FULL PAPER TEXT (extracted; figures not included):\n" + full_text + "\n\n"
-                    parts.append("full_text")
-                else:
-                    parts.append("abstract")
-            if image_blocks:
-                text += ("The user attached the image(s) shown above — use them to answer "
-                         "(e.g. explain a figure or compare it with the paper). ")
-            text += f"\nCONVERSATION:\n{convo}"
-            blocks.append({"type": "text", "text": text})
- 
-            system = (
-                "You are a research assistant helping a reviewer understand a paper. "
-                + ("The full paper is attached as a PDF — read all of it, including figures, "
-                   "tables and equations. " if pdf_bytes else "")
-                + ("The user also attached image(s) — explain or compare them in the context of "
-                   "the paper as asked. " if image_blocks else "")
-                + "Answer thoroughly and ground every claim in the paper (or the attached "
-                "images); don't invent facts. When asked for a summary, cover objective, method, "
-                "data, key results (with numbers), and limitations."
-            )
-            answer = llm.call(content=blocks, system=system, max_tokens=1500)
-            source = "+".join(parts) or "abstract"
-        else:
-            # No PDF or images — fall back to text/abstract.
-            full_text = fetch_paper_text(paper.get("url"))
-            if full_text:
-                context += "\n\nFULL PAPER TEXT (extracted; figures not included, may be truncated):\n" + full_text
-                source = "full_text"
-                note = ("You have the full text of this paper below. Answer from it and cite "
-                        "specific sections/results when relevant.")
+        paper_text = f"PAPER METADATA:\n{context}\n\n"
+        cache_paper = False
+        if not pdf_bytes:
+            if full_text and broad:
+                paper_text += ("FULL PAPER TEXT (extracted; figures not included):\n"
+                               + full_text[:60000] + "\n\n")
+                parts.append("full_text")
+                cache_paper = True            # stable across turns → cacheable
+            elif full_text:
+                paper_text += ("RELEVANT EXCERPTS (passages most relevant to the question; "
+                               "ask for a summary to read the whole paper):\n"
+                               + select_passages(full_text, q) + "\n\n")
+                parts.append("retrieved")
             else:
-                source = "abstract"
-                note = ("Only the abstract/summary is available (the full paper couldn't be "
-                        "fetched — it may be paywalled). Answer from the abstract and say plainly "
-                        "when it doesn't cover the question rather than guessing.")
-            system = (
-                "You are a research assistant helping a reviewer understand a paper. " + note +
-                " Be concise and specific.\n\nPAPER INFORMATION:\n" + context
-            )
-            answer = llm.call(user_text=convo, system=system, max_tokens=800)
+                parts.append("abstract")
+        paper_block = {"type": "text", "text": paper_text}
+        if cache_paper:
+            paper_block["cache_control"] = {"type": "ephemeral"}
+        blocks.append(paper_block)
+        convo_text = ""
+        if image_blocks:
+            convo_text += ("The user attached the image(s) above — use them to answer "
+                           "(e.g. explain a figure or compare it with the paper).\n\n")
+        convo_text += f"CONVERSATION:\n{convo}"
+        blocks.append({"type": "text", "text": convo_text})
+ 
+        grounding = ("the attached PDF (read figures, tables and equations)" if pdf_bytes
+                     else "the full paper text below" if (full_text and broad)
+                     else "the excerpts below (say so if they don't cover the question; do not guess)" if full_text
+                     else "the abstract below (say plainly when it doesn't cover the question)")
+        system = (
+            "You are a research assistant helping a reviewer understand a paper. Answer from "
+            + grounding + "; ground every claim in the source and don't invent facts. When "
+            "asked for a summary, cover objective, method, data, key results (with numbers), "
+            "and limitations." + CHAT_FORMAT
+        )
+        answer = llm.call(content=blocks, system=system, max_tokens=1500)
+        source = "+".join(parts) or "abstract"
     except Exception as e:
         raise HTTPException(502, f"Chat failed: {e}")
     return {"answer": answer, "source": source}
@@ -521,6 +604,26 @@ def sessions_list(user_id: str = Depends(require_user)):
 def session_usage(session_id: str, user_id: str = Depends(require_user)):
     """Token counts + dollar cost for one session, by stage and model. DB read."""
     return get_usage(session_id)
+
+
+class ChatSaveBody(BaseModel):
+    paper_key: str
+    messages: list[dict] = []
+
+
+@router.get("/chat/history")
+def chat_history_get(paper_key: str, user_id: str = Depends(require_user)):
+    """Load saved chat for a paper (by URL), for the signed-in user."""
+    from core.chat_history import get_chat
+    return {"messages": get_chat(user_id, paper_key)}
+
+
+@router.post("/chat/history")
+def chat_history_save(body: ChatSaveBody, user_id: str = Depends(require_user)):
+    """Persist the chat message list for a paper (by URL)."""
+    from core.chat_history import save_chat
+    save_chat(user_id, body.paper_key, body.messages)
+    return {"ok": True}
 
 
 @router.get("/usage/trend")

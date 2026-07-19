@@ -7,29 +7,111 @@ import DOMPurify from "dompurify";
 marked.setOptions({ breaks: true });
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;  // 5 MB per attached image
 
-export default function PaperChatPanel({ runId, paper, cite, apiKey, model, onClose }) {
+const chipStyle = {
+  background: "var(--panel2, transparent)", border: "1px solid var(--line)",
+  borderRadius: 7, color: "var(--muted)", cursor: "pointer", fontSize: 11,
+  padding: "3px 9px", whiteSpace: "nowrap",
+};
+
+export default function PaperChatPanel({ runId, paper, extraction, cite, apiKey, model, onClose }) {
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
   const [images, setImages] = useState([]); // [{ media_type, data, preview }]
   const [sending, setSending] = useState(false);
+  const [chatMode, setChatMode] = useState("quick"); // quick (Gemini) | deep (Sonnet)
   const logRef = useRef(null);
   const fileRef = useRef(null);
 
-  const storeKey = `samhita-chat:${runId}:${paper?.idx}`;
+  // ── Cache-first answers: rendered instantly from the extraction, no LLM call ──
+  function pushCached(question, text) {
+    setMessages((prev) => [...prev,
+      { role: "user", content: question },
+      { role: "assistant", content: text, cached: true }]);
+  }
+  function summarizeFromCache() {
+    const e = extraction || {};
+    const rows = [];
+    if (e.contribution) rows.push(`**Contribution.** ${e.contribution}`);
+    if (e.method) rows.push(`**Method.** ${e.method}`);
+    if (e.finding) rows.push(`**Key finding.** ${e.finding}`);
+    if (e.metrics && e.metrics !== "n/a") rows.push(`**Metrics.** ${e.metrics}`);
+    if (e.data && e.data !== "n/a") rows.push(`**Data.** ${e.data}`);
+    if (e.limitation) rows.push(`**Limitation.** ${e.limitation}`);
+    if (e.concepts?.length) rows.push(`**Concepts.** ${e.concepts.join(", ")}`);
+    const abs = paper?.abstract ? `\n\n**Abstract.** ${paper.abstract}` : "";
+    const body = rows.length ? rows.join("\n\n") + abs
+      : (paper?.abstract || "No cached extraction yet — ask a question to read the paper.");
+    pushCached("Summarize this paper", `*From the cached extraction — no model call.*\n\n${body}`);
+  }
+  const FACTS = [["Method", "method"], ["Finding", "finding"], ["Metrics", "metrics"],
+                 ["Limitation", "limitation"], ["Contribution", "contribution"]];
+  function askFact(label, key) {
+    const v = (extraction || {})[key];
+    pushCached(`${label}?`, v && v !== "n/a"
+      ? `**${label}.** ${v}`
+      : "That isn't in the cached extraction — ask in the box below to read the paper.");
+  }
+
+  // Send a text question to the model (chips use this in Deep mode).
+  async function askLLM(question) {
+    if (sending) return;
+    const history = messages;
+    const next = [...history, { role: "user", content: question }];
+    setMessages(next); setSending(true);
+    try {
+      const res = await api.chatAboutPaper(runId, paper, question, history,
+        apiKey || undefined, model, [], chatMode);
+      setMessages([...next, { role: "assistant", content: res.answer }]);
+    } catch (err) {
+      setMessages([...next, { role: "assistant", content: "⚠ " + err.message }]);
+    } finally { setSending(false); }
+  }
+
+  // Chips: Quick = instant from cache (free); Deep = re-read the paper with Sonnet.
+  function onSummarize() {
+    if (chatMode === "deep")
+      askLLM("Summarize this paper: objective, method, key results with numbers, and limitations.");
+    else summarizeFromCache();
+  }
+  function onFact(label, key) {
+    if (chatMode === "deep")
+      askLLM(`Explain this paper's ${label.toLowerCase()} in detail, grounded in the full text.`);
+    else askFact(label, key);
+  }
+
+  // History follows the PAPER (by URL), not the run — so it persists across runs
+  // and devices. The DB is authoritative; localStorage is an offline cache.
+  const paperKey = paper?.url || paper?.doi || paper?.title || "";
+  const storeKey = `samhita-chat:${paperKey}`;
+  const loadedKey = useRef(null);
 
   useEffect(() => {
     setDraft(""); setImages([]);
+    if (!paperKey) { setMessages([]); return; }
+    let cached = [];
     try {
       const saved = localStorage.getItem(storeKey);
-      setMessages(saved ? JSON.parse(saved) : []);
-    } catch {
-      setMessages([]);
-    }
+      cached = saved ? JSON.parse(saved) : [];
+    } catch { cached = []; }
+    setMessages(cached);            // show instantly from local cache
+    loadedKey.current = null;       // block saves until the server load resolves
+    let alive = true;
+    api.getChatHistory(paperKey)
+      .then((r) => {
+        if (!alive) return;
+        const server = r?.messages || [];
+        if (server.length) setMessages(server);   // server wins if it has history
+      })
+      .catch(() => {})
+      .finally(() => { if (alive) loadedKey.current = paperKey; });
+    return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId, paper?.idx]);
+  }, [paperKey]);
 
   useEffect(() => {
-    if (!paper) return;
+    if (!paper || !paperKey) return;
+    // don't overwrite storage until this paper's history has finished loading
+    if (loadedKey.current !== paperKey) return;
     try {
       localStorage.setItem(storeKey, JSON.stringify(messages));
     } catch {
@@ -37,8 +119,9 @@ export default function PaperChatPanel({ runId, paper, cite, apiKey, model, onCl
         localStorage.setItem(storeKey, JSON.stringify(messages.map((m) => ({ role: m.role, content: m.content }))));
       } catch { /* give up quietly */ }
     }
+    api.saveChatHistory(paperKey, messages);   // persist to DB (fire-and-forget)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, runId, paper?.idx]);
+  }, [messages, paperKey]);
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
@@ -74,7 +157,7 @@ export default function PaperChatPanel({ runId, paper, cite, apiKey, model, onCl
     const imgs = images.map(({ media_type, data }) => ({ media_type, data }));
     setMessages(next); setDraft(""); setImages([]); setSending(true);
     try {
-      const res = await api.chatAboutPaper(runId, paper, question, history, apiKey || undefined, model, imgs);
+      const res = await api.chatAboutPaper(runId, paper, question, history, apiKey || undefined, model, imgs, chatMode);
       setMessages([...next, { role: "assistant", content: res.answer }]);
     } catch (err) {
       setMessages([...next, { role: "assistant", content: "⚠ " + err.message }]);
@@ -95,13 +178,33 @@ export default function PaperChatPanel({ runId, paper, cite, apiKey, model, onCl
           </div>
           <button className="chat-close" onClick={onClose}>✕</button>
         </div>
+
+        {/* Mode toggle + cache-first quick actions (instant, no LLM call) */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", borderBottom: "1px solid var(--line)", flexWrap: "wrap" }}>
+          <div style={{ display: "inline-flex", border: "1px solid var(--line)", borderRadius: 7, overflow: "hidden" }}>
+            {[["quick", "Quick", "Gemini · cheap"], ["deep", "Deep", "Sonnet · best"]].map(([id, lab, tip]) => (
+              <button key={id} title={tip} onClick={() => setChatMode(id)}
+                style={{ border: "none", cursor: "pointer", fontSize: 11, fontWeight: 600, padding: "3px 10px",
+                  background: chatMode === id ? "var(--indigo)" : "transparent",
+                  color: chatMode === id ? "#fff" : "var(--muted)" }}>{lab}</button>
+            ))}
+          </div>
+          <span style={{ width: 1, height: 16, background: "var(--line)" }} />
+          <button onClick={onSummarize}
+            title={chatMode === "deep" ? "Deep: re-reads the paper with Sonnet" : "Instant, from cached extraction"}
+            style={chipStyle}>Summarize {chatMode === "deep" ? "" : "⚡"}</button>
+          {FACTS.map(([lab, key]) => (
+            <button key={key} onClick={() => onFact(lab, key)} style={chipStyle}>{lab}</button>
+          ))}
+        </div>
+
         <div className="chat-log" ref={logRef}>
           {messages.length === 0 && (
             <div className="chat-hint">
-              Ask anything about this paper — its method, findings, figures, limitations, or how
-              it compares to others. For open-access papers it reads the full PDF (figures
-              included); otherwise it falls back to the abstract. You can also attach an image
-              (a figure or screenshot) and ask it to explain or compare it with the paper.
+              <b>Quick</b> — chips answer instantly from the cached extraction (free); typed
+              questions read the full PDF on Gemini (cheap). <b>Deep</b> — chips and questions
+              re-read the full paper with Sonnet for thorough, reasoned answers (costs more).
+              You can also attach a figure and ask it to explain or compare it with the paper.
             </div>
           )}
           {messages.map((m, i) => (
