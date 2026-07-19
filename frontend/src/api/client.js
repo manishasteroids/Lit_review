@@ -90,7 +90,7 @@ export const api = {
       included_indices: includedIndices, api_key: apiKey, model, notes,
     }),
  
-  chatAboutPaper: (runId, paper, question, history, apiKey, model, images) =>
+  chatAboutPaper: (runId, paper, question, history, apiKey, model, images, chatMode) =>
     request(`/api/runs/${runId}/chat`, {
       paper_idx: paper?.idx,
       paper,
@@ -99,6 +99,7 @@ export const api = {
       images: images || [],
       api_key: apiKey,
       model,
+      chat_mode: chatMode,
     }),
  
   assessPaper: (runId, paper, scope, apiKey, model) =>
@@ -109,6 +110,17 @@ export const api = {
       api_key: apiKey,
       model,
     }),
+
+  // Per-paper chat history (keyed by paper URL, scoped to the user) — no LLM calls
+  getChatHistory: async (paperKey) =>
+    fetch(BASE + "/api/chat/history?paper_key=" + encodeURIComponent(paperKey || ""),
+      { headers: await authHeaders() }).then((r) => (r.ok ? r.json() : { messages: [] })),
+  saveChatHistory: async (paperKey, messages) =>
+    fetch(BASE + "/api/chat/history", {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ paper_key: paperKey, messages: messages || [] }),
+    }).then((r) => (r.ok ? r.json() : { ok: false })).catch(() => ({ ok: false })),
 
   // Search modes for the selector — no LLM calls
   getModes: () => fetch(BASE + "/api/modes").then((r) => r.json()),

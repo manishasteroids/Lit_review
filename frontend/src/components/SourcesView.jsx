@@ -3,9 +3,9 @@ import PaperChatPanel from "./PaperChatPanel.jsx";
  
 const COLUMNS = [
   { key: "paper", label: "Paper", always: true, width: 300 },
-  // Abstract comes straight from the source paper (free — no extraction needed).
-  { key: "abstract", label: "Abstract", fromPaper: true, width: 380 },
-  { key: "excerpt", label: "Excerpt", width: 340 },
+  // "Excerpt" shows the paper's abstract straight from the source (free — no
+  // extraction needed). Internal key stays `abstract` (that's the paper field).
+  { key: "abstract", label: "Excerpt", fromPaper: true, width: 380 },
   { key: "contribution", label: "Contribution", width: 240 },
   { key: "method", label: "Method", width: 200 },
   { key: "metrics", label: "Metrics", width: 200 },
@@ -13,7 +13,8 @@ const COLUMNS = [
   { key: "limitation", label: "Limitation", width: 220 },
   { key: "relevance", label: "Relevance", width: 240 },
 ];
-const DEFAULT_ON = ["paper", "abstract", "contribution", "metrics", "method"];
+// Show only Paper + Abstract by default; the rest are opt-in via the toggles.
+const DEFAULT_ON = ["paper", "abstract"];
  
 const ACCENT = "#6d5ef6";
 const badge = (bg, fg) => ({
@@ -279,8 +280,9 @@ export default function SourcesView({
       )}
  
       {chatPaper && (
-        <PaperChatPanel runId={runId} paper={chatPaper} cite={citeNumOf(chatPaper.idx)}
-          apiKey={apiKey} model={model} onClose={() => setChatPaper(null)} />
+        <PaperChatPanel runId={runId} paper={chatPaper} extraction={extByIdx[chatPaper.idx]}
+          cite={citeNumOf(chatPaper.idx)} apiKey={apiKey} model={model}
+          onClose={() => setChatPaper(null)} />
       )}
     </div>
   );

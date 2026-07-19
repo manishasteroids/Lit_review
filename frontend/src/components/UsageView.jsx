@@ -26,8 +26,10 @@ const fmtDT = (iso) => {
   } catch { return iso || ""; }
 };
 
-// One time-series bar chart (per run) — X = date+time, Y = the chosen value.
-function SeriesChart({ points, valueOf, fmtValue, color, title }) {
+// One time-series bar chart (per run) — X = date+time, Y = per-run value.
+// If `showCumulative`, overlay a running-total line on its own (right) scale.
+const CUM_COLOR = "#e0a33e";
+function SeriesChart({ points, valueOf, fmtValue, color, title, showCumulative }) {
   const [hover, setHover] = useState(null);
   if (!points || points.length === 0) {
     return <div className="muted tiny">No runs yet — run a review to start the trend.</div>;
@@ -35,10 +37,24 @@ function SeriesChart({ points, valueOf, fmtValue, color, title }) {
   const W = 320, H = 120, padB = 22;
   const max = Math.max(...points.map(valueOf), 1e-9);
   const bw = (W - 4) / points.length;
+  // running cumulative total (own scale, since it's much bigger than one run)
+  let run = 0;
+  const cum = points.map((p) => (run += valueOf(p)));
+  const cumMax = Math.max(cum[cum.length - 1] || 0, 1e-9);
+  const cx = (i) => 2 + i * bw + bw / 2;
+  const cy = (v) => (H - padB) - (v / cumMax) * (H - padB - 8);
+  const cumPath = cum.map((v, i) => `${cx(i)},${cy(v)}`).join(" ");
   const hp = hover != null ? points[hover] : null;
   return (
     <div>
-      <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted2)", marginBottom: 4 }}>{title}</div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+        <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted2)" }}>{title}</span>
+        {showCumulative && (
+          <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 9.5, color: CUM_COLOR }}>
+            ▬ cumulative → {fmtValue(cumMax)}
+          </span>
+        )}
+      </div>
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} style={{ display: "block" }}
         onMouseLeave={() => setHover(null)}>
         {points.map((p, i) => {
@@ -52,6 +68,12 @@ function SeriesChart({ points, valueOf, fmtValue, color, title }) {
             </g>
           );
         })}
+        {showCumulative && (
+          <>
+            <polyline points={cumPath} fill="none" stroke={CUM_COLOR} strokeWidth="1.5" strokeLinejoin="round" />
+            {hp && <circle cx={cx(hover)} cy={cy(cum[hover])} r="2.5" fill={CUM_COLOR} />}
+          </>
+        )}
         <line x1="0" y1={H - padB} x2={W} y2={H - padB} stroke="var(--line)" strokeWidth="1" />
         {points.length > 1 && (
           <>
@@ -61,7 +83,9 @@ function SeriesChart({ points, valueOf, fmtValue, color, title }) {
         )}
       </svg>
       <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10, color: "var(--muted)", marginTop: 2, minHeight: 14 }}>
-        {hp ? `${fmtDT(hp.at)} · ${fmtValue(valueOf(hp))}` : "Hover a bar for a run"}
+        {hp
+          ? `${fmtDT(hp.at)} · ${fmtValue(valueOf(hp))}${showCumulative ? ` · total so far ${fmtValue(cum[hover])}` : ""}`
+          : "Hover a bar for a run"}
       </div>
     </div>
   );
@@ -77,18 +101,29 @@ const S = {
   badge: (t) => ({ fontFamily: "'JetBrains Mono',monospace", fontSize: 9.5, fontWeight: 600, borderRadius: 4, padding: "1px 6px", color: TIER_META[t]?.color, background: TIER_META[t]?.bg }),
 };
 
+// Stale-while-revalidate cache (module scope survives tab unmount/remount) so
+// re-opening the Token usage tab renders instantly and refreshes in the
+// background instead of showing a blank page for a few seconds each time.
+let _trendCache = null;
+const _usageCache = new Map();  // runId -> usage
+
 export default function UsageView({ runId }) {
-  const [usage, setUsage] = useState(null);
-  const [trend, setTrend] = useState(null);   // per-user over-time totals
+  const [usage, setUsage] = useState(() => (runId ? _usageCache.get(runId) || null : null));
+  const [trend, setTrend] = useState(_trendCache);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState(null);
 
   const load = useCallback(() => {
-    setLoading(true); setErr(null);
-    api.getUsageTrend().then(setTrend).catch(() => {});
+    setErr(null);
+    // Only block with a spinner when we have nothing cached to show yet.
+    const haveCached = _trendCache != null && (!runId || _usageCache.has(runId));
+    setLoading(!haveCached);
+    api.getUsageTrend()
+      .then((t) => { _trendCache = t; setTrend(t); })
+      .catch(() => {});
     if (!runId) { setUsage(null); setLoading(false); return; }
     api.getUsage(runId)
-      .then((u) => setUsage(u))
+      .then((u) => { _usageCache.set(runId, u); setUsage(u); })
       .catch((e) => setErr(e.message || "Failed to load usage"))
       .finally(() => setLoading(false));
   }, [runId]);
@@ -109,6 +144,13 @@ export default function UsageView({ runId }) {
           <RotateCw size={13} className={loading ? "spin" : ""} /> Refresh
         </button>
       </div>
+
+      {/* First load with nothing cached — show a spinner instead of a blank page */}
+      {loading && !trend && !usage && (
+        <div className="muted tiny" style={{ display: "flex", alignItems: "center", gap: 8, padding: "24px 0" }}>
+          <RotateCw size={13} className="spin" /> Loading usage…
+        </div>
+      )}
 
       {/* Your usage over time — across all sessions, independent of the current run */}
       {trend && (
@@ -142,6 +184,7 @@ export default function UsageView({ runId }) {
               fmtValue={fmtUSD}
               color="#3aa981"
               title="Cost per run (over time)"
+              showCumulative
             />
           </div>
         </div>
