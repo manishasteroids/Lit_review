@@ -3,7 +3,9 @@ import PaperChatPanel from "./PaperChatPanel.jsx";
  
 const COLUMNS = [
   { key: "paper", label: "Paper", always: true, width: 300 },
-  { key: "excerpt", label: "Excerpt", always: true, width: 340 },
+  // Abstract comes straight from the source paper (free — no extraction needed).
+  { key: "abstract", label: "Abstract", fromPaper: true, width: 380 },
+  { key: "excerpt", label: "Excerpt", width: 340 },
   { key: "contribution", label: "Contribution", width: 240 },
   { key: "method", label: "Method", width: 200 },
   { key: "metrics", label: "Metrics", width: 200 },
@@ -11,7 +13,7 @@ const COLUMNS = [
   { key: "limitation", label: "Limitation", width: 220 },
   { key: "relevance", label: "Relevance", width: 240 },
 ];
-const DEFAULT_ON = ["paper", "excerpt", "contribution", "metrics", "method"];
+const DEFAULT_ON = ["paper", "abstract", "contribution", "metrics", "method"];
  
 const ACCENT = "#6d5ef6";
 const badge = (bg, fg) => ({
@@ -20,7 +22,7 @@ const badge = (bg, fg) => ({
 });
  
 export default function SourcesView({
-  citeOrder, extractions, runId, apiKey, model,
+  citeOrder, extractions, extractStats, runId, apiKey, model,
   papers = [], included = {}, scope,
   analysisStale = false, busy = false,
   onRemove, onAdd, onReanalyze, onGenerate, hasReview = false,
@@ -92,6 +94,10 @@ export default function SourcesView({
     if (ok) onGenerate();
   }
  
+  // Deep-mode full-text coverage: how many papers were read in full vs abstract.
+  const st = extractStats;
+  const fullCount = st ? (st.fetched || 0) + (st.cached || 0) : 0;
+
   return (
     <div>
       {/* ── Toolbar ─────────────────────────────────────────── */}
@@ -134,6 +140,24 @@ export default function SourcesView({
       )}
  
       {/* ── Column picker ───────────────────────────────────── */}
+      {st && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: 8, marginBottom: 12,
+          fontFamily: "'JetBrains Mono',monospace", fontSize: 11, color: "var(--muted)",
+        }}>
+          <span style={{
+            color: "var(--green)", background: "var(--green-soft)",
+            borderRadius: 5, padding: "2px 8px", fontWeight: 600,
+          }}>
+            Full text: {fullCount}/{st.total || 0}
+          </span>
+          <span>
+            {st.fetched || 0} fetched
+            {st.cached ? ` · ${st.cached} from cache` : ""}
+            {st.fell_back ? ` · ${st.fell_back} abstract-only (paywalled)` : ""}
+          </span>
+        </div>
+      )}
       <div className="col-picker">
         <span className="eyebrow" style={{ marginRight: 4 }}>Columns</span>
         {COLUMNS.map((c) => (
@@ -202,9 +226,12 @@ export default function SourcesView({
                         </td>
                       );
                     }
+                    // abstract (and excerpt) render as wide text; abstract is
+                    // read from the paper, other columns from the extraction.
+                    const value = c.fromPaper ? p[c.key] : e[c.key];
                     return (
-                      <td key={c.key} className={c.key === "excerpt" ? "pt-excerpt" : ""}>
-                        {e[c.key] || <span className="pt-na">n/a</span>}
+                      <td key={c.key} className={c.key === "abstract" || c.key === "excerpt" ? "pt-excerpt" : ""}>
+                        {value || <span className="pt-na">n/a</span>}
                       </td>
                     );
                   })}

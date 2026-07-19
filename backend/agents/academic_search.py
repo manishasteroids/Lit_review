@@ -42,8 +42,8 @@ OPENALEX_API = "https://api.openalex.org/works"
  
 class AcademicSearchAgent(Agent):
     name = "academic_search"
- 
-    def run(self, topic: str, queries: list[str], limit: int = 8) -> list[dict]:
+
+    def run(self, topic: str, queries: list[str], limit: int = 50) -> list[dict]:
         terms = _uniq([topic, *(queries or [])])[:3]
  
         merged: dict[str, dict] = {}
@@ -190,9 +190,9 @@ class AcademicSearchAgent(Agent):
     def _openalex(self, terms: list[str]) -> list[dict]:
         out = []
         with httpx.Client(timeout=25, headers=UA) as client:
-            for q in terms[:2]:
+            for q in terms[:3]:
                 try:
-                    r = client.get(OPENALEX_API, params={"search": q, "per_page": 15, "mailto": _mailto()})
+                    r = client.get(OPENALEX_API, params={"search": q, "per_page": 30, "mailto": _mailto()})
                     r.raise_for_status()
                     results = r.json().get("results") or []
                 except Exception:
@@ -229,7 +229,7 @@ class AcademicSearchAgent(Agent):
     def _s2_once(self, client: httpx.Client, query: str) -> list[dict]:
         for _ in range(2):
             try:
-                r = client.get(S2_SEARCH, params={"query": query, "limit": 20, "fields": S2_FIELDS})
+                r = client.get(S2_SEARCH, params={"query": query, "limit": 40, "fields": S2_FIELDS})
                 if r.status_code == 429:
                     time.sleep(1.5)
                     continue
@@ -243,9 +243,9 @@ class AcademicSearchAgent(Agent):
         ns = {"a": "http://www.w3.org/2005/Atom"}
         out = []
         with httpx.Client(timeout=25, headers=UA) as client:
-            for q in terms[:2]:
+            for q in terms[:3]:
                 try:
-                    r = client.get(ARXIV_API, params={"search_query": f"all:{q}", "start": 0, "max_results": 10})
+                    r = client.get(ARXIV_API, params={"search_query": f"all:{q}", "start": 0, "max_results": 25})
                     if r.status_code != 200:
                         continue
                     root = ET.fromstring(r.text)
@@ -282,10 +282,10 @@ class AcademicSearchAgent(Agent):
         pmids: list[str] = []
         out = []
         with httpx.Client(timeout=25, headers=UA) as client:
-            for q in terms[:2]:
+            for q in terms[:3]:
                 try:
                     r = client.get(PUBMED_ESEARCH, params={
-                        **base, "db": "pubmed", "term": q, "retmax": 12, "retmode": "json"})
+                        **base, "db": "pubmed", "term": q, "retmax": 25, "retmode": "json"})
                     r.raise_for_status()
                     for pid in r.json().get("esearchresult", {}).get("idlist", []):
                         if pid not in pmids:
@@ -297,7 +297,7 @@ class AcademicSearchAgent(Agent):
                 return []
             try:
                 r = client.get(PUBMED_EFETCH, params={
-                    **base, "db": "pubmed", "id": ",".join(pmids[:20]), "retmode": "xml"})
+                    **base, "db": "pubmed", "id": ",".join(pmids[:50]), "retmode": "xml"})
                 r.raise_for_status()
                 root = ET.fromstring(r.text)
             except Exception:

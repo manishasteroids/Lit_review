@@ -26,7 +26,29 @@ class CriticSynthesizerAgent(Agent):
     )
 
     def run(self, extractions: list[dict]) -> dict:
-        out = self.llm.call(
-            user_text=f"Extracted papers:\n{json.dumps(extractions)}", system=self.SYSTEM
-        )
-        return self.llm.parse_json(out)
+        # The `ranked` array holds one entry PER paper, so the output budget
+        # must scale with the corpus size — otherwise a large shortlist (e.g.
+        # 50 papers) truncates the JSON mid-array and parsing fails.
+        n = len(extractions)
+        max_tokens = min(8000, 1000 + 70 * n)
+        # Send only the fields needed to find themes/gaps and rank — not the
+        # full excerpt/contribution/relevance prose. Roughly halves the input.
+        compact = [
+            {k: e.get(k) for k in ("idx", "method", "finding", "limitation", "concepts")}
+            for e in extractions
+        ]
+        try:
+            out = self.llm.call(
+                user_text=f"Extracted papers:\n{json.dumps(compact)}",
+                system=self.SYSTEM,
+                max_tokens=max_tokens,
+            )
+            return self.llm.parse_json(out)
+        except Exception:
+            # Degrade gracefully instead of hard-failing the whole pipeline:
+            # rank every paper equally so downstream citation order still works.
+            return {
+                "themes": [], "consensus": "", "tensions": "",
+                "gaps": [], "biases": [],
+                "ranked": [{"idx": e.get("idx"), "score": 50, "reason": ""} for e in extractions],
+            }

@@ -4,7 +4,7 @@ import { ensureAuth, AuthButtons, useSession } from "./Auth.jsx";
 import { authEnabled } from "./supabase.js";
  
 import PipelineRail from "./components/PipelineRail.jsx";
-import QueryInput, { ModelBar } from "./components/QueryInput.jsx";
+import QueryInput, { ModeBar } from "./components/QueryInput.jsx";
 import PaperFilter from "./components/PaperFilter.jsx";
 import ReviewView from "./components/ReviewView.jsx";
 import SourcesView from "./components/SourcesView.jsx";
@@ -89,7 +89,9 @@ export default function App() {
   const signedOut = authEnabled && !session;
  
   const [apiKey, setApiKey] = useState("");
-  const [model, setModel] = useState("claude-sonnet-4-6");
+  const [model, setModel] = useState("claude-sonnet-4-6");  // still used for paper chat
+  const [mode, setMode] = useState("medium");               // search mode drives the pipeline
+  const [modes, setModes] = useState([]);
   const [topic, setTopic] = useState("");
   const [stage, setStage] = useState("query");
   const [done, setDone] = useState({});
@@ -103,6 +105,7 @@ export default function App() {
   const [papers, setPapers] = useState([]);
   const [approved, setApproved] = useState({});
   const [extractions, setExtractions] = useState([]);
+  const [extractStats, setExtractStats] = useState(null);  // full-text coverage (Deep)
   const [synth, setSynth] = useState(null);
   const [sections, setSections] = useState({});
   const [sideModules, setSideModules] = useState(null);
@@ -132,10 +135,19 @@ export default function App() {
   }, [signedOut]);
  
   useEffect(() => { refreshSessions(); }, [refreshSessions]);
- 
+
+  // Which model each pipeline stage runs on (per-purpose routing), for the rail.
+  const [pipelineModels, setPipelineModels] = useState(null);
+  useEffect(() => {
+    api.pipelineModels(model, mode).then(setPipelineModels).catch(() => {});
+  }, [model, mode]);
+  useEffect(() => {
+    api.getModes().then((r) => setModes(r.modes || [])).catch(() => {});
+  }, []);
+
   function reset() {
     setRunId(null); setReform(null); setPapers([]); setApproved({});
-    setExtractions([]); setSynth(null); setSections({}); setSideModules(null);
+    setExtractions([]); setExtractStats(null); setSynth(null); setSections({}); setSideModules(null);
     setEvalRes(null); setError(null); setDone({}); setStage("query");
     setTab("review"); setProgressMsgs([]); setNotes({});
     setIncluded({}); setAnalysisStale(false);
@@ -183,22 +195,20 @@ export default function App() {
     refreshSessions();
   }
  
-  const includedPapers = papers.filter((p) => included[p.idx]);
-  let citeOrder;
-  if (!includedPapers.length) {
-    citeOrder = [];
-  } else if (synth?.ranked?.length) {
-    // Ranked papers first, then any included papers not yet in the ranking
-    // (e.g. a just-added paper) appended — so they show before Update analysis.
+  const approvedList = papers.filter((p) => approved[p.idx]);
+  // Order approved papers by the synthesizer's ranking, but NEVER drop a paper
+  // just because the ranking omitted it (e.g. a partial/rate-limited synth
+  // result). Ranked papers come first, then any remaining approved papers.
+  const citeOrder = (() => {
+    if (!approvedList.length) return [];
+    if (!synth?.ranked?.length) return approvedList;
     const ranked = synth.ranked
-      .map((r) => includedPapers.find((p) => p.idx === r.idx))
+      .map((r) => approvedList.find((p) => p.idx === r.idx))
       .filter(Boolean);
-    const rankedIdx = new Set(ranked.map((p) => p.idx));
-    const rest = includedPapers.filter((p) => !rankedIdx.has(p.idx));
-    citeOrder = [...ranked, ...rest];
-  } else {
-    citeOrder = includedPapers;
-  }
+    const seen = new Set(ranked.map((p) => p.idx));
+    const rest = approvedList.filter((p) => !seen.has(p.idx));
+    return [...ranked, ...rest];
+  })();
   const citeNum = {};
   citeOrder.forEach((p, i) => (citeNum[p.idx] = i + 1));
  
@@ -212,6 +222,7 @@ export default function App() {
         topic.trim(),
         apiKey || undefined,
         model,
+        mode,
         (event) => {
           if (event.type === "progress") {
             setProgressMsgs((prev) => {
@@ -253,6 +264,7 @@ export default function App() {
       setStage("extract");
       const synRes = await api.synthesize(runId, apiKey || undefined, model, notes);
       setExtractions(synRes.extractions);
+      setExtractStats(synRes.extract_stats || null);
       setSynth(synRes.synthesis);
       setSideModules(synRes.side_modules);
       // Everything approved at the filter stage starts "included" on the Sources page.
@@ -533,7 +545,7 @@ export default function App() {
           {/* CENTER: Model selection + prompt / stage content */}
           <div className="ccol">
             <div style={{ marginBottom: 16, display: "flex", justifyContent: "flex-end" }}>
-              <ModelBar model={model} setModel={setModel} apiKey={apiKey} setApiKey={setApiKey} />
+              <ModeBar modes={modes} mode={mode} setMode={setMode} apiKey={apiKey} setApiKey={setApiKey} />
             </div>
  
             {error && (
@@ -642,7 +654,7 @@ export default function App() {
                   {tab === "sources" && (
                     <SourcesView
                       citeOrder={citeOrder} extractions={extractions}
-                      runId={runId} apiKey={apiKey} model={model}
+                      extractStats={extractStats} runId={runId} apiKey={apiKey} model={model}
                       papers={papers} included={included} scope={reform?.scope}
                       analysisStale={analysisStale} busy={busy}
                       onRemove={removeSources} onAdd={addPaperToSources}
@@ -693,6 +705,7 @@ export default function App() {
               kg={sideModules?.knowledge_graph}
               ranked={synth?.ranked?.length}
               dataReady={!!sideModules}
+              models={pipelineModels}
               showMemory={false}
             />
           </div>

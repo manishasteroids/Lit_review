@@ -21,6 +21,7 @@ from agents.query_reformulator import QueryReformulator
 from agents.reader_extractor import ReaderExtractorAgent
 from agents.writer import WriterAgent
 from core.config import settings
+from core.config import settings
 from core.llm_client import LLMClient
 from pipeline.data_analysis import comparison_table, year_distribution
 from pipeline.knowledge_graph import build_knowledge_graph
@@ -38,41 +39,70 @@ class RunState:
     sections: dict = field(default_factory=dict)
     eval_result: Optional[dict] = None
     stage: str = "query"
- 
- 
+    mode: Optional[str] = None      # search mode, so later stages reuse its models
+    extract_stats: Optional[dict] = None   # full-text coverage for Deep runs
+
+
 RUNS: dict[str, RunState] = {}
  
  
 class SamhitaPipeline:
     """One instance per request; agents are cheap to construct."""
- 
-    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
-        # The pipeline (esp. Academic Search) relies on Anthropic's web-search
-        # tool and strict JSON, so it always runs on Claude. If a non-Claude
-        # backbone (e.g. Gemini) is selected, fall back to the default Claude
-        # model here — the selected model is still used for the paper chat/assess.
-        pipeline_model = model
-        if model and "gemini" in model.lower():
-            pipeline_model = settings.model
-        self.llm = LLMClient(api_key=api_key, model=pipeline_model)
-        self.reformulator = QueryReformulator(self.llm)
-        self.searcher = AcademicSearchAgent(self.llm)
-        self.extractor = ReaderExtractorAgent(self.llm)
-        self.synthesizer = CriticSynthesizerAgent(self.llm)
-        self.writer = WriterAgent(self.llm)
-        self.evaluator = EvaluatorAgent(self.llm)
- 
+
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None,
+                 mode: Optional[str] = None):
+        # A "mode" (lite / systematic / deep) bundles the paper count, model
+        # routing, and full-text depth. When given it drives everything; without
+        # it we fall back to the model_policy preset (settings.*).
+        from core.modes import resolve as _resolve_mode
+        self.mode_name = mode
+        m = _resolve_mode(mode) if mode else None
+
+        if m:
+            fast_m, mid_m, write_m = m["fast"], m["mid"], m["write"]
+            self.search_limit = m["search_limit"]
+            self.full_text = m["full_text"]
+        else:
+            pipeline_model = model
+            if model and "gemini" in model.lower():
+                pipeline_model = settings.model
+            if settings.per_purpose_routing:
+                fast_m, mid_m = settings.fast_model, settings.mid_model
+            else:
+                fast_m = mid_m = pipeline_model
+            write_m = settings.write_model or pipeline_model
+            self.search_limit = settings.search_limit
+            self.full_text = False
+
+        self.fast = LLMClient(api_key=api_key, model=fast_m)   # reformulate, search, extract
+        self.mid = LLMClient(api_key=api_key, model=mid_m)     # synthesize, evaluate
+        self.main = LLMClient(api_key=api_key, model=write_m)  # write
+        self._clients = [self.fast, self.mid, self.main]
+        self.llm = self.main  # generic handle for anything that still references it
+
+        self.reformulator = QueryReformulator(self.fast)
+        self.searcher = AcademicSearchAgent(self.fast)
+        self.extractor = ReaderExtractorAgent(self.fast)
+        self.synthesizer = CriticSynthesizerAgent(self.mid)
+        self.writer = WriterAgent(self.main)
+        self.evaluator = EvaluatorAgent(self.mid)
+
+    def _attribute(self, run_id: str) -> None:
+        """Tag every per-purpose client with the session id for the usage ledger."""
+        for c in self._clients:
+            c.run_id = run_id
+
     # ---- stage 1+2: reformulate then search -----------------------------
     def reformulate_and_search(self, topic: str, on_progress=None) -> RunState:
         def emit(step, message, detail=None):
             if on_progress:
                 on_progress({"step": step, "message": message, "detail": detail})
- 
-        run = RunState(run_id=str(uuid.uuid4()), topic=topic)
-        self.llm.run_id = run.run_id  # attribute every call below to this session
- 
+
+        run = RunState(run_id=str(uuid.uuid4()), topic=topic, mode=self.mode_name)
+        self._attribute(run.run_id)  # attribute every call below to this session
+
         emit("reformulate", "Query Reformulator is analysing your research question…")
-        self.llm.stage = "reformulate"
+        self.fast.stage = "reformulate"
         run.reform = self.reformulator.run(topic)
         queries = run.reform.get("queries", [])
         emit("reformulate", f"Expanded into {len(queries)} search strategies", queries)
@@ -80,8 +110,8 @@ class SamhitaPipeline:
         emit("search", "Searching Semantic Scholar…", "semantic_scholar")
         emit("search", "Searching arXiv…", "arxiv")
         emit("search", "Searching PubMed & bioRxiv…", "pubmed")
-        self.llm.stage = "search"
-        run.papers = self.searcher.run(topic, queries)
+        self.fast.stage = "search"
+        run.papers = self.searcher.run(topic, queries, limit=self.search_limit)
         emit("search", f"Found {len(run.papers)} papers — aggregating results…")
  
         run.stage = "filter"
@@ -96,18 +126,19 @@ class SamhitaPipeline:
  
     # ---- stage 4+5: extract then critique/synthesize/rank ---------------
     def extract_and_synthesize(self, run: RunState) -> RunState:
-        self.llm.run_id = run.run_id
-        self.llm.stage = "extract"
-        run.extractions = self.extractor.run(run.approved_papers)
-        self.llm.stage = "synthesize"
+        self._attribute(run.run_id)
+        self.fast.stage = "extract"
+        run.extractions = self.extractor.run(run.approved_papers, full_text=self.full_text)
+        run.extract_stats = self.extractor.full_text_stats
+        self.mid.stage = "synthesize"
         run.synthesis = self.synthesizer.run(run.extractions)
         run.stage = "write"
         return run
  
     # ---- stage 6: write -----------------------------------------------
     def write(self, run: RunState) -> RunState:
-        self.llm.run_id = run.run_id
-        self.llm.stage = "write"
+        self._attribute(run.run_id)
+        self.main.stage = "write"
         ordered = self._ordered_papers(run)
         extractions_by_idx = {e["idx"]: e for e in run.extractions}
         run.sections = self.writer.run(run.topic, ordered, extractions_by_idx, run.synthesis or {})
@@ -162,8 +193,8 @@ class SamhitaPipeline:
  
     # ---- evaluation (open question module) -------------------------------
     def evaluate(self, run: RunState) -> dict:
-        self.llm.run_id = run.run_id
-        self.llm.stage = "evaluate"
+        self._attribute(run.run_id)
+        self.mid.stage = "evaluate"
         run.eval_result = self.evaluator.run(
             run.topic, run.sections, len(run.approved_papers)
         )

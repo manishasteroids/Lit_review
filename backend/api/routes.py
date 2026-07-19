@@ -13,10 +13,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
  
 from core.auth import require_user
+from core.config import settings
 from core.db import (delete_all_for_user, delete_session, get_session,
                      list_sessions, save_session)
 from core.llm_client import LLMClient
 from core.paper_text import fetch_paper_pdf, fetch_paper_text
+from core.usage import get_usage
 from pipeline.orchestrator import RUNS, RunState, SamhitaPipeline
  
 router = APIRouter(prefix="/api")
@@ -59,8 +61,9 @@ class CreateRunBody(BaseModel):
     topic: str
     api_key: str | None = None
     model: str | None = None
- 
- 
+    mode: str | None = None      # lite | medium | deep (drives papers + models + depth)
+
+
 class FilterBody(BaseModel):
     approved_indices: list[int]
  
@@ -68,6 +71,7 @@ class FilterBody(BaseModel):
 class SynthesizeBody(BaseModel):
     api_key: str | None = None
     model: str | None = None
+    mode: str | None = None
     notes: dict | None = None
  
  
@@ -127,7 +131,7 @@ async def create_run_stream(body: CreateRunBody, user_id: str = Depends(require_
  
     async def run_pipeline():
         try:
-            pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model)
+            pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model, mode=body.mode)
             run = await asyncio.to_thread(
                 pipeline.reformulate_and_search, body.topic, on_progress
             )
@@ -178,7 +182,7 @@ async def create_run_stream(body: CreateRunBody, user_id: str = Depends(require_
  
 @router.post("/runs")
 def create_run(body: CreateRunBody, user_id: str = Depends(require_user)):
-    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model)
+    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model, mode=body.mode)
     try:
         run = pipeline.reformulate_and_search(body.topic)
     except Exception as e:
@@ -240,13 +244,14 @@ def synthesize(run_id: str, body: SynthesizeBody, user_id: str = Depends(require
         raise HTTPException(502, f"Reader & Extractor / Critic & Synthesizer failed: {e}")
     side = _persist_done(run, user_id, notes=body.notes)
     return {"run_id": run.run_id, "extractions": run.extractions,
-            "synthesis": run.synthesis, "side_modules": side, "stage": run.stage}
- 
- 
+            "synthesis": run.synthesis, "side_modules": side, "stage": run.stage,
+            "extract_stats": run.extract_stats}
+
+
 @router.post("/runs/{run_id}/write")
 def write(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
-    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model)
+    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
     try:
         pipeline.write(run)
     except Exception as e:
@@ -337,7 +342,7 @@ def reanalyze(run_id: str, body: ReanalyzeBody, user_id: str = Depends(require_u
 @router.post("/runs/{run_id}/evaluate")
 def evaluate(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
-    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model)
+    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
     try:
         result = pipeline.evaluate(run)
     except Exception as e:
@@ -373,7 +378,7 @@ def assess_paper(run_id: str, body: AssessBody, user_id: str = Depends(require_u
         f"PAPER: {paper.get('title', '')} ({paper.get('year', '?')})\n"
         f"ABSTRACT: {paper.get('abstract', '') or 'n/a'}"
     )
-    llm = LLMClient(api_key=body.api_key, model=body.model)
+    llm = LLMClient(api_key=body.api_key, model=body.model, run_id=run_id, stage="assess")
     try:
         data = LLMClient.parse_json(llm.call(user_text=user, system=system, max_tokens=400))
     except Exception as e:
@@ -420,7 +425,7 @@ def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require
         convo += f"{role}: {m.get('content', '')}\n"
     convo += f"User: {body.question}\nAssistant:"
  
-    llm = LLMClient(api_key=body.api_key, model=body.model)
+    llm = LLMClient(api_key=body.api_key, model=body.model, run_id=run_id, stage="chat")
     pdf_bytes = fetch_paper_pdf(paper.get("url"))
  
     image_blocks = []
@@ -510,8 +515,55 @@ def get_run_state(run_id: str, user_id: str = Depends(require_user)):
 @router.get("/sessions")
 def sessions_list(user_id: str = Depends(require_user)):
     return list_sessions(user_id)
- 
- 
+
+
+@router.get("/sessions/{session_id}/usage")
+def session_usage(session_id: str, user_id: str = Depends(require_user)):
+    """Token counts + dollar cost for one session, by stage and model. DB read."""
+    return get_usage(session_id)
+
+
+@router.get("/usage/trend")
+def usage_trend(days: int = 30, tz_offset: int = 0, user_id: str = Depends(require_user)):
+    """Per-day token + cost totals for the signed-in user, plus an all-time
+    total — for the trendline chart. `tz_offset` is the browser's
+    getTimezoneOffset() so days are grouped in the user's local time. DB read."""
+    from core.usage import get_usage_trend
+    return get_usage_trend(user_id, days, tz_offset)
+
+
+@router.get("/modes")
+def list_modes():
+    """The search modes (Lite / Medium / Deep) for the UI selector. No auth."""
+    from core.modes import public_list, DEFAULT_MODE
+    return {"default": DEFAULT_MODE, "modes": public_list()}
+
+
+@router.get("/pipeline/models")
+def pipeline_models(model: str | None = None, mode: str | None = None):
+    """Which model each pipeline stage runs on, for the UI rail. If a mode is
+    given it drives the routing; otherwise falls back to the model_policy preset.
+    Pure config read — no user data, so no auth required."""
+    if mode:
+        from core.modes import resolve
+        m = resolve(mode)
+        fast, mid, write_model = m["fast"], m["mid"], m["write"]
+        per_purpose = True
+    else:
+        selected = model or settings.model
+        pipeline_model = settings.model if (selected and "gemini" in selected.lower()) else selected
+        write_model = settings.write_model or pipeline_model
+        per_purpose = settings.per_purpose_routing
+        fast, mid = (settings.fast_model, settings.mid_model) if per_purpose else (write_model, write_model)
+    return {
+        "per_purpose_routing": per_purpose,
+        "stages": {
+            "reformulate": fast, "search": fast, "extract": fast,
+            "synthesize": mid, "evaluate": mid, "write": write_model,
+        },
+    }
+
+
 @router.get("/sessions/{session_id}")
 def session_get(session_id: str, user_id: str = Depends(require_user)):
     s = get_session(session_id, user_id)

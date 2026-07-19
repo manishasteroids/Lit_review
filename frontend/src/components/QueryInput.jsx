@@ -71,6 +71,52 @@ export function ModelBar({ model, setModel, apiKey, setApiKey }) {
   );
 }
 
+// Fallback if /api/modes hasn't loaded yet.
+const FALLBACK_MODES = [
+  { id: "lite", label: "Lite", blurb: "Fast & cheap · ~20 papers" },
+  { id: "medium", label: "Medium Research", blurb: "Balanced · ~50 papers" },
+  { id: "deep", label: "Deep search", blurb: "Best quality · full text" },
+];
+
+// Dropdown that replaces the raw model picker: the user picks HOW THOROUGH the
+// review should be, and the backend maps that to papers + models + read depth.
+export function ModeBar({ modes, mode, setMode, apiKey, setApiKey }) {
+  const list = modes && modes.length ? modes : FALLBACK_MODES;
+  const current = list.find((m) => m.id === mode) || list[0];
+  return (
+    <div className="backbone">
+      <div className="eyebrow" style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
+        <Cpu size={11} /> Search mode
+      </div>
+      <div className="model-select-wrap">
+        <select
+          className="model-select"
+          value={mode}
+          onChange={(e) => setMode(e.target.value)}
+        >
+          {list.map((m) => (
+            <option key={m.id} value={m.id}>{m.label}</option>
+          ))}
+        </select>
+        <ChevronRight size={14} className="model-caret" />
+      </div>
+      {current?.blurb && (
+        <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.4 }}>
+          {current.blurb}
+        </div>
+      )}
+      <div className="keyrow" style={{ marginTop: 10 }}>
+        <input
+          type="password"
+          placeholder="sk-ant-… (optional — falls back to server key)"
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+        />
+      </div>
+    </div>
+  );
+}
+
 export default function QueryInput({ topic, setTopic, busy, onRun }) {
   return (
     <div className="card">
