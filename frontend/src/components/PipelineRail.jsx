@@ -3,6 +3,29 @@ import {
   Sparkles, Filter, Search, Check, FileText, Brain, PenTool,
   RotateCw, Network, ListOrdered, BarChart3,
 } from "./icons.jsx";
+import { shortModel, tierOf, TIER_META } from "../modelTiers.js";
+
+// small colored chip showing which model a stage runs on
+function ModelChip({ model, apis }) {
+  if (apis) {
+    return (
+      <span style={{
+        fontFamily: "'JetBrains Mono',monospace", fontSize: 9, fontWeight: 600,
+        color: "var(--green)", background: "var(--green-soft)", borderRadius: 4,
+        padding: "1px 5px", marginTop: 3, display: "inline-block",
+      }}>APIs · free</span>
+    );
+  }
+  if (!model) return null;
+  const meta = TIER_META[tierOf(model)];
+  return (
+    <span style={{
+      fontFamily: "'JetBrains Mono',monospace", fontSize: 9, fontWeight: 600,
+      color: meta.color, background: meta.bg, borderRadius: 4,
+      padding: "1px 5px", marginTop: 3, display: "inline-block",
+    }}>{shortModel(model)}</span>
+  );
+}
 
 export const STAGES = [
   { key: "query", label: "User Topic / Query", sub: "Research question input", icon: Sparkles, kind: "entry" },
@@ -14,8 +37,9 @@ export const STAGES = [
   { key: "write", label: "Writer Agent", sub: "Structured literature review", icon: PenTool, kind: "output" },
 ];
 
-export default function PipelineRail({ stage, busy, done, kg, ranked, dataReady }) {
+export default function PipelineRail({ stage, busy, done, kg, ranked, dataReady, models }) {
   const curIdx = STAGES.findIndex((s) => s.key === stage);
+  const stageModels = models?.stages || {};
 
   return (
     <div className="rail">
@@ -39,6 +63,9 @@ export default function PipelineRail({ stage, busy, done, kg, ranked, dataReady 
             <div className="meta">
               <div className="lab">{s.label}</div>
               <div className="sub">{s.sub}</div>
+              {s.key === "search"
+                ? <ModelChip apis />
+                : <ModelChip model={stageModels[s.key]} />}
             </div>
           </div>
         );

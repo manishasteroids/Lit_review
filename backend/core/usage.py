@@ -129,3 +129,53 @@ def get_usage(session_id: str) -> dict:
         "by_stage": [d(r) for r in by_stage],
         "by_model": [d(r) for r in by_model],
     }
+
+
+def get_usage_trend(user_id: str, days: int = 30, tz_offset_min: int = 0) -> dict:
+    """Per-day token + cost totals for one USER (across all their sessions),
+    plus an all-time total. Joins llm_calls -> sessions by user_id.
+
+    `tz_offset_min` is the browser's Date.getTimezoneOffset() (minutes; +480 for
+    PST). created_at is stored in UTC, so we shift by -offset to group calls by
+    the user's LOCAL calendar day instead of the UTC day.
+    """
+    shift = -int(tz_offset_min)              # local = utc - offset
+    tz_mod = f"{shift:+d} minutes"           # e.g. "-480 minutes" (PST), "+330 minutes" (IST)
+    with _conn() as conn:
+        by_day = conn.execute(
+            "SELECT substr(datetime(c.created_at, ?), 1, 10) AS day, "
+            "COUNT(*) calls, COALESCE(SUM(c.in_tok),0) in_tok, "
+            "COALESCE(SUM(c.out_tok),0) out_tok, COALESCE(SUM(c.cost_usd),0) cost_usd "
+            "FROM llm_calls c JOIN sessions s ON c.session_id = s.id "
+            f"WHERE s.user_id = {_PH} "
+            "GROUP BY day ORDER BY day DESC "
+            f"LIMIT {int(days)}",
+            (tz_mod, user_id),
+        ).fetchall()
+        total = conn.execute(
+            "SELECT COUNT(*) calls, COALESCE(SUM(c.in_tok),0) in_tok, "
+            "COALESCE(SUM(c.out_tok),0) out_tok, COALESCE(SUM(c.cost_usd),0) cost_usd "
+            "FROM llm_calls c JOIN sessions s ON c.session_id = s.id "
+            f"WHERE s.user_id = {_PH}",
+            (user_id,),
+        ).fetchone()
+        # Per-run time-series points (each review = one point at its date+time).
+        # `at` is the raw UTC ISO timestamp; the frontend renders it in local time.
+        by_session = conn.execute(
+            "SELECT s.id, s.topic, MIN(c.created_at) AS at, "
+            "COUNT(*) calls, COALESCE(SUM(c.in_tok),0) in_tok, "
+            "COALESCE(SUM(c.out_tok),0) out_tok, COALESCE(SUM(c.cost_usd),0) cost_usd "
+            "FROM llm_calls c JOIN sessions s ON c.session_id = s.id "
+            f"WHERE s.user_id = {_PH} "
+            "GROUP BY s.id ORDER BY at DESC LIMIT 60",
+            (user_id,),
+        ).fetchall()
+
+    days_asc = [dict(r) for r in by_day][::-1]   # oldest -> newest for charting
+    sessions_asc = [dict(r) for r in by_session][::-1]
+    return {
+        "prices_effective": PRICES_EFFECTIVE,
+        "total": dict(total) if total else {"calls": 0, "in_tok": 0, "out_tok": 0, "cost_usd": 0},
+        "by_day": days_asc,
+        "by_session": sessions_asc,
+    }

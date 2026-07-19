@@ -65,9 +65,20 @@ class WriterAgent(Agent):
             f"Gaps: {'; '.join(synthesis.get('gaps', []))}\n"
         )
 
+        # The `base` corpus is identical across all 4 section calls, so cache it:
+        # it's written to cache once (1.25x) and read back at 0.1x for the other
+        # three sections instead of paying full input price 4x. Only cache when
+        # it's big enough to clear the provider's minimum cacheable size.
+        cache = base if len(base) > 4000 else None
+
         sections: dict[str, str] = {}
         for key, prompt in SECTION_SPECS:
-            sections[key] = self.llm.call(
-                user_text=base + "\n" + prompt, system=SYSTEM, max_tokens=1500
-            )
+            if cache:
+                sections[key] = self.llm.call(
+                    user_text=prompt, system=SYSTEM, max_tokens=1500, cache_prefix=cache
+                )
+            else:
+                sections[key] = self.llm.call(
+                    user_text=base + "\n" + prompt, system=SYSTEM, max_tokens=1500
+                )
         return sections

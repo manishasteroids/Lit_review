@@ -30,11 +30,11 @@ async function request(path, body) {
  * onEvent(event) is called for each parsed event object.
  * Resolves with the final "done" event payload, or throws on "error".
  */
-async function streamRun(topic, apiKey, model, onEvent) {
+async function streamRun(topic, apiKey, model, mode, onEvent) {
   const res = await fetch(BASE + "/api/runs/stream", {
     method: "POST",
     headers: await authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ topic, api_key: apiKey || undefined, model }),
+    body: JSON.stringify({ topic, api_key: apiKey || undefined, model, mode }),
   });
   if (!res.ok) {
     let detail = "Search failed (" + res.status + ")";
@@ -109,8 +109,25 @@ export const api = {
       api_key: apiKey,
       model,
     }),
- 
-  // Session history — no LLM calls
+
+  // Search modes for the selector — no LLM calls
+  getModes: () => fetch(BASE + "/api/modes").then((r) => r.json()),
+
+  // Which model each pipeline stage runs on, given a mode — no LLM calls
+  pipelineModels: (model, mode) =>
+    fetch(BASE + "/api/pipeline/models?model=" + encodeURIComponent(model || "") +
+      "&mode=" + encodeURIComponent(mode || "")).then((r) => r.json()),
+
+  // Token usage & cost for a session — no LLM calls
+  getUsage: async (runId) =>
+    fetch(BASE + "/api/sessions/" + runId + "/usage", { headers: await authHeaders() }).then((r) => r.json()),
+
+  // Per-day token + cost trend for the signed-in user (grouped in local time)
+  getUsageTrend: async (days = 30) =>
+    fetch(BASE + "/api/usage/trend?days=" + days + "&tz_offset=" + new Date().getTimezoneOffset(),
+      { headers: await authHeaders() }).then((r) => r.json()),
+
+  // Session history â€” no LLM calls
   listSessions: async () =>
     fetch(BASE + "/api/sessions", { headers: await authHeaders() }).then((r) => r.json()),
   getSession: async (id) =>

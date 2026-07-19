@@ -19,6 +19,54 @@ const fmtUSD = (n) => "$" + (n ?? 0).toFixed(4);
 const fmtTok = (n) => (n ?? 0).toLocaleString();
 const fmtSec = (ms) => (ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : (ms ?? 0) + "ms");
 
+// local date+time label for a UTC ISO timestamp
+const fmtDT = (iso) => {
+  try {
+    return new Date(iso).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  } catch { return iso || ""; }
+};
+
+// One time-series bar chart (per run) — X = date+time, Y = the chosen value.
+function SeriesChart({ points, valueOf, fmtValue, color, title }) {
+  const [hover, setHover] = useState(null);
+  if (!points || points.length === 0) {
+    return <div className="muted tiny">No runs yet — run a review to start the trend.</div>;
+  }
+  const W = 320, H = 120, padB = 22;
+  const max = Math.max(...points.map(valueOf), 1e-9);
+  const bw = (W - 4) / points.length;
+  const hp = hover != null ? points[hover] : null;
+  return (
+    <div>
+      <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted2)", marginBottom: 4 }}>{title}</div>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} style={{ display: "block" }}
+        onMouseLeave={() => setHover(null)}>
+        {points.map((p, i) => {
+          const h = (valueOf(p) / max) * (H - padB - 6);
+          const x = 2 + i * bw;
+          return (
+            <g key={p.id || i} onMouseEnter={() => setHover(i)}>
+              <rect x={x} y={0} width={bw} height={H} fill="transparent" />
+              <rect x={x + 0.7} y={H - padB - h} width={Math.max(1.2, bw - 1.4)} height={Math.max(1, h)}
+                rx={1.2} fill={color} opacity={hover === i ? 1 : 0.72} />
+            </g>
+          );
+        })}
+        <line x1="0" y1={H - padB} x2={W} y2={H - padB} stroke="var(--line)" strokeWidth="1" />
+        {points.length > 1 && (
+          <>
+            <text x="2" y={H - 6} fontSize="8" fill="var(--muted2)" fontFamily="monospace">{fmtDT(points[0].at)}</text>
+            <text x={W - 2} y={H - 6} fontSize="8" fill="var(--muted2)" fontFamily="monospace" textAnchor="end">{fmtDT(points[points.length - 1].at)}</text>
+          </>
+        )}
+      </svg>
+      <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10, color: "var(--muted)", marginTop: 2, minHeight: 14 }}>
+        {hp ? `${fmtDT(hp.at)} · ${fmtValue(valueOf(hp))}` : "Hover a bar for a run"}
+      </div>
+    </div>
+  );
+}
+
 const S = {
   card: { border: "1px solid var(--line)", borderRadius: 10, padding: "14px 16px", background: "var(--card, #fff)" },
   bignum: { fontFamily: "'JetBrains Mono',monospace", fontSize: 30, fontWeight: 600, color: "var(--indigo)", lineHeight: 1.1 },
@@ -31,12 +79,14 @@ const S = {
 
 export default function UsageView({ runId }) {
   const [usage, setUsage] = useState(null);
+  const [trend, setTrend] = useState(null);   // per-user over-time totals
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState(null);
 
   const load = useCallback(() => {
-    if (!runId) return;
     setLoading(true); setErr(null);
+    api.getUsageTrend().then(setTrend).catch(() => {});
+    if (!runId) { setUsage(null); setLoading(false); return; }
     api.getUsage(runId)
       .then((u) => setUsage(u))
       .catch((e) => setErr(e.message || "Failed to load usage"))
@@ -44,8 +94,6 @@ export default function UsageView({ runId }) {
   }, [runId]);
 
   useEffect(() => { load(); }, [load]);
-
-  if (!runId) return <div className="muted tiny">Run a review first — usage is tracked per session.</div>;
 
   const total = usage?.total || { calls: 0, in_tok: 0, out_tok: 0, cost_usd: 0, latency_ms: 0 };
   const hasData = total.calls > 0;
@@ -62,10 +110,50 @@ export default function UsageView({ runId }) {
         </button>
       </div>
 
+      {/* Your usage over time — across all sessions, independent of the current run */}
+      {trend && (
+        <div style={{ marginBottom: 22 }}>
+          <div style={S.label}>your usage over time</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, margin: "8px 0 14px" }}>
+            <div style={S.card}>
+              <div style={S.bignum}>{fmtUSD(trend.total.cost_usd)}</div>
+              <div style={S.label}>total spent (all runs)</div>
+            </div>
+            <div style={S.card}>
+              <div style={S.bignum}>{fmtTok((trend.total.in_tok || 0) + (trend.total.out_tok || 0))}</div>
+              <div style={S.label}>total tokens</div>
+            </div>
+            <div style={S.card}>
+              <div style={S.bignum}>{trend.total.calls || 0}</div>
+              <div style={S.label}>total model calls</div>
+            </div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
+            <SeriesChart
+              points={trend.by_session}
+              valueOf={(p) => (p.in_tok || 0) + (p.out_tok || 0)}
+              fmtValue={(v) => fmtTok(v) + " tokens"}
+              color="var(--indigo)"
+              title="Tokens per run (over time)"
+            />
+            <SeriesChart
+              points={trend.by_session}
+              valueOf={(p) => p.cost_usd || 0}
+              fmtValue={fmtUSD}
+              color="#3aa981"
+              title="Cost per run (over time)"
+            />
+          </div>
+        </div>
+      )}
+
       {err && <div className="err" style={{ marginBottom: 12 }}>{err}</div>}
 
-      {!hasData && !loading && (
+      {runId && !hasData && !loading && (
         <div className="muted tiny">No model calls recorded for this session yet.</div>
+      )}
+      {!runId && (
+        <div className="muted tiny" style={{ marginBottom: 8 }}>Open a review to see its per-stage breakdown below.</div>
       )}
 
       {hasData && (

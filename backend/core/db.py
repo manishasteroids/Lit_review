@@ -107,6 +107,12 @@ def init_db() -> None:
         except Exception:
             pass
 
+    # sibling tables (share this DB)
+    from core.usage import init_usage_table
+    init_usage_table()
+    from core.paper_cache import init_paper_cache_table
+    init_paper_cache_table()
+
 
 # ── Write ───────────────────────────────────────────────────────────────────
 

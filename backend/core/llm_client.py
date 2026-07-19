@@ -31,7 +31,17 @@ class LLMClient:
 
         if self.provider == "gemini":
             from google import genai  # lazy import so Claude-only setups don't need it
-            self._gclient = genai.Client(api_key=settings.gemini_api_key)
+            # 30s timeout so an invalid key / network issue errors cleanly
+            # instead of hanging the pipeline. Falls back if the option is
+            # unsupported by the installed google-genai version.
+            try:
+                from google.genai import types as _gt
+                self._gclient = genai.Client(
+                    api_key=settings.gemini_api_key,
+                    http_options=_gt.HttpOptions(timeout=30_000),
+                )
+            except Exception:
+                self._gclient = genai.Client(api_key=settings.gemini_api_key)
             self._gemini_model = settings.gemini_model if self.model == "gemini" else self.model
         else:
             self.client = anthropic.Anthropic(api_key=api_key or settings.anthropic_api_key)
@@ -48,13 +58,27 @@ class LLMClient:
         tools: Optional[list] = None,
         max_tokens: int = 1200,
         content: Optional[list] = None,
+        cache_prefix: Optional[str] = None,
     ) -> str:
         if self.provider == "gemini":
-            return self._call_gemini(user_text, system, max_tokens, content)
+            # Gemini uses a different caching API; just fold the prefix into the
+            # prompt so the call still works (no Anthropic-style caching here).
+            gem_text = f"{cache_prefix}\n{user_text or ''}" if cache_prefix else user_text
+            return self._call_gemini(gem_text, system, max_tokens, content)
 
         # `content` lets callers pass multimodal blocks (text + document/PDF +
-        # image); otherwise we send a plain text user message.
-        message_content = content if content is not None else user_text
+        # image). `cache_prefix` marks a stable prefix for prompt caching —
+        # billed 1.25x to write once, then 0.1x per read (Anthropic). Ideal for
+        # text re-sent across calls (e.g. the Writer's corpus across 4 sections).
+        if content is not None:
+            message_content = content
+        elif cache_prefix:
+            message_content = [
+                {"type": "text", "text": cache_prefix, "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": user_text or ""},
+            ]
+        else:
+            message_content = user_text
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,
@@ -105,16 +129,36 @@ class LLMClient:
         else:
             parts.append(types.Part.from_text(text=user_text or ""))
 
-        config = types.GenerateContentConfig(
+        cfg_kwargs = dict(
             max_output_tokens=max_tokens,
             system_instruction=system or None,
         )
+        # Gemini 2.5 models "think" by default, which eats the output-token
+        # budget and can return truncated/empty JSON (blank extractions).
+        # Disable it so the whole budget goes to the actual answer.
+        try:
+            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        except Exception:
+            pass
+        config = types.GenerateContentConfig(**cfg_kwargs)
         t0 = time.perf_counter()
-        resp = self._gclient.models.generate_content(
-            model=self._gemini_model,
-            contents=parts,
-            config=config,
-        )
+        # Retry on free-tier rate limits (many concurrent extraction batches
+        # can trip the RPM cap); back off and try again a few times.
+        resp = None
+        for attempt in range(4):
+            try:
+                resp = self._gclient.models.generate_content(
+                    model=self._gemini_model,
+                    contents=parts,
+                    config=config,
+                )
+                break
+            except Exception as e:
+                msg = str(e).lower()
+                if attempt < 3 and ("429" in msg or "quota" in msg or "rate" in msg or "resource_exhausted" in msg):
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                raise
         latency_ms = int((time.perf_counter() - t0) * 1000)
 
         # record token usage for the Gemini path too. Gemini reports counts in
