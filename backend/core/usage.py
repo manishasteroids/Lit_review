@@ -160,9 +160,11 @@ def get_usage_trend(user_id: str, days: int = 30, tz_offset_min: int = 0) -> dic
             (user_id,),
         ).fetchone()
         # Per-run time-series points (each review = one point at its date+time).
-        # `at` is the raw UTC ISO timestamp; the frontend renders it in local time.
+        # `at` = the run's LAST activity (MAX), so a paper-chat done later on an
+        # existing run moves its point to the right and grows its bar — i.e. the
+        # trend reflects your most recent activity. Raw UTC ISO; rendered local.
         by_session = conn.execute(
-            "SELECT s.id, s.topic, MIN(c.created_at) AS at, "
+            "SELECT s.id, s.topic, MAX(c.created_at) AS at, "
             "COUNT(*) calls, COALESCE(SUM(c.in_tok),0) in_tok, "
             "COALESCE(SUM(c.out_tok),0) out_tok, COALESCE(SUM(c.cost_usd),0) cost_usd "
             "FROM llm_calls c JOIN sessions s ON c.session_id = s.id "
