@@ -2,9 +2,10 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import { api } from "./api/client.js";
 import { ensureAuth, AuthButtons, useSession } from "./Auth.jsx";
 import { authEnabled } from "./supabase.js";
- 
+
 import PipelineRail from "./components/PipelineRail.jsx";
 import QueryInput, { ModeBar } from "./components/QueryInput.jsx";
+import UnderstandingCard from "./components/UnderstandingCard.jsx";
 import PaperFilter from "./components/PaperFilter.jsx";
 import ReviewView from "./components/ReviewView.jsx";
 import SourcesView from "./components/SourcesView.jsx";
@@ -18,14 +19,14 @@ import {
   BookOpen, Layers, Brain, Network, BarChart3, FlaskConical,
   Plus, Trash2, Coins,
 } from "./components/icons.jsx";
- 
+
 // Source icons shown in the progress feed
 const SOURCE_ICON = {
   semantic_scholar: "🔬",
   arxiv: "📄",
   pubmed: "🧬",
 };
- 
+
 const TOOLS = [
   ["review", BookOpen, "Review"],
   ["sources", Layers, "Sources"],
@@ -35,7 +36,7 @@ const TOOLS = [
   ["eval", FlaskConical, "Evaluation"],
   ["usage", Coins, "Token usage"],
 ];
- 
+
 // ── History helpers ──────────────────────────────────────────────
 function relativeTime(iso) {
   if (!iso) return "";
@@ -46,7 +47,7 @@ function relativeTime(iso) {
   if (diff < 2592000) return Math.floor(diff / 86400) + "d ago";
   return new Date(iso).toLocaleDateString();
 }
- 
+
 function groupSessions(sessions) {
   const now = Date.now();
   const buckets = { Today: [], Yesterday: [], "This week": [], Older: [] };
@@ -59,7 +60,7 @@ function groupSessions(sessions) {
   }
   return buckets;
 }
- 
+
 // Inline styles for the History list (no extra CSS needed)
 const H = {
   head: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
@@ -83,11 +84,11 @@ const H = {
   loginCard: { border: "1px solid var(--line)", borderRadius: 10, padding: "12px 12px 13px", background: "var(--indigo-soft)" },
   loginText: { fontSize: 12, color: "var(--txt)", lineHeight: 1.5, marginBottom: 10 },
 };
- 
+
 export default function App() {
   const session = useSession();
   const signedOut = authEnabled && !session;
- 
+
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("claude-sonnet-4-6");  // still used for paper chat
   const [mode, setMode] = useState("medium");               // search mode drives the pipeline
@@ -97,9 +98,9 @@ export default function App() {
   const [done, setDone] = useState({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
- 
+
   const [notes, setNotes] = useState({}); // paper idx -> note text
- 
+
   const [runId, setRunId] = useState(null);
   const [reform, setReform] = useState(null);
   const [papers, setPapers] = useState([]);
@@ -113,19 +114,19 @@ export default function App() {
   const [tab, setTab] = useState("review");
   const reviewRef = useRef(null);
   const isDone = stage === "done";
- 
+
   // Editable Sources state (post-synthesis): which papers are included, and
   // whether the downstream analysis (synth/critique/graph/data/draft) is stale.
   const [included, setIncluded] = useState({}); // idx -> bool
   const [analysisStale, setAnalysisStale] = useState(false);
- 
+
   // Live progress messages during search
   const [progressMsgs, setProgressMsgs] = useState([]);
- 
+
   // Session list from backend (no LLM) + delete-confirm state
   const [sessions, setSessions] = useState([]);
   const [confirmId, setConfirmId] = useState(null);
- 
+
   // History is per-user: skip the fetch entirely while signed out.
   const refreshSessions = useCallback(() => {
     if (signedOut) { setSessions([]); return; }
@@ -133,7 +134,7 @@ export default function App() {
       .then((d) => setSessions(Array.isArray(d) ? d : []))
       .catch(() => {});
   }, [signedOut]);
- 
+
   useEffect(() => { refreshSessions(); }, [refreshSessions]);
 
   // Which model each pipeline stage runs on (per-purpose routing), for the rail.
@@ -152,7 +153,7 @@ export default function App() {
     setTab("review"); setProgressMsgs([]); setNotes({});
     setIncluded({}); setAnalysisStale(false);
   }
- 
+
   // Restore a session — zero LLM calls
   async function restoreSession(sessionId) {
     if (busy) return;
@@ -189,12 +190,12 @@ export default function App() {
       setError({ stage: "Session restore", msg: e.message });
     }
   }
- 
+
   async function deleteSession(id) {
     await api.deleteSession(id);
     refreshSessions();
   }
- 
+
   const approvedList = papers.filter((p) => approved[p.idx]);
   // Order approved papers by the synthesizer's ranking, but NEVER drop a paper
   // just because the ranking omitted it (e.g. a partial/rate-limited synth
@@ -211,11 +212,11 @@ export default function App() {
   })();
   const citeNum = {};
   citeOrder.forEach((p, i) => (citeNum[p.idx] = i + 1));
- 
+
   async function runStart() {
     // Gated action: anyone can browse, but running the pipeline needs an account.
     if (!(await ensureAuth())) return;
- 
+
     setBusy(true); setError(null); setStage("reformulate"); setProgressMsgs([]);
     try {
       const res = await api.createRunStream(
@@ -225,6 +226,9 @@ export default function App() {
         mode,
         (event) => {
           if (event.type === "progress") {
+            // The reformulator's output arrives before the slow search — show
+            // the "Understanding your question" card as soon as it does.
+            if (event.reform) setReform(event.reform);
             setProgressMsgs((prev) => {
               const last = prev[prev.length - 1];
               if (last?.message === event.message) return prev;
@@ -251,22 +255,36 @@ export default function App() {
       setBusy(false);
     }
   }
- 
+
   async function runApprove() {
     const approvedIndices = Object.entries(approved).filter(([, v]) => v).map(([k]) => Number(k));
     if (approvedIndices.length < 2) {
       setError({ stage: "Paper Filter", msg: "Approve at least 2 papers to synthesize a review." });
       return;
     }
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); setProgressMsgs([]);
     try {
       await api.filterPapers(runId, approvedIndices);
       setStage("extract");
-      const synRes = await api.synthesize(runId, apiKey || undefined, model, notes);
-      setExtractions(synRes.extractions);
-      setExtractStats(synRes.extract_stats || null);
-      setSynth(synRes.synthesis);
-      setSideModules(synRes.side_modules);
+      // Streamed: rows tick in as each batch of papers is read, then the
+      // synthesizer runs — instead of one blank "Extracting…" spinner.
+      const doneEv = await api.synthesizeStream(
+        runId, apiKey || undefined, model, notes,
+        (event) => {
+          if (event.type === "progress") {
+            setProgressMsgs((prev) => {
+              const last = prev[prev.length - 1];
+              if (last?.message === event.message) return prev;
+              return [...prev, event];
+            });
+            if (event.step === "synthesize") setStage("synthesize");
+          }
+        }
+      );
+      setExtractions(doneEv.extractions);
+      setExtractStats(doneEv.extract_stats || null);
+      setSynth(doneEv.synthesis);
+      setSideModules(doneEv.side_modules);
       // Everything approved at the filter stage starts "included" on the Sources page.
       const inc = {}; approvedIndices.forEach((i) => (inc[i] = true));
       setIncluded(inc);
@@ -282,7 +300,7 @@ export default function App() {
       setBusy(false);
     }
   }
- 
+
   // ── Sources page editing ────────────────────────────────────────────
   function removeSources(indices) {
     setIncluded((prev) => {
@@ -292,7 +310,7 @@ export default function App() {
     });
     setAnalysisStale(true);
   }
- 
+
   async function addPaperToSources(paper) {
     const res = await api.addPaper(runId, paper, apiKey || undefined, model, notes);
     const np = { ...res.paper, added: true };
@@ -305,7 +323,7 @@ export default function App() {
     refreshSessions();
     return np;
   }
- 
+
   async function reanalyzeSources() {
     const includedIndices = papers.filter((p) => included[p.idx]).map((p) => p.idx);
     if (includedIndices.length < 1) {
@@ -328,7 +346,7 @@ export default function App() {
       setBusy(false);
     }
   }
- 
+
   // generate the written cited review (Writer agent) on demand.
   async function runWrite() {
     // switch to the "write" stage so the Writer Agent progress card shows while
@@ -348,7 +366,7 @@ export default function App() {
       setBusy(false); setStage("done");
     }
   }
- 
+
   async function runEvaluate() {
     setBusy(true); setError(null);
     try {
@@ -360,7 +378,7 @@ export default function App() {
       setBusy(false);
     }
   }
- 
+
   function download(filename, text, type = "text/plain;charset=utf-8") {
     const blob = new Blob([text], { type });
     const url = URL.createObjectURL(blob);
@@ -368,7 +386,7 @@ export default function App() {
     a.href = url; a.download = filename; a.click();
     URL.revokeObjectURL(url);
   }
- 
+
   function exportShortlist(fmt) {
     const extByIdx = {};
     (extractions || []).forEach((e) => (extByIdx[e.idx] = e));
@@ -376,7 +394,7 @@ export default function App() {
       n: i + 1, ...p, ...(extByIdx[p.idx] || {}), note: notes[p.idx] || "",
     }));
     const slug = (topic || "shortlist").replace(/[^\w]+/g, "-").slice(0, 40).replace(/^-|-$/g, "") || "shortlist";
- 
+
     if (fmt === "md") {
       let md = `# Literature shortlist — ${topic}\n\n_${rows.length} papers_\n\n`;
       rows.forEach((r) => {
@@ -413,9 +431,9 @@ export default function App() {
       download(`${slug}.bib`, bib, "application/x-bibtex;charset=utf-8");
     }
   }
- 
+
   const grouped = groupSessions(sessions);
- 
+
   return (
     <div className="sm-root">
       <div className="sm-wrap wide">
@@ -447,7 +465,7 @@ export default function App() {
             />
           </div>
         </div>
- 
+
         <div className="grid3">
           {/* LEFT: Tools + History */}
           <div className="lcol">
@@ -464,7 +482,7 @@ export default function App() {
                 </button>
               ))}
             </div>
- 
+
             <div className="panel">
               <div style={H.head}>
                 <span className="eyebrow">History</span>
@@ -477,7 +495,7 @@ export default function App() {
                   <Plus size={14} />
                 </button>
               </div>
- 
+
               {signedOut ? (
                 <div style={H.loginCard}>
                   <div style={H.loginText}>
@@ -533,7 +551,7 @@ export default function App() {
                   ))}
                 </div>
               )}
- 
+
               <div style={H.foot}>
                 {signedOut
                   ? "Your runs are saved to your account · nothing is stored while signed out"
@@ -541,13 +559,13 @@ export default function App() {
               </div>
             </div>
           </div>
- 
+
           {/* CENTER: Model selection + prompt / stage content */}
           <div className="ccol">
             <div style={{ marginBottom: 16, display: "flex", justifyContent: "flex-end" }}>
               <ModeBar modes={modes} mode={mode} setMode={setMode} apiKey={apiKey} setApiKey={setApiKey} />
             </div>
- 
+
             {error && (
               <div className="err" style={{ marginBottom: 16 }}>
                 <AlertTriangle size={18} style={{ flex: "0 0 18px", marginTop: 1 }} />
@@ -561,41 +579,45 @@ export default function App() {
                 </div>
               </div>
             )}
- 
+
             {stage === "query" && <QueryInput topic={topic} setTopic={setTopic} busy={busy} onRun={runStart} />}
- 
+
             {busy && (stage === "reformulate" || stage === "search") && (
-              <div className="card">
-                <div className="card-h">
-                  <div className="ic"><RotateCw size={16} className="spin" /></div>
-                  <h3>{stage === "reformulate" ? "Query Reformulator" : "Academic Search"}</h3>
+              reform ? (
+                <UnderstandingCard topic={topic} reform={reform} progressMsgs={progressMsgs} stage={stage} />
+              ) : (
+                <div className="card">
+                  <div className="card-h">
+                    <div className="ic"><RotateCw size={16} className="spin" /></div>
+                    <h3>{stage === "reformulate" ? "Query Reformulator" : "Academic Search"}</h3>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
+                    {progressMsgs.length === 0 && (
+                      <div className="muted tiny pulse">Starting up…</div>
+                    )}
+                    {progressMsgs.map((ev, i) => {
+                      const isLatest = i === progressMsgs.length - 1;
+                      const icon = SOURCE_ICON[ev.detail] || (ev.step === "reformulate" ? "🤖" : "🔍");
+                      return (
+                        <div key={i} style={{
+                          display: "flex", alignItems: "flex-start", gap: 8,
+                          opacity: isLatest ? 1 : 0.45,
+                          fontSize: 12, lineHeight: 1.5,
+                          transition: "opacity 0.3s",
+                        }}>
+                          <span style={{ fontSize: 14, flexShrink: 0, marginTop: 1 }}>{icon}</span>
+                          <span style={{ color: isLatest ? "var(--fg)" : "var(--muted)" }}>
+                            {ev.message}
+                            {isLatest && <span className="pulse" style={{ marginLeft: 4 }}>…</span>}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
-                  {progressMsgs.length === 0 && (
-                    <div className="muted tiny pulse">Starting up…</div>
-                  )}
-                  {progressMsgs.map((ev, i) => {
-                    const isLatest = i === progressMsgs.length - 1;
-                    const icon = SOURCE_ICON[ev.detail] || (ev.step === "reformulate" ? "🤖" : "🔍");
-                    return (
-                      <div key={i} style={{
-                        display: "flex", alignItems: "flex-start", gap: 8,
-                        opacity: isLatest ? 1 : 0.45,
-                        fontSize: 12, lineHeight: 1.5,
-                        transition: "opacity 0.3s",
-                      }}>
-                        <span style={{ fontSize: 14, flexShrink: 0, marginTop: 1 }}>{icon}</span>
-                        <span style={{ color: isLatest ? "var(--fg)" : "var(--muted)" }}>
-                          {ev.message}
-                          {isLatest && <span className="pulse" style={{ marginLeft: 4 }}>…</span>}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
+              )
             )}
- 
+
             {stage === "filter" && papers.length > 0 && (
               <PaperFilter
                 papers={papers}
@@ -612,19 +634,51 @@ export default function App() {
                 onNote={(idx, text) => setNotes((n) => ({ ...n, [idx]: text }))}
               />
             )}
- 
-            {busy && (stage === "extract" || stage === "synthesize" || stage === "write") && (
+
+            {busy && (stage === "extract" || stage === "synthesize") && (
               <div className="card">
                 <div className="card-h">
                   <div className="ic"><RotateCw size={16} className="spin" /></div>
-                  <h3>{stage === "write" ? "Writer Agent" : "Reader & Extractor / Critic & Synthesizer"}</h3>
+                  <h3>Reader &amp; Extractor / Critic &amp; Synthesizer</h3>
+                  <span className="tag">{stage === "synthesize" ? "synthesizing…" : "reading…"}</span>
                 </div>
-                <div className="muted tiny pulse">
-                  {stage === "write" ? "Reading your kept papers and drafting the review — introduction, thematic synthesis, gaps, and conclusion…" : "Extracting structured info and detecting themes/gaps/biases…"}
+                <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 4, maxHeight: 300, overflowY: "auto" }}>
+                  {progressMsgs.length === 0 && (
+                    <div className="muted tiny pulse">Reading papers…</div>
+                  )}
+                  {progressMsgs.map((ev, i) => {
+                    const isLatest = i === progressMsgs.length - 1;
+                    const icon = ev.step === "synthesize" ? "🧩" : "📄";
+                    return (
+                      <div key={i} style={{
+                        display: "flex", alignItems: "flex-start", gap: 8,
+                        opacity: isLatest ? 1 : 0.5, fontSize: 12, lineHeight: 1.5,
+                        transition: "opacity 0.3s",
+                      }}>
+                        <span style={{ fontSize: 13, flexShrink: 0, marginTop: 1 }}>{icon}</span>
+                        <span style={{ color: isLatest ? "var(--fg)" : "var(--muted)" }}>
+                          {ev.message}
+                          {isLatest && <span className="pulse" style={{ marginLeft: 4 }}>…</span>}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
- 
+
+            {busy && stage === "write" && (
+              <div className="card">
+                <div className="card-h">
+                  <div className="ic"><RotateCw size={16} className="spin" /></div>
+                  <h3>Writer Agent</h3>
+                </div>
+                <div className="muted tiny pulse">
+                  Reading your kept papers and drafting the review — introduction, thematic synthesis, gaps, and conclusion…
+                </div>
+              </div>
+            )}
+
             {isDone && (
               <div ref={reviewRef}>
                 <div className="card">
@@ -673,7 +727,7 @@ export default function App() {
                   {tab === "eval" && <EvaluationView evalRes={evalRes} busy={busy} onEvaluate={runEvaluate} />}
                   {tab === "usage" && <UsageView runId={runId} />}
                 </div>
- 
+
                 <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>
                   <button className="btn ghost" onClick={() => { const old = topic; reset(); setTopic(old); }}>
                     <RotateCw size={14} /> New run
@@ -688,14 +742,14 @@ export default function App() {
                 </div>
               </div>
             )}
- 
+
             <div className="foot">
               Talks to the Saṃhitā backend (FastAPI) running at the address in <code>VITE_API_BASE</code>.
               The Anthropic key lives server-side by default — only paste one above if you want to
               override the server's key for this run.
             </div>
           </div>
- 
+
           {/* Agent Pipeline status */}
           <div className="rcol">
             <PipelineRail

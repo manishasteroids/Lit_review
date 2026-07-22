@@ -105,6 +105,10 @@ class SamhitaPipeline:
         self.fast.stage = "reformulate"
         run.reform = self.reformulator.run(topic)
         queries = run.reform.get("queries", [])
+        if on_progress:
+            on_progress({"step": "reformulate",
+                         "message": "Understood your question — planning the search",
+                         "reform": run.reform})
         emit("reformulate", f"Expanded into {len(queries)} search strategies", queries)
  
         emit("search", "Searching Semantic Scholar…", "semantic_scholar")
@@ -125,12 +129,19 @@ class SamhitaPipeline:
         return run
  
     # ---- stage 4+5: extract then critique/synthesize/rank ---------------
-    def extract_and_synthesize(self, run: RunState) -> RunState:
+    def extract_and_synthesize(self, run: RunState, on_progress=None) -> RunState:
+        def emit(step, message, detail=None):
+            if on_progress:
+                on_progress({"step": step, "message": message, "detail": detail})
+
         self._attribute(run.run_id)
         self.fast.stage = "extract"
-        run.extractions = self.extractor.run(run.approved_papers, full_text=self.full_text)
+        emit("extract", f"Reading {len(run.approved_papers)} papers…")
+        run.extractions = self.extractor.run(
+            run.approved_papers, full_text=self.full_text, on_progress=on_progress)
         run.extract_stats = self.extractor.full_text_stats
         self.mid.stage = "synthesize"
+        emit("synthesize", "Detecting themes, gaps & biases across the papers…")
         run.synthesis = self.synthesizer.run(run.extractions)
         run.stage = "write"
         return run

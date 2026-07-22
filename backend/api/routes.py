@@ -247,6 +247,46 @@ def synthesize(run_id: str, body: SynthesizeBody, user_id: str = Depends(require
     return {"run_id": run.run_id, "extractions": run.extractions,
             "synthesis": run.synthesis, "side_modules": side, "stage": run.stage,
             "extract_stats": run.extract_stats}
+    
+@router.post("/runs/{run_id}/synthesize/stream")
+async def synthesize_stream(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
+    """SSE version of /synthesize — streams a 'progress' event as each batch of
+    papers is read, then the synthesizer, then a final 'done' event."""
+    run = get_run(run_id, user_id)  # fast, no LLM — validates ownership first
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_event_loop()
+
+    def on_progress(event: dict):
+        loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", **event})
+
+    async def work():
+        try:
+            pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model,
+                                       mode=run.mode or body.mode)
+            await asyncio.to_thread(pipeline.extract_and_synthesize, run, on_progress)
+            side = _persist_done(run, user_id, notes=body.notes)
+            await queue.put({
+                "type": "done", "run_id": run.run_id,
+                "extractions": run.extractions, "synthesis": run.synthesis,
+                "side_modules": side, "stage": run.stage,
+                "extract_stats": run.extract_stats,
+            })
+        except Exception as e:  # noqa: BLE001
+            await queue.put({"type": "error", "message": str(e)})
+
+    asyncio.create_task(work())
+
+    async def generate():
+        while True:
+            event = await queue.get()
+            yield f"data: {json.dumps(event)}\n\n"
+            if event["type"] in ("done", "error"):
+                break
+
+    return StreamingResponse(
+        generate(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/runs/{run_id}/write")
