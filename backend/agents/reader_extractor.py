@@ -13,7 +13,9 @@ Robustness/scale:
   - each batch is parsed defensively (a malformed batch yields nothing rather
     than crashing the stage);
   - a persistent per-paper cache (core.paper_cache) skips the fetch AND the LLM
-    call for any paper already extracted at the same read depth.
+    call for any paper already extracted at the same read depth;
+  - an optional `on_progress` callback fires as each batch completes, so the UI
+    can show papers being read one group at a time.
 """
 from concurrent.futures import ThreadPoolExecutor
 
@@ -84,8 +86,18 @@ class ReaderExtractorAgent(Agent):
             return list(ex.map(fetch, papers))
 
     def run(self, approved_papers: list[dict], batch_size: int | None = None,
-            full_text: bool = False) -> list[dict]:
+            full_text: bool = False, on_progress=None) -> list[dict]:
         from core.paper_cache import get_cached, put_cached
+
+        def emit(paper: dict, note: str = ""):
+            if not on_progress:
+                return
+            title = (paper.get("title") or "")[:72]
+            on_progress({
+                "step": "extract",
+                "message": f"✓ {title}" + (f" · {note}" if note else ""),
+                "title": paper.get("title"),
+            })
 
         # 1. Reuse any paper we've already extracted (same url + read depth) —
         #    skips both the PDF fetch and the LLM call.
@@ -97,6 +109,7 @@ class ReaderExtractorAgent(Agent):
                 hit = dict(hit)
                 hit["idx"] = p["idx"]           # re-key to this run's paper
                 cached_results.append(hit)
+                emit(p, "cached")
             else:
                 todo.append(p)
 
@@ -110,7 +123,7 @@ class ReaderExtractorAgent(Agent):
                 else:
                     fell_back += 1
 
-        # 3. Batch-extract the uncached papers (concurrently).
+        # 3. Batch-extract the uncached papers (concurrently), emitting per batch.
         fresh: list[dict] = []
         if todo:
             size = batch_size or self.BATCH_SIZE
@@ -118,10 +131,16 @@ class ReaderExtractorAgent(Agent):
             if len(batches) <= 1:
                 for b in batches:
                     fresh.extend(self._extract_batch(b))
+                    for p in b:
+                        emit(p)
             else:
                 with ThreadPoolExecutor(max_workers=min(self.MAX_WORKERS, len(batches))) as ex:
-                    for batch_result in ex.map(self._extract_batch, batches):
+                    # zip pairs each batch with its result (map preserves order),
+                    # so we can emit the titles as each batch finishes.
+                    for b, batch_result in zip(batches, ex.map(self._extract_batch, batches)):
                         fresh.extend(batch_result)
+                        for p in b:
+                            emit(p)
 
         # 4. Cache the fresh extractions, keyed by paper url.
         by_idx = {p["idx"]: p for p in todo}

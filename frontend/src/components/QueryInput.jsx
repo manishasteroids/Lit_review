@@ -36,7 +36,9 @@ export function ModelTierBadge({ model, size = 13 }) {
   );
 }
 
-export function ModelBar({ model, setModel, apiKey, setApiKey }) {
+// apiKey/setApiKey are accepted but unused now — the run always uses the
+// server-side key. Kept in the signature so callers don't need to change.
+export function ModelBar({ model, setModel }) {
   return (
     <div className="backbone">
       <div className="eyebrow" style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "space-between" }}>
@@ -59,14 +61,6 @@ export function ModelBar({ model, setModel, apiKey, setApiKey }) {
         </select>
         <ChevronRight size={14} className="model-caret" />
       </div>
-      <div className="keyrow">
-        <input
-          type="password"
-          placeholder="sk-ant-… (optional — falls back to server key)"
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-        />
-      </div>
     </div>
   );
 }
@@ -80,7 +74,7 @@ const FALLBACK_MODES = [
 
 // Dropdown that replaces the raw model picker: the user picks HOW THOROUGH the
 // review should be, and the backend maps that to papers + models + read depth.
-export function ModeBar({ modes, mode, setMode, apiKey, setApiKey }) {
+export function ModeBar({ modes, mode, setMode }) {
   const list = modes && modes.length ? modes : FALLBACK_MODES;
   const current = list.find((m) => m.id === mode) || list[0];
   return (
@@ -105,14 +99,6 @@ export function ModeBar({ modes, mode, setMode, apiKey, setApiKey }) {
           {current.blurb}
         </div>
       )}
-      <div className="keyrow" style={{ marginTop: 10 }}>
-        <input
-          type="password"
-          placeholder="sk-ant-… (optional — falls back to server key)"
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-        />
-      </div>
     </div>
   );
 }
