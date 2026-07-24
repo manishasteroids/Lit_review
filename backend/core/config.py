@@ -22,6 +22,8 @@ class Settings:
     gemini_api_key: str = os.environ.get("GEMINI_API_KEY", os.environ.get("GOOGLE_API_KEY", ""))
     gemini_model: str = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
     
+    database_url: str = os.environ.get("DATABASE_URL", "")
+    
     # ── Pipeline routing & limits ────────────────────────────────────────
     # Defaults live in the version-controlled core/model_policy.py (so they
     # survive .env resets); .env vars below override them per-environment.

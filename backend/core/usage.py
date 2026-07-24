@@ -7,11 +7,15 @@ Usage tab is a couple of GROUP BY queries — no LLM needed.
 
 This is deliberately the ONE place cost is computed, so the number the user
 sees always matches what actually went over the wire.
+
+Works on both SQLite (local) and Postgres (cloud): the primary-key type and the
+per-day date bucketing are the only dialect differences, handled via
+`_PK_AUTOINC` and `IS_POSTGRES` from core.db.
 """
 from datetime import datetime, timezone
 from typing import Optional
 
-from core.db import _conn, _PH
+from core.db import _conn, _PH, _PK_AUTOINC, IS_POSTGRES
 from core.pricing import cost_usd, tier_of, PRICES_EFFECTIVE
 
 
@@ -28,9 +32,9 @@ def init_usage_table() -> None:
     existing (older-schema) table. Called from db.init_db()."""
     with _conn() as conn:
         conn.execute(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS llm_calls (
-                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                id             {_PK_AUTOINC},
                 session_id     TEXT,
                 stage          TEXT,
                 model          TEXT,
@@ -46,12 +50,19 @@ def init_usage_table() -> None:
             )
             """
         )
+    with _conn() as conn:
         conn.execute("CREATE INDEX IF NOT EXISTS ix_llm_calls_session ON llm_calls(session_id)")
-        # migrate DBs created before these columns existed
-        existing = {row[1] for row in conn.execute("PRAGMA table_info(llm_calls)").fetchall()}
-        for col, decl in _EXTRA_COLS:
-            if col not in existing:
+
+    # Migrate DBs created before these columns existed. Each ALTER runs in its
+    # OWN transaction and swallows the "column already exists" error — portable
+    # across SQLite and Postgres (Postgres aborts a transaction on error, so we
+    # can't lump these together, and it has no PRAGMA table_info).
+    for col, decl in _EXTRA_COLS:
+        try:
+            with _conn() as conn:
                 conn.execute(f"ALTER TABLE llm_calls ADD COLUMN {col} {decl}")
+        except Exception:  # noqa: BLE001 — column already present
+            pass
 
 
 def record_call(
@@ -131,6 +142,19 @@ def get_usage(session_id: str) -> dict:
     }
 
 
+def _day_bucket(shift_min: int):
+    """(sql_expr, param) that turns c.created_at (UTC ISO text) into a local
+    'YYYY-MM-DD' string, shifted by the user's tz offset. Dialect-specific."""
+    if IS_POSTGRES:
+        # created_at is an ISO string with a UTC offset; cast, shift, format.
+        expr = (f"to_char(((c.created_at::timestamptz AT TIME ZONE 'UTC') "
+                f"+ make_interval(mins => {_PH})), 'YYYY-MM-DD')")
+        return expr, shift_min
+    # SQLite: datetime(created_at, '<N> minutes') then take the date part.
+    expr = f"substr(datetime(c.created_at, {_PH}), 1, 10)"
+    return expr, f"{shift_min:+d} minutes"
+
+
 def get_usage_trend(user_id: str, days: int = 30, tz_offset_min: int = 0) -> dict:
     """Per-day token + cost totals for one USER (across all their sessions),
     plus an all-time total. Joins llm_calls -> sessions by user_id.
@@ -139,18 +163,18 @@ def get_usage_trend(user_id: str, days: int = 30, tz_offset_min: int = 0) -> dic
     PST). created_at is stored in UTC, so we shift by -offset to group calls by
     the user's LOCAL calendar day instead of the UTC day.
     """
-    shift = -int(tz_offset_min)              # local = utc - offset
-    tz_mod = f"{shift:+d} minutes"           # e.g. "-480 minutes" (PST), "+330 minutes" (IST)
+    shift = -int(tz_offset_min)               # local = utc - offset
+    day_expr, day_param = _day_bucket(shift)
     with _conn() as conn:
         by_day = conn.execute(
-            "SELECT substr(datetime(c.created_at, ?), 1, 10) AS day, "
+            f"SELECT {day_expr} AS day, "
             "COUNT(*) calls, COALESCE(SUM(c.in_tok),0) in_tok, "
             "COALESCE(SUM(c.out_tok),0) out_tok, COALESCE(SUM(c.cost_usd),0) cost_usd "
             "FROM llm_calls c JOIN sessions s ON c.session_id = s.id "
             f"WHERE s.user_id = {_PH} "
             "GROUP BY day ORDER BY day DESC "
             f"LIMIT {int(days)}",
-            (tz_mod, user_id),
+            (day_param, user_id),
         ).fetchall()
         total = conn.execute(
             "SELECT COUNT(*) calls, COALESCE(SUM(c.in_tok),0) in_tok, "
@@ -169,7 +193,7 @@ def get_usage_trend(user_id: str, days: int = 30, tz_offset_min: int = 0) -> dic
             "COALESCE(SUM(c.out_tok),0) out_tok, COALESCE(SUM(c.cost_usd),0) cost_usd "
             "FROM llm_calls c JOIN sessions s ON c.session_id = s.id "
             f"WHERE s.user_id = {_PH} "
-            "GROUP BY s.id ORDER BY at DESC LIMIT 60",
+            "GROUP BY s.id, s.topic ORDER BY at DESC LIMIT 60",
             (user_id,),
         ).fetchall()
 
@@ -181,3 +205,4 @@ def get_usage_trend(user_id: str, days: int = 30, tz_offset_min: int = 0) -> dic
         "by_day": days_asc,
         "by_session": sessions_asc,
     }
+    

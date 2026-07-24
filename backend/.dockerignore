@@ -1,0 +1,13 @@
+# Put this at backend/.dockerignore — keeps secrets and cruft out of the image.
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+*.pyc
+.venv/
+venv/
+tests/
+.git/
+.DS_Store

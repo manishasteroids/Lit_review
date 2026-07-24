@@ -58,7 +58,7 @@ with Neo4j) without touching anything else.
 cd backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # then put your ANTHROPIC_API_KEY in .env
+cp .env.example .env        
 uvicorn main:app --reload --port 8015
 ```
 

@@ -1,20 +1,22 @@
 """
 Session persistence layer.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- LOCAL  →  SQLite  (active now — zero extra dependencies)
- CLOUD  →  PostgreSQL  (see migration block below)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Auto-selects the backend by environment:
+  • DATABASE_URL set   → PostgreSQL (cloud; e.g. Supabase)   — via psycopg 3
+  • DATABASE_URL unset → SQLite (local dev)                  — zero setup
 
-HOW TO SWITCH TO POSTGRESQL WHEN DEPLOYING TO A SERVER
-───────────────────────────────────────────────────────
-1. pip install psycopg2-binary
-2. Add DATABASE_URL=postgresql://user:password@host:5432/samhita to .env
-3. Comment out the SQLITE BLOCK and uncomment the POSTGRESQL BLOCK below.
-   That is the ONLY change needed — no other files touch the DB.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Every other module (usage, paper_cache, chat_history) imports `_conn` and
+`_PH` from here, so this is the ONLY file that knows which database is in use.
+The SQL is written to work on both (shared `CREATE TABLE IF NOT EXISTS`,
+`ON CONFLICT ... DO UPDATE SET x = excluded.x`, `%s`/`?` placeholders).
+
+Cloud setup:
+  1. pip install "psycopg[binary]>=3.1"   (add to requirements.txt)
+  2. DATABASE_URL=postgresql://USER:PASSWORD@HOST:6543/postgres  in the env
+     (use Supabase's *connection pooling* string, port 6543, for Cloud Run)
 """
 import json
+import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,68 +24,71 @@ from typing import Optional
 
 from .config import settings
 
+_DATABASE_URL = getattr(settings, "database_url", "") or os.environ.get("DATABASE_URL", "")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SQLITE BLOCK — active locally  (comment this out when deploying to cloud)
-# ══════════════════════════════════════════════════════════════════════════════
-import sqlite3
-
-@contextmanager
-def _conn():
-    db_path = Path(settings.db_path)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
-
-_PH = "?"
-
-def _row_to_dict(row) -> dict:
-    return dict(row)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# END SQLITE BLOCK
-# ══════════════════════════════════════════════════════════════════════════════
+# True when running on Postgres (cloud); lets sibling modules pick dialect-
+# specific SQL (e.g. date bucketing in usage.py) without re-detecting.
+IS_POSTGRES = bool(_DATABASE_URL)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# POSTGRESQL BLOCK — uncomment when deploying to cloud
-# (also comment out the SQLITE BLOCK above)
-# ══════════════════════════════════════════════════════════════════════════════
-#
-# import os
-# import psycopg2
-#
-# @contextmanager
-# def _conn():
-#     conn = psycopg2.connect(os.environ["DATABASE_URL"])
-#     try:
-#         yield conn
-#         conn.commit()
-#     except Exception:
-#         conn.rollback()
-#         raise
-#     finally:
-#         conn.close()
-#
-# _PH = "%s"
-#
-# def _row_to_dict(row) -> dict:
-#     return dict(row)
-#
-# ══════════════════════════════════════════════════════════════════════════════
-# END POSTGRESQL BLOCK
-# ══════════════════════════════════════════════════════════════════════════════
+if _DATABASE_URL:
+    # ══ PostgreSQL (cloud) ══════════════════════════════════════════════════
+    import psycopg
+    from psycopg.rows import dict_row
+
+    _PH = "%s"
+    # Auto-incrementing primary key type (Postgres).
+    _PK_AUTOINC = "BIGSERIAL PRIMARY KEY"
+
+    @contextmanager
+    def _conn():
+        # prepare_threshold=None keeps us compatible with Supabase's pgbouncer
+        # pooler (transaction mode), which doesn't support prepared statements.
+        conn = psycopg.connect(_DATABASE_URL, row_factory=dict_row, prepare_threshold=None)
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _row_to_dict(row) -> dict:
+        return dict(row)
+
+else:
+    # ══ SQLite (local dev) ══════════════════════════════════════════════════
+    import sqlite3
+
+    _PH = "?"
+    # Auto-incrementing primary key type (SQLite).
+    _PK_AUTOINC = "INTEGER PRIMARY KEY AUTOINCREMENT"
+
+    @contextmanager
+    def _conn():
+        db_path = Path(settings.db_path)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _row_to_dict(row) -> dict:
+        return dict(row)
 
 
 # ── Schema ──────────────────────────────────────────────────────────────────
 
 def init_db() -> None:
-    """Create tables if they don't exist. Called once at server startup."""
+    """Create tables if they don't exist. Called once at server startup.
+
+    Each DDL that might fail runs in its OWN connection/transaction, so a
+    duplicate-column error on Postgres (which aborts the current transaction)
+    can't poison the statements that follow — a difference from SQLite."""
     with _conn() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
@@ -97,17 +102,18 @@ def init_db() -> None:
                 data        TEXT NOT NULL
             )
         """)
-        # Upgrade older databases that predate the user_id column.
-        try:
-            conn.execute("ALTER TABLE sessions ADD COLUMN user_id TEXT")
-        except Exception:
-            pass
-        try:
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id)")
-        except Exception:
-            pass
 
-    # sibling tables (share this DB)
+    # Upgrade older databases that predate the user_id column (own transaction).
+    try:
+        with _conn() as conn:
+            conn.execute("ALTER TABLE sessions ADD COLUMN user_id TEXT")
+    except Exception:
+        pass
+
+    with _conn() as conn:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id)")
+
+    # sibling tables (share this DB + the _conn/_PH picked above)
     from core.usage import init_usage_table
     init_usage_table()
     from core.paper_cache import init_paper_cache_table
