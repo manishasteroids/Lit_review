@@ -120,6 +120,8 @@ def init_db() -> None:
     init_paper_cache_table()
     from core.chat_history import init_chat_history_table
     init_chat_history_table()
+    from core.papers_store import init_papers_tables
+    init_papers_tables()
 
 
 # ── Write ───────────────────────────────────────────────────────────────────

@@ -24,6 +24,8 @@ class Settings:
     
     database_url: str = os.environ.get("DATABASE_URL", "")
     
+    supabase_url: str = os.environ.get("SUPABASE_URL", "")
+    
     # ── Pipeline routing & limits ────────────────────────────────────────
     # Defaults live in the version-controlled core/model_policy.py (so they
     # survive .env resets); .env vars below override them per-environment.

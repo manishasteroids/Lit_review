@@ -7,23 +7,25 @@ import base64
 import json
 import re
 from datetime import datetime, timezone
- 
-from fastapi import APIRouter, Depends, HTTPException
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
- 
+
 from core.auth import require_user
-from core.config import settings
 from core.db import (delete_all_for_user, delete_session, get_session,
                      list_sessions, save_session)
 from core.llm_client import LLMClient
+from core.paper_resolver import resolve_candidates as resolve_paper_candidates
 from core.paper_text import fetch_paper_pdf, fetch_paper_text
-from core.usage import get_usage
+from core.papers_store import (create_paper, decision_history, find_duplicate,
+                               latest_decisions, list_papers, record_decision,
+                               set_full_text_status)
 from pipeline.orchestrator import RUNS, RunState, SamhitaPipeline
- 
+
 router = APIRouter(prefix="/api")
- 
- 
+
+
 def get_run(run_id: str, user_id: str):
     run = RUNS.get(run_id)
     if run:
@@ -36,10 +38,10 @@ def get_run(run_id: str, user_id: str):
     d = s.get("data") or {}
     approved = d.get("approved") or {}
     papers = d.get("papers") or []
- 
+
     def _approved(idx):
         return bool(approved.get(str(idx)) or approved.get(idx))
- 
+
     run = RunState(
         run_id=run_id,
         topic=d.get("topic", ""),
@@ -53,28 +55,26 @@ def get_run(run_id: str, user_id: str):
     )
     RUNS[run_id] = run
     return run
- 
- 
+
+
 # ── Pydantic bodies ────────────────────────────────────────────────────────
- 
+
 class CreateRunBody(BaseModel):
     topic: str
     api_key: str | None = None
     model: str | None = None
-    mode: str | None = None      # lite | medium | deep (drives papers + models + depth)
 
 
 class FilterBody(BaseModel):
     approved_indices: list[int]
- 
- 
+
+
 class SynthesizeBody(BaseModel):
     api_key: str | None = None
     model: str | None = None
-    mode: str | None = None
     notes: dict | None = None
- 
- 
+
+
 class ChatBody(BaseModel):
     paper_idx: int | None = None
     paper: dict | None = None
@@ -83,56 +83,60 @@ class ChatBody(BaseModel):
     images: list[dict] = []  # [{media_type, data(base64)}]
     api_key: str | None = None
     model: str | None = None
-    chat_mode: str | None = None  # "quick" (Gemini, cheap) | "deep" (Sonnet)
- 
- 
+
+
 class AssessBody(BaseModel):
     paper_idx: int | None = None
     paper: dict | None = None
     scope: str | None = None
     api_key: str | None = None
     model: str | None = None
- 
- 
+
+
 class ResolveBody(BaseModel):
     identifier: str
- 
- 
+
+
 class AddPaperBody(BaseModel):
     paper: dict
     api_key: str | None = None
     model: str | None = None
     notes: dict | None = None
- 
- 
+
+
 class ReanalyzeBody(BaseModel):
     included_indices: list[int]
     api_key: str | None = None
     model: str | None = None
     notes: dict | None = None
- 
- 
+
+
+class DecisionBody(BaseModel):
+    decision: str  # "included" | "maybe" | "excluded"
+    reason: str | None = None
+
+
 # ── Streaming search endpoint (SSE) ───────────────────────────────────────
- 
+
 @router.post("/runs/stream")
 async def create_run_stream(body: CreateRunBody, user_id: str = Depends(require_user)):
     """
     SSE endpoint. Streams progress events during reformulate+search, then
     emits a final 'done' event with the full run data.
- 
+
     Frontend consumes with fetch() + ReadableStream — no EventSource needed
     (EventSource doesn't support POST).
     """
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_event_loop()
- 
+
     def on_progress(event: dict):
         """Called from a worker thread — pushes into the async queue."""
         loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", **event})
- 
+
     async def run_pipeline():
         try:
-            pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model, mode=body.mode)
+            pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model)
             run = await asyncio.to_thread(
                 pipeline.reformulate_and_search, body.topic, on_progress
             )
@@ -162,28 +166,28 @@ async def create_run_stream(body: CreateRunBody, user_id: str = Depends(require_
             })
         except Exception as e:  # noqa: BLE001
             await queue.put({"type": "error", "message": str(e)})
- 
+
     asyncio.create_task(run_pipeline())
- 
+
     async def generate():
         while True:
             event = await queue.get()
             yield f"data: {json.dumps(event)}\n\n"
             if event["type"] in ("done", "error"):
                 break
- 
+
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
- 
- 
+
+
 # ── Non-streaming search (kept for compatibility) ─────────────────────────
- 
+
 @router.post("/runs")
 def create_run(body: CreateRunBody, user_id: str = Depends(require_user)):
-    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model, mode=body.mode)
+    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model)
     try:
         run = pipeline.reformulate_and_search(body.topic)
     except Exception as e:
@@ -200,10 +204,10 @@ def create_run(body: CreateRunBody, user_id: str = Depends(require_user)):
               "papers": run.papers, "approved": ap},
     )
     return {"run_id": run.run_id, "reform": run.reform, "papers": run.papers, "stage": run.stage}
- 
- 
+
+
 # ── Remaining pipeline stages ──────────────────────────────────────────────
- 
+
 @router.post("/runs/{run_id}/filter")
 def filter_papers(run_id: str, body: FilterBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
@@ -211,8 +215,8 @@ def filter_papers(run_id: str, body: FilterBody, user_id: str = Depends(require_
         raise HTTPException(400, "Approve at least 2 papers to build a review.")
     SamhitaPipeline().apply_filter(run, body.approved_indices)
     return {"run_id": run.run_id, "approved_count": len(run.approved_papers), "stage": run.stage}
- 
- 
+
+
 def _persist_done(run, user_id, notes=None, side=None):
     """Save a run in its 'done' state (post-synthesis / post-write)."""
     pipeline = SamhitaPipeline()
@@ -233,8 +237,8 @@ def _persist_done(run, user_id, notes=None, side=None):
         },
     )
     return side
- 
- 
+
+
 @router.post("/runs/{run_id}/synthesize")
 def synthesize(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
@@ -245,54 +249,13 @@ def synthesize(run_id: str, body: SynthesizeBody, user_id: str = Depends(require
         raise HTTPException(502, f"Reader & Extractor / Critic & Synthesizer failed: {e}")
     side = _persist_done(run, user_id, notes=body.notes)
     return {"run_id": run.run_id, "extractions": run.extractions,
-            "synthesis": run.synthesis, "side_modules": side, "stage": run.stage,
-            "extract_stats": run.extract_stats}
-    
-@router.post("/runs/{run_id}/synthesize/stream")
-async def synthesize_stream(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
-    """SSE version of /synthesize — streams a 'progress' event as each batch of
-    papers is read, then the synthesizer, then a final 'done' event."""
-    run = get_run(run_id, user_id)  # fast, no LLM — validates ownership first
-    queue: asyncio.Queue = asyncio.Queue()
-    loop = asyncio.get_event_loop()
-
-    def on_progress(event: dict):
-        loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", **event})
-
-    async def work():
-        try:
-            pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model,
-                                       mode=run.mode or body.mode)
-            await asyncio.to_thread(pipeline.extract_and_synthesize, run, on_progress)
-            side = _persist_done(run, user_id, notes=body.notes)
-            await queue.put({
-                "type": "done", "run_id": run.run_id,
-                "extractions": run.extractions, "synthesis": run.synthesis,
-                "side_modules": side, "stage": run.stage,
-                "extract_stats": run.extract_stats,
-            })
-        except Exception as e:  # noqa: BLE001
-            await queue.put({"type": "error", "message": str(e)})
-
-    asyncio.create_task(work())
-
-    async def generate():
-        while True:
-            event = await queue.get()
-            yield f"data: {json.dumps(event)}\n\n"
-            if event["type"] in ("done", "error"):
-                break
-
-    return StreamingResponse(
-        generate(), media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+            "synthesis": run.synthesis, "side_modules": side, "stage": run.stage}
 
 
 @router.post("/runs/{run_id}/write")
 def write(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
-    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model)
     try:
         pipeline.write(run)
     except Exception as e:
@@ -300,19 +263,19 @@ def write(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user
     side = _persist_done(run, user_id, notes=body.notes)
     return {"run_id": run.run_id, "sections": run.sections,
             "side_modules": side, "stage": run.stage}
- 
- 
+
+
 # ── Editable source set (Sources page) ─────────────────────────────────────
- 
+
 def _norm_title(t: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (t or "").lower()).strip()
- 
- 
+
+
 def _url_doi(url: str) -> str:
     m = re.search(r"10\.\d{4,9}/[^\s\"&?#]+", url or "")
     return m.group(0).lower() if m else ""
- 
- 
+
+
 def _is_duplicate(run: RunState, paper: dict) -> bool:
     nt = _norm_title(paper.get("title"))
     pd = _url_doi(paper.get("url"))
@@ -322,46 +285,126 @@ def _is_duplicate(run: RunState, paper: dict) -> bool:
         if pd and _url_doi(p.get("url")) == pd:
             return True
     return False
- 
- 
-@router.post("/runs/{run_id}/resolve")
+
+
+@router.post("/runs/{run_id}/papers/resolve")
+@router.post("/runs/{run_id}/resolve")  # legacy path, same handler
 def resolve_paper(run_id: str, body: ResolveBody, user_id: str = Depends(require_user)):
-    """Look up a DOI / PMID / arXiv id / URL / title and return candidate
-    papers, each flagged if it duplicates a paper already in the run."""
-    run = get_run(run_id, user_id)
+    """Look up a DOI / PMID / PMCID / arXiv id / URL / title and return
+    candidate papers, each flagged if it's a duplicate of a paper already
+    persisted for this run (checked against the papers table by canonical
+    identifier first, normalized title as a fallback — see paper_resolver.py)."""
+    get_run(run_id, user_id)  # 404s / ownership check; run itself unused here
+    searcher = SamhitaPipeline().searcher
     try:
-        candidates = SamhitaPipeline().resolve_candidates(body.identifier)
+        candidates = resolve_paper_candidates(searcher, run_id, body.identifier)
     except Exception as e:
         raise HTTPException(502, f"Lookup failed: {e}")
-    existing_titles = {_norm_title(p.get("title")) for p in run.papers}
-    existing_dois = {_url_doi(p.get("url")) for p in run.papers if _url_doi(p.get("url"))}
-    for c in candidates:
-        dupe = _norm_title(c.get("title")) in existing_titles
-        cd = _url_doi(c.get("url"))
-        if cd and cd in existing_dois:
-            dupe = True
-        c["duplicate"] = dupe
     return {"candidates": candidates}
- 
- 
-@router.post("/runs/{run_id}/add_paper")
-def add_paper(run_id: str, body: AddPaperBody, user_id: str = Depends(require_user)):
-    """Add one resolved paper and run extraction on it. Marks downstream
-    analysis stale (frontend), so the user runs Update analysis afterwards."""
+
+
+def _retrieve_full_text_bg(paper_id: str, url: str) -> None:
+    """Background task: try to fetch full text for a newly-added paper so
+    it's warm in cache for later Deep-mode extraction, without making the
+    user wait on it. Never raises — best-effort, status-only.
+
+    Plain sync function scheduled via FastAPI's BackgroundTasks (not
+    asyncio.create_task): `add_paper` below is a sync `def` route, which
+    FastAPI runs in a worker thread with no event loop of its own — calling
+    asyncio.create_task() there would raise "no running event loop" on every
+    single call. BackgroundTasks is Starlette's mechanism for exactly this:
+    it runs the task (in a thread, since this function is sync) after the
+    response is sent, regardless of whether the route itself is sync or async."""
+    try:
+        text = fetch_paper_text(url)
+        set_full_text_status(paper_id, "fetched" if text else "unavailable")
+    except Exception:
+        set_full_text_status(paper_id, "unavailable")
+
+
+@router.post("/runs/{run_id}/papers")
+@router.post("/runs/{run_id}/add_paper")  # legacy path, same handler
+def add_paper(run_id: str, body: AddPaperBody, background_tasks: BackgroundTasks,
+              user_id: str = Depends(require_user)):
+    """Add one resolved paper: persist a canonical (UUID-keyed) paper record,
+    log an 'included' decision to the audit trail, run the same fast
+    abstract-based extraction as today so the response is immediate, and kick
+    off full-text retrieval in the background (doesn't block the response —
+    full_text_status flips from 'pending' to 'fetched'/'unavailable' once it's
+    done). Marks downstream analysis stale (frontend), so the user runs
+    Update analysis afterwards."""
     run = get_run(run_id, user_id)
-    if not (body.paper or {}).get("title"):
+    paper_in = body.paper or {}
+    if not paper_in.get("title"):
         raise HTTPException(400, "That paper has no title — pick a different result.")
-    if _is_duplicate(run, body.paper):
+
+    dupe = find_duplicate(
+        run_id,
+        doi=paper_in.get("doi") or "", pmid=paper_in.get("pmid") or "",
+        pmcid=paper_in.get("pmcid") or "", arxiv_id=paper_in.get("arxiv_id") or "",
+        title=paper_in.get("title") or "",
+    )
+    if dupe or _is_duplicate(run, paper_in):
         raise HTTPException(409, "This paper is already in your sources.")
+
     pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model)
     try:
-        res = pipeline.add_paper(run, body.paper)
+        res = pipeline.add_paper(run, paper_in)
     except Exception as e:
         raise HTTPException(502, f"Adding paper failed: {e}")
+
+    new_idx = res["paper"]["idx"]
+    canonical = create_paper(
+        run_id, paper_in, added_by=user_id,
+        added_from=paper_in.get("source") or "manual_link", idx=new_idx,
+    )
+    record_decision(canonical["id"], run_id, user_id, "included", reason="added via Sources")
+    res["paper"]["paper_id"] = canonical["id"]
+    res["full_text_status"] = "pending"
+
+    url = paper_in.get("url") or paper_in.get("landing_url") or ""
+    if url:
+        background_tasks.add_task(_retrieve_full_text_bg, canonical["id"], url)
+
     _persist_done(run, user_id, notes=body.notes)
     return res
- 
- 
+
+
+@router.get("/runs/{run_id}/papers")
+def list_run_papers(run_id: str, user_id: str = Depends(require_user)):
+    """Canonical (UUID-keyed) paper records persisted for this run, each with
+    its latest included/maybe/excluded decision — no LLM calls."""
+    get_run(run_id, user_id)
+    papers = list_papers(run_id)
+    decisions = latest_decisions(run_id)
+    for p in papers:
+        d = decisions.get(p["id"])
+        p["decision"] = d["decision"] if d else None
+        p["decided_at"] = d["created_at"] if d else None
+    return {"papers": papers}
+
+
+@router.post("/runs/{run_id}/papers/{paper_id}/decision")
+def set_paper_decision(run_id: str, paper_id: str, body: DecisionBody,
+                        user_id: str = Depends(require_user)):
+    """Record an included/maybe/excluded decision for a paper. Append-only —
+    every call adds a new row to the audit trail rather than overwriting the
+    last one, so the full history of who decided what, and when, is never lost."""
+    get_run(run_id, user_id)  # ownership check
+    try:
+        decision = record_decision(paper_id, run_id, user_id, body.decision, body.reason or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return decision
+
+
+@router.get("/runs/{run_id}/papers/{paper_id}/decisions")
+def get_paper_decision_history(run_id: str, paper_id: str, user_id: str = Depends(require_user)):
+    """Full decision audit trail for one paper — no LLM calls."""
+    get_run(run_id, user_id)  # ownership check
+    return {"history": decision_history(paper_id)}
+
+
 @router.post("/runs/{run_id}/reanalyze")
 def reanalyze(run_id: str, body: ReanalyzeBody, user_id: str = Depends(require_user)):
     """Recompute synthesis + side modules for the current included set,
@@ -378,19 +421,19 @@ def reanalyze(run_id: str, body: ReanalyzeBody, user_id: str = Depends(require_u
     return {"run_id": run.run_id, "extractions": run.extractions,
             "synthesis": run.synthesis, "sections": run.sections,
             "side_modules": side, "stage": run.stage}
- 
- 
+
+
 @router.post("/runs/{run_id}/evaluate")
 def evaluate(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
-    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model)
     try:
         result = pipeline.evaluate(run)
     except Exception as e:
         raise HTTPException(502, f"Evaluator failed: {e}")
     return {"run_id": run.run_id, "eval_result": result}
- 
- 
+
+
 @router.post("/runs/{run_id}/assess")
 def assess_paper(run_id: str, body: AssessBody, user_id: str = Depends(require_user)):
     """Quick triage of a single paper against the review scope: extract key
@@ -404,7 +447,7 @@ def assess_paper(run_id: str, body: AssessBody, user_id: str = Depends(require_u
     if not paper:
         raise HTTPException(404, "Paper not found. Reopen and try again.")
     scope = body.scope or ((run.reform or {}).get("scope") if run else None) or "(no explicit scope provided)"
- 
+
     system = (
         "You are a triage assistant for a literature review. Given the review SCOPE and one "
         "paper's title + abstract, (1) extract key fields and (2) judge how relevant the paper "
@@ -419,96 +462,19 @@ def assess_paper(run_id: str, body: AssessBody, user_id: str = Depends(require_u
         f"PAPER: {paper.get('title', '')} ({paper.get('year', '?')})\n"
         f"ABSTRACT: {paper.get('abstract', '') or 'n/a'}"
     )
-    llm = LLMClient(api_key=body.api_key, model=body.model, run_id=run_id, stage="assess")
+    llm = LLMClient(api_key=body.api_key, model=body.model)
     try:
         data = LLMClient.parse_json(llm.call(user_text=user, system=system, max_tokens=400))
     except Exception as e:
         raise HTTPException(502, f"Assessment failed: {e}")
     return {"assessment": data}
- 
- 
-_STOP = {"the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "is", "are",
-         "was", "were", "this", "that", "these", "those", "it", "its", "with", "by",
-         "as", "at", "be", "how", "what", "why", "which", "does", "do", "did", "can",
-         "paper", "study", "authors", "their", "they", "from", "into", "about"}
-
-
-def _keywords(question: str) -> list[str]:
-    toks = re.findall(r"[a-z0-9][a-z0-9\-]{2,}", (question or "").lower())
-    return [t for t in toks if t not in _STOP]
-
-
-def select_passages(full_text: str, question: str, max_chars: int = 22000) -> str:
-    """Cheap local retrieval: split the paper into paragraph chunks, score each by
-    how many question keywords it contains, and return the top chunks (in original
-    order) up to max_chars. Avoids sending the whole paper for a specific question.
-    Falls back to the head of the text if nothing scores."""
-    kws = _keywords(question)
-    # paragraph-ish chunks
-    raw = re.split(r"\n\s*\n", full_text)
-    chunks, buf = [], ""
-    for para in raw:
-        para = para.strip()
-        if not para:
-            continue
-        if len(buf) + len(para) < 1400:
-            buf = f"{buf}\n\n{para}" if buf else para
-        else:
-            if buf:
-                chunks.append(buf)
-            buf = para
-    if buf:
-        chunks.append(buf)
-    if not kws or not chunks:
-        return full_text[:max_chars]
-
-    def score(c: str) -> int:
-        low = c.lower()
-        return sum(low.count(k) for k in kws)
-
-    ranked = sorted(range(len(chunks)), key=lambda i: score(chunks[i]), reverse=True)
-    keep, total = set(), 0
-    for i in ranked:
-        if score(chunks[i]) == 0:
-            break
-        if total + len(chunks[i]) > max_chars:
-            continue
-        keep.add(i)
-        total += len(chunks[i])
-    if not keep:                       # no keyword hits — send the opening
-        return full_text[:max_chars]
-    return "\n\n[…]\n\n".join(chunks[i] for i in sorted(keep))
-
-
-# Questions that need the whole paper rather than a few passages.
-_BROAD = ("summar", "overview", "overall", "tl;dr", "tldr", "everything", "whole paper",
-          "entire paper", "main point", "main contribution", "key point", "key finding",
-          "limitation", "in detail", "walk me through", "what is this paper")
-
-
-def _needs_pdf(question: str) -> bool:
-    q = (question or "").lower()
-    return any(w in q for w in ("figure", "fig.", "fig ", "table", "chart", "plot",
-                                "graph", "diagram", "equation", "panel", "image", "photo"))
-
-
-CHAT_FORMAT = (
-    "\n\nFORMAT — you are writing into a narrow chat panel, so keep it tight and "
-    "scannable:\n"
-    "- Open with one plain-sentence direct answer. No title, no 'Here is…' preamble.\n"
-    "- For structure use bold lead-ins (**Method.** …) or level-4 headings (#### ), "
-    "NEVER # or ## — big headers look broken here.\n"
-    "- Prefer short bullet points over long paragraphs; keep bullets to 1–2 lines.\n"
-    "- Put metrics, numbers and short quotes inline; bold the key figures.\n"
-    "- Don't pad. Aim for the shortest answer that fully covers the question."
-)
 
 
 @router.post("/runs/{run_id}/chat")
 def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require_user)):
     """Answer questions about a single paper, grounded in what we know about it
     (abstract/summary, plus extracted fields if extraction has already run).
- 
+
     The paper data can be sent in the request body, so chat works even when the
     run is no longer in memory (e.g. a session restored from History)."""
     run = RUNS.get(run_id)
@@ -521,7 +487,7 @@ def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require
     ext = None
     if run:
         ext = next((e for e in (run.extractions or []) if e.get("idx") == idx), None)
- 
+
     lines = [
         f"Title: {paper.get('title', '')}",
         f"Authors: {paper.get('authors', '')}",
@@ -536,90 +502,85 @@ def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require
             if v and v != "n/a":
                 lines.append(f"{k.capitalize()}: {v}")
     context = "\n".join(lines)
- 
+
     convo = ""
     for m in (body.history or []):
         role = "User" if m.get("role") == "user" else "Assistant"
         convo += f"{role}: {m.get('content', '')}\n"
     convo += f"User: {body.question}\nAssistant:"
- 
-    # Chat mode picks the model: Quick = Gemini (cheap), Deep = Sonnet (stronger
-    # reasoning). Grounding source (text/excerpts/PDF) is chosen below by cost.
-    chat_models = {"quick": settings.gemini_model or "gemini-2.5-flash", "deep": "claude-sonnet-4-6"}
-    chat_model = chat_models.get(body.chat_mode) if body.chat_mode else body.model
-    llm = LLMClient(api_key=body.api_key, model=chat_model, run_id=run_id, stage="chat")
- 
+
+    llm = LLMClient(api_key=body.api_key, model=body.model)
+    pdf_bytes = fetch_paper_pdf(paper.get("url"))
+
     image_blocks = []
     for img in (body.images or [])[:6]:  # cap count
         mt, data = img.get("media_type"), img.get("data")
         if mt and data and len(data) < 9_000_000:  # ~6.5 MB decoded per image
             image_blocks.append({"type": "image",
                 "source": {"type": "base64", "media_type": mt, "data": data}})
- 
-    # Cost strategy: prefer cheap extracted TEXT over the token-heavy PDF (only
-    # attach the PDF for images or figure/table questions); RETRIEVE only the
-    # relevant passages for specific questions; CACHE the paper block so
-    # multi-turn follow-ups reuse it at 0.1x input.
-    q = body.question or ""
-    broad = (len(q.strip()) < 40) or any(w in q.lower() for w in _BROAD)
-    want_pdf = bool(image_blocks) or _needs_pdf(q)
-    full_text = fetch_paper_text(paper.get("url")) or ""
-    pdf_bytes = fetch_paper_pdf(paper.get("url")) if want_pdf else None
 
     try:
-        blocks, parts = [], []
-        if pdf_bytes:
-            b64 = base64.standard_b64encode(pdf_bytes).decode("ascii")
-            blocks.append({"type": "document", "source": {"type": "base64",
-                "media_type": "application/pdf", "data": b64}})
-            parts.append("full_pdf")
-        blocks.extend(image_blocks)
-        if image_blocks:
-            parts.append("image")
- 
-        paper_text = f"PAPER METADATA:\n{context}\n\n"
-        cache_paper = False
-        if not pdf_bytes:
-            if full_text and broad:
-                paper_text += ("FULL PAPER TEXT (extracted; figures not included):\n"
-                               + full_text[:60000] + "\n\n")
-                parts.append("full_text")
-                cache_paper = True            # stable across turns → cacheable
-            elif full_text:
-                paper_text += ("RELEVANT EXCERPTS (passages most relevant to the question; "
-                               "ask for a summary to read the whole paper):\n"
-                               + select_passages(full_text, q) + "\n\n")
-                parts.append("retrieved")
+        if pdf_bytes or image_blocks:
+            # Multimodal: attach the PDF (figures/tables) and/or the user's images.
+            blocks, parts = [], []
+            if pdf_bytes:
+                b64 = base64.standard_b64encode(pdf_bytes).decode("ascii")
+                blocks.append({"type": "document", "source": {"type": "base64",
+                    "media_type": "application/pdf", "data": b64}})
+                parts.append("full_pdf")
+            blocks.extend(image_blocks)
+            if image_blocks:
+                parts.append("image")
+
+            text = f"PAPER METADATA:\n{context}\n\n"
+            if not pdf_bytes:
+                full_text = fetch_paper_text(paper.get("url"))
+                if full_text:
+                    text += "FULL PAPER TEXT (extracted; figures not included):\n" + full_text + "\n\n"
+                    parts.append("full_text")
+                else:
+                    parts.append("abstract")
+            if image_blocks:
+                text += ("The user attached the image(s) shown above — use them to answer "
+                         "(e.g. explain a figure or compare it with the paper). ")
+            text += f"\nCONVERSATION:\n{convo}"
+            blocks.append({"type": "text", "text": text})
+
+            system = (
+                "You are a research assistant helping a reviewer understand a paper. "
+                + ("The full paper is attached as a PDF — read all of it, including figures, "
+                   "tables and equations. " if pdf_bytes else "")
+                + ("The user also attached image(s) — explain or compare them in the context of "
+                   "the paper as asked. " if image_blocks else "")
+                + "Answer thoroughly and ground every claim in the paper (or the attached "
+                "images); don't invent facts. When asked for a summary, cover objective, method, "
+                "data, key results (with numbers), and limitations."
+            )
+            answer = llm.call(content=blocks, system=system, max_tokens=1500)
+            source = "+".join(parts) or "abstract"
+        else:
+            # No PDF or images — fall back to text/abstract.
+            full_text = fetch_paper_text(paper.get("url"))
+            if full_text:
+                context += "\n\nFULL PAPER TEXT (extracted; figures not included, may be truncated):\n" + full_text
+                source = "full_text"
+                note = ("You have the full text of this paper below. Answer from it and cite "
+                        "specific sections/results when relevant.")
             else:
-                parts.append("abstract")
-        paper_block = {"type": "text", "text": paper_text}
-        if cache_paper:
-            paper_block["cache_control"] = {"type": "ephemeral"}
-        blocks.append(paper_block)
-        convo_text = ""
-        if image_blocks:
-            convo_text += ("The user attached the image(s) above — use them to answer "
-                           "(e.g. explain a figure or compare it with the paper).\n\n")
-        convo_text += f"CONVERSATION:\n{convo}"
-        blocks.append({"type": "text", "text": convo_text})
- 
-        grounding = ("the attached PDF (read figures, tables and equations)" if pdf_bytes
-                     else "the full paper text below" if (full_text and broad)
-                     else "the excerpts below (say so if they don't cover the question; do not guess)" if full_text
-                     else "the abstract below (say plainly when it doesn't cover the question)")
-        system = (
-            "You are a research assistant helping a reviewer understand a paper. Answer from "
-            + grounding + "; ground every claim in the source and don't invent facts. When "
-            "asked for a summary, cover objective, method, data, key results (with numbers), "
-            "and limitations." + CHAT_FORMAT
-        )
-        answer = llm.call(content=blocks, system=system, max_tokens=1500)
-        source = "+".join(parts) or "abstract"
+                source = "abstract"
+                note = ("Only the abstract/summary is available (the full paper couldn't be "
+                        "fetched — it may be paywalled). Answer from the abstract and say plainly "
+                        "when it doesn't cover the question rather than guessing.")
+            system = (
+                "You are a research assistant helping a reviewer understand a paper. " + note +
+                " Be concise and specific.\n\nPAPER INFORMATION:\n" + context
+            )
+            answer = llm.call(user_text=convo, system=system, max_tokens=800)
     except Exception as e:
         raise HTTPException(502, f"Chat failed: {e}")
     return {"answer": answer, "source": source}
- 
- 
+
+
 @router.get("/runs/{run_id}")
 def get_run_state(run_id: str, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
@@ -631,80 +592,13 @@ def get_run_state(run_id: str, user_id: str = Depends(require_user)):
         "sections": run.sections, "eval_result": run.eval_result, "stage": run.stage,
         "side_modules": pipeline.side_modules(run) if run.synthesis else None,
     }
- 
- 
+
+
 # ── Session history endpoints (no LLM) ───────────────────────────────────
- 
+
 @router.get("/sessions")
 def sessions_list(user_id: str = Depends(require_user)):
     return list_sessions(user_id)
-
-
-@router.get("/sessions/{session_id}/usage")
-def session_usage(session_id: str, user_id: str = Depends(require_user)):
-    """Token counts + dollar cost for one session, by stage and model. DB read."""
-    return get_usage(session_id)
-
-
-class ChatSaveBody(BaseModel):
-    paper_key: str
-    messages: list[dict] = []
-
-
-@router.get("/chat/history")
-def chat_history_get(paper_key: str, user_id: str = Depends(require_user)):
-    """Load saved chat for a paper (by URL), for the signed-in user."""
-    from core.chat_history import get_chat
-    return {"messages": get_chat(user_id, paper_key)}
-
-
-@router.post("/chat/history")
-def chat_history_save(body: ChatSaveBody, user_id: str = Depends(require_user)):
-    """Persist the chat message list for a paper (by URL)."""
-    from core.chat_history import save_chat
-    save_chat(user_id, body.paper_key, body.messages)
-    return {"ok": True}
-
-
-@router.get("/usage/trend")
-def usage_trend(days: int = 30, tz_offset: int = 0, user_id: str = Depends(require_user)):
-    """Per-day token + cost totals for the signed-in user, plus an all-time
-    total — for the trendline chart. `tz_offset` is the browser's
-    getTimezoneOffset() so days are grouped in the user's local time. DB read."""
-    from core.usage import get_usage_trend
-    return get_usage_trend(user_id, days, tz_offset)
-
-
-@router.get("/modes")
-def list_modes():
-    """The search modes (Lite / Medium / Deep) for the UI selector. No auth."""
-    from core.modes import public_list, DEFAULT_MODE
-    return {"default": DEFAULT_MODE, "modes": public_list()}
-
-
-@router.get("/pipeline/models")
-def pipeline_models(model: str | None = None, mode: str | None = None):
-    """Which model each pipeline stage runs on, for the UI rail. If a mode is
-    given it drives the routing; otherwise falls back to the model_policy preset.
-    Pure config read — no user data, so no auth required."""
-    if mode:
-        from core.modes import resolve
-        m = resolve(mode)
-        fast, mid, write_model = m["fast"], m["mid"], m["write"]
-        per_purpose = True
-    else:
-        selected = model or settings.model
-        pipeline_model = settings.model if (selected and "gemini" in selected.lower()) else selected
-        write_model = settings.write_model or pipeline_model
-        per_purpose = settings.per_purpose_routing
-        fast, mid = (settings.fast_model, settings.mid_model) if per_purpose else (write_model, write_model)
-    return {
-        "per_purpose_routing": per_purpose,
-        "stages": {
-            "reformulate": fast, "search": fast, "extract": fast,
-            "synthesize": mid, "evaluate": mid, "write": write_model,
-        },
-    }
 
 
 @router.get("/sessions/{session_id}")
@@ -713,17 +607,16 @@ def session_get(session_id: str, user_id: str = Depends(require_user)):
     if not s:
         raise HTTPException(404, "Session not found.")
     return s
- 
- 
+
+
 @router.delete("/sessions/{session_id}")
 def session_delete(session_id: str, user_id: str = Depends(require_user)):
     delete_session(session_id, user_id)
     return {"ok": True}
- 
- 
+
+
 @router.delete("/sessions")
 def sessions_delete_all(user_id: str = Depends(require_user)):
     """Data-deletion control: wipe every session owned by the signed-in user."""
     deleted = delete_all_for_user(user_id)
     return {"ok": True, "deleted": deleted}
- 
