@@ -142,11 +142,32 @@ class ReaderExtractorAgent(Agent):
                         for p in b:
                             emit(p)
 
+        # 3b. Retry papers the model silently dropped. A batch reply can come
+        #     back with fewer objects than papers sent (truncation, or Gemini
+        #     rate-limiting/omitting some) — those papers would otherwise vanish
+        #     with no extraction. Retry them once, then stub any still missing so
+        #     every approved paper keeps a row downstream.
+        if todo:
+            got = {e.get("idx") for e in fresh if e.get("idx") is not None}
+            missing = [p for p in todo if p["idx"] not in got]
+            if missing:
+                size = batch_size or self.BATCH_SIZE
+                for b in [missing[i:i + size] for i in range(0, len(missing), size)]:
+                    fresh.extend(self._extract_batch(b))
+                    for p in b:
+                        emit(p, "retried")
+                got = {e.get("idx") for e in fresh if e.get("idx") is not None}
+                for p in todo:                       # last resort: keep the paper
+                    if p["idx"] not in got:
+                        fresh.append({"idx": p["idx"]})
+
         # 4. Cache the fresh extractions, keyed by paper url.
         by_idx = {p["idx"]: p for p in todo}
         for e in fresh:
             p = by_idx.get(e.get("idx"))
-            if p:
+            # only cache real extractions — never the empty stubs from 3b, or a
+            # failed paper would be permanently remembered as "no data".
+            if p and any(k != "idx" for k in e):
                 put_cached(p.get("url"), full_text, e)
 
         # 5. Coverage stats (surfaced in the UI for Deep runs).

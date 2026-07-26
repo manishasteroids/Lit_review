@@ -115,7 +115,9 @@ class SamhitaPipeline:
         emit("search", "Searching arXiv…", "arxiv")
         emit("search", "Searching PubMed & bioRxiv…", "pubmed")
         self.fast.stage = "search"
-        run.papers = self.searcher.run(topic, queries, limit=self.search_limit)
+        run.papers = self.searcher.run(
+            topic, queries, limit=self.search_limit,
+            terms=run.reform.get("terms"), scope=run.reform.get("scope"))
         emit("search", f"Found {len(run.papers)} papers — aggregating results…")
  
         run.stage = "filter"
@@ -229,11 +231,9 @@ class SamhitaPipeline:
  
     # ---- helpers ----------------------------------------------------------
     def _ordered_papers(self, run: RunState) -> list[dict]:
-        ranked = (run.synthesis or {}).get("ranked", [])
-        if ranked:
-            by_idx = {p["idx"]: p for p in run.approved_papers}
-            ordered = [by_idx[r["idx"]] for r in ranked if r["idx"] in by_idx]
-            if ordered:
-                return ordered
+        # Cite in the SEARCH-RELEVANCE order the user approved, so numbering is
+        # stable from Paper Filter → Sources → the written review. The
+        # synthesizer's scores still surface in the Ranking module and the
+        # comparison table's Rank column — they just no longer reshuffle the list.
         return run.approved_papers
  

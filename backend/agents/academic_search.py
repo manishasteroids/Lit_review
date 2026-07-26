@@ -20,6 +20,7 @@ model's web search (the previous behaviour) so the pipeline never hard-fails.
 turns a single DOI / PMID / arXiv id / URL / free-text title into candidate
 papers so a user can add a specific paper by hand.
 """
+import math
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -38,18 +39,78 @@ PUBMED_ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
  
 OPENALEX_API = "https://api.openalex.org/works"
+
+
+# ── Relevance ranking ─────────────────────────────────────────────────────────
+# Words that carry no topical signal — command phrasing ("find papers about…"),
+# generic research boilerplate, and ordinary stopwords. Stripped before scoring
+# so "Find papers related to token optimization" scores on "token optimization".
+_RANK_STOP = {
+    "the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "is", "are",
+    "with", "by", "as", "at", "be", "this", "that", "from", "into", "about",
+    "we", "our", "their", "using", "used", "based", "via", "toward", "towards",
+    "find", "paper", "papers", "article", "articles", "study", "studies",
+    "review", "reviews", "research", "related", "relating", "literature",
+    "approach", "approaches", "method", "methods", "analysis", "role", "use",
+    "new", "novel", "recent", "survey", "work", "works", "result", "results",
+}
+
+
+def _tokens(text: str) -> list[str]:
+    return [t for t in re.findall(r"[a-z0-9]+", (text or "").lower())
+            if len(t) > 2 and t not in _RANK_STOP]
+
+
+def _relevance_keywords(topic: str, terms, scope: str) -> dict:
+    """Weighted keyword set the search results are scored against. The user's
+    topic weighs most, the reformulator's key terms next, the scope sentence
+    least — so on-topic vocabulary dominates the score."""
+    kw: dict = {}
+    for w in _tokens(topic):
+        kw[w] = kw.get(w, 0) + 3.0
+    for t in (terms or []):
+        for w in _tokens(t):
+            kw[w] = kw.get(w, 0) + 2.0
+    for w in _tokens(scope or ""):
+        kw[w] = kw.get(w, 0) + 1.0
+    return kw
+
+
+def _score(paper: dict, kw: dict) -> tuple:
+    """Return (score, keyword_hits). Relevance dominates; recency, having an
+    abstract, and citations only break ties — so a heavily-cited but off-topic
+    paper can never outrank an on-topic one."""
+    title_toks = set(_tokens(paper.get("title") or ""))
+    body_toks = set(_tokens(paper.get("abstract") or ""))
+    hits = 0
+    rel = 0.0
+    for w, wt in kw.items():
+        in_title = w in title_toks
+        in_body = w in body_toks
+        if in_title or in_body:
+            hits += 1
+            rel += wt * (2.0 if in_title else 1.0)   # title match worth ~2x body
+    rel += 1.5 * hits                                  # reward breadth of coverage
+    year = paper.get("year") or 0
+    recency = min(4.0, max(0.0, (year - 2015) * 0.5)) if year else 0.0
+    has_abs = 1.5 if paper.get("abstract") else 0.0
+    cites = min(3.0, math.log10((paper.get("cites") or 0) + 1))   # capped tiebreak
+    return rel + recency + has_abs + cites, hits
  
  
 class AcademicSearchAgent(Agent):
     name = "academic_search"
 
-    def run(self, topic: str, queries: list[str], limit: int = 50) -> list[dict]:
-        terms = _uniq([topic, *(queries or [])])[:3]
+    def run(self, topic: str, queries: list[str], limit: int = 50,
+            terms: list[str] | None = None, scope: str | None = None) -> list[dict]:
+        # `search_terms` selects the candidate POOL (topic + first 2 queries);
+        # the reformulator's `terms`/`scope` are used only to RANK.
+        search_terms = _uniq([topic, *(queries or [])])[:3]
  
         merged: dict[str, dict] = {}
         for source in (self._openalex, self._semantic_scholar, self._pubmed, self._arxiv):
             try:
-                for p in source(terms):
+                for p in source(search_terms):
                     key = (p.get("title") or "").strip().lower()
                     if key and key not in merged:
                         merged[key] = p
@@ -60,8 +121,18 @@ class AcademicSearchAgent(Agent):
         if not papers:
             return self._llm_fallback(topic, queries)
  
-        papers.sort(key=lambda p: (bool(p.get("abstract")), p.get("cites") or 0), reverse=True)
-        papers = papers[:limit]
+        # Rank by RELEVANCE to the topic, not raw citations. Score each candidate
+        # against the reformulator's key terms + scope; recency, an abstract and
+        # citations only break ties. Then, if we have enough genuinely on-topic
+        # papers, drop the zero-match ones so generic high-citation papers that
+        # merely share a stopword don't fill the shortlist.
+        kw = _relevance_keywords(topic, terms or queries, scope)
+        scored = [(p, *_score(p, kw)) for p in papers]        # (paper, score, hits)
+        on_topic = [t for t in scored if t[2] > 0]
+        pool = on_topic if len(on_topic) >= min(limit, 10) else scored
+        pool.sort(key=lambda t: t[1], reverse=True)
+
+        papers = [t[0] for t in pool[:limit]]
         for i, p in enumerate(papers):
             p["idx"] = i
             p.pop("cites", None)

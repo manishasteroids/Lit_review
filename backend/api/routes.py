@@ -50,6 +50,7 @@ def get_run(run_id: str, user_id: str):
         synthesis=d.get("synth"),
         sections=d.get("sections") or {},
         stage=s.get("stage", "done"),
+        mode=d.get("mode"),          # keep the search mode so later stages reuse its models
     )
     RUNS[run_id] = run
     return run
@@ -151,6 +152,7 @@ async def create_run_stream(body: CreateRunBody, user_id: str = Depends(require_
                     "reform": run.reform,
                     "papers": run.papers,
                     "approved": ap,
+                    "mode": run.mode,
                 },
             )
             await queue.put({
@@ -197,7 +199,7 @@ def create_run(body: CreateRunBody, user_id: str = Depends(require_user)):
         user_id=user_id,
         created_at=datetime.now(timezone.utc).isoformat(),
         data={"runId": run.run_id, "topic": run.topic, "reform": run.reform,
-              "papers": run.papers, "approved": ap},
+              "papers": run.papers, "approved": ap, "mode": run.mode},
     )
     return {"run_id": run.run_id, "reform": run.reform, "papers": run.papers, "stage": run.stage}
  
@@ -230,6 +232,7 @@ def _persist_done(run, user_id, notes=None, side=None):
             "papers": run.papers, "approved": approved_map,
             "extractions": run.extractions, "synth": run.synthesis,
             "sections": run.sections, "sideModules": side, "notes": notes or {},
+            "mode": run.mode,
         },
     )
     return side
@@ -238,7 +241,7 @@ def _persist_done(run, user_id, notes=None, side=None):
 @router.post("/runs/{run_id}/synthesize")
 def synthesize(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
-    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model)
+    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
     try:
         pipeline.extract_and_synthesize(run)
     except Exception as e:
@@ -353,7 +356,8 @@ def add_paper(run_id: str, body: AddPaperBody, user_id: str = Depends(require_us
         raise HTTPException(400, "That paper has no title — pick a different result.")
     if _is_duplicate(run, body.paper):
         raise HTTPException(409, "This paper is already in your sources.")
-    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model)
+    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model,
+                               mode=run.mode or getattr(body, "mode", None))
     try:
         res = pipeline.add_paper(run, body.paper)
     except Exception as e:
@@ -369,7 +373,8 @@ def reanalyze(run_id: str, body: ReanalyzeBody, user_id: str = Depends(require_u
     run = get_run(run_id, user_id)
     if len(body.included_indices) < 1:
         raise HTTPException(400, "Include at least one source before updating the analysis.")
-    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model)
+    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model,
+                               mode=run.mode or getattr(body, "mode", None))
     try:
         pipeline.reanalyze(run, body.included_indices)
     except Exception as e:

@@ -1,4 +1,4 @@
-import { getAccessToken } from "../supabase.js";
+import { getAccessToken, refreshAccessToken } from "../supabase.js";
 
 const BASE = import.meta.env.VITE_API_BASE || "http://localhost:8015";
 
@@ -9,11 +9,18 @@ async function authHeaders(extra = {}) {
 }
 
 async function request(path, body) {
-  const res = await fetch(BASE + path, {
-    method: "POST",
-    headers: await authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(body || {}),
-  });
+  const send = async () =>
+    fetch(BASE + path, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body || {}),
+    });
+  let res = await send();
+  // A 401 usually means the access token expired mid-session — refresh once and
+  // retry before surfacing an error to the user.
+  if (res.status === 401 && (await refreshAccessToken())) {
+    res = await send();
+  }
   if (!res.ok) {
     let detail = "Request failed (" + res.status + ")";
     try {
@@ -28,11 +35,18 @@ async function request(path, body) {
 // Generic SSE POST: calls onEvent for each streamed event, resolves with the
 // final "done" event, throws on "error". Used by search + synthesize streams.
 async function streamPost(path, body, onEvent) {
-  const res = await fetch(BASE + path, {
-    method: "POST",
-    headers: await authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(body || {}),
-  });
+  const send = async () =>
+    fetch(BASE + path, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body || {}),
+    });
+  let res = await send();
+  // Refresh an expired token once and retry, so a long-open tab doesn't fail
+  // the whole run with "please sign in again".
+  if (res.status === 401 && (await refreshAccessToken())) {
+    res = await send();
+  }
   if (!res.ok) {
     let detail = "Request failed (" + res.status + ")";
     try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
