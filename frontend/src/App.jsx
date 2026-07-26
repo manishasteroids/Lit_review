@@ -14,6 +14,8 @@ import KnowledgeGraphView from "./components/KnowledgeGraphView.jsx";
 import DataAnalysisView from "./components/DataAnalysisView.jsx";
 import EvaluationView from "./components/EvaluationView.jsx";
 import UsageView from "./components/UsageView.jsx";
+import LandingPage from "./components/LandingPage.jsx";
+import ProfileModal from "./components/ProfileModal.jsx";
 import {
   RotateCw, AlertTriangle, Sparkles, PenTool,
   BookOpen, Layers, Brain, Network, BarChart3, FlaskConical,
@@ -100,6 +102,7 @@ export default function App() {
   const [error, setError] = useState(null);
 
   const [notes, setNotes] = useState({}); // paper idx -> note text
+  const [accountTab, setAccountTab] = useState(null);  // "profile" | "settings" | null
 
   const [runId, setRunId] = useState(null);
   const [reform, setReform] = useState(null);
@@ -431,8 +434,16 @@ export default function App() {
 
   const grouped = groupSessions(sessions);
 
+  // Signed-out visitors see the public landing page; the tools app is gated
+  // behind login. (All hooks above run unconditionally, so this early return
+  // is safe.)
+  if (signedOut) return <LandingPage />;
+
   return (
     <div className="sm-root">
+      {accountTab && (
+        <ProfileModal user={session?.user} tab={accountTab} onClose={() => setAccountTab(null)} />
+      )}
       <div className="sm-wrap wide">
         <div className="sm-head" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 20 }}>
           <div>
@@ -446,6 +457,12 @@ export default function App() {
           <div style={{ flexShrink: 0, paddingTop: 4 }}>
             <AuthButtons
               extraItems={[{
+                label: "Profile",
+                onClick: () => setAccountTab("profile"),
+              }, {
+                label: "Settings",
+                onClick: () => setAccountTab("settings"),
+              }, {
                 label: "Delete all my data",
                 danger: true,
                 onClick: async () => {

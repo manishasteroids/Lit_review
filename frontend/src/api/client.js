@@ -133,6 +133,12 @@ export const api = {
       model,
     }),
 
+  // Researcher profile (display name, ORCID, Google Scholar) — no LLM calls
+  getProfile: async () =>
+    fetch(BASE + "/api/profile", { headers: await authHeaders() })
+      .then((r) => (r.ok ? r.json() : {})).catch(() => ({})),
+  saveProfile: (data) => request("/api/profile", data),
+
   // Per-paper chat history (keyed by paper URL, scoped to the user) — no LLM calls
   getChatHistory: async (paperKey) =>
     fetch(BASE + "/api/chat/history?paper_key=" + encodeURIComponent(paperKey || ""),

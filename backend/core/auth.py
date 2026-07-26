@@ -17,17 +17,29 @@ import jwt
 from core.config import settings
 
 
+def _real(value: str) -> str:
+    """Treat unset / template placeholder values as 'not configured', so a
+    copied-but-unedited .env can never switch auth on and 401 every request."""
+    v = (value or "").strip()
+    if not v:
+        return ""
+    low = v.lower()
+    if "your-project" in low or low.startswith("sk-ant-...") or low in {"...", "changeme"}:
+        return ""
+    return v
+
+
 def _auth_configured() -> bool:
-    """Auth is on if we can verify tokens either way: a shared secret (HS256)
-    or a project URL for the JWKS endpoint (asymmetric ES256/RS256)."""
-    return bool(settings.supabase_jwt_secret or settings.supabase_url)
+    """Auth is on only if we can actually verify tokens: a real shared secret
+    (HS256) or a real project URL for the JWKS endpoint (asymmetric)."""
+    return bool(_real(settings.supabase_jwt_secret) or _real(settings.supabase_url))
 
 
 @lru_cache(maxsize=1)
 def _jwks_client():
     """PyJWKClient for the project's public signing keys (asymmetric tokens).
     Cached — it fetches and caches the JWKS itself. None if no URL configured."""
-    url = (settings.supabase_url or "").rstrip("/")
+    url = _real(settings.supabase_url).rstrip("/")
     if not url:
         return None
     return jwt.PyJWKClient(f"{url}/auth/v1/.well-known/jwks.json")
@@ -44,10 +56,10 @@ def _decode(authorization: str | None) -> str | None:
         alg = (jwt.get_unverified_header(token) or {}).get("alg", "")
         if alg == "HS256":
             # Legacy: symmetric shared secret.
-            if not settings.supabase_jwt_secret:
+            if not _real(settings.supabase_jwt_secret):
                 raise ValueError("HS256 token but no SUPABASE_JWT_SECRET configured")
             payload = jwt.decode(
-                token, settings.supabase_jwt_secret,
+                token, _real(settings.supabase_jwt_secret),
                 algorithms=["HS256"], audience="authenticated",
             )
         else:

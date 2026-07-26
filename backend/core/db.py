@@ -114,6 +114,8 @@ def init_db() -> None:
     init_paper_cache_table()
     from core.chat_history import init_chat_history_table
     init_chat_history_table()
+    from core.profile import init_profile_table
+    init_profile_table()
 
 
 # ── Write ───────────────────────────────────────────────────────────────────
