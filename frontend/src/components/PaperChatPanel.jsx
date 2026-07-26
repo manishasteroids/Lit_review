@@ -4,6 +4,37 @@ import { api } from "../api/client.js";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 
+// Mermaid renders ```mermaid code blocks as real diagrams (flowcharts, sequence
+// diagrams, timelines). Loaded lazily so it doesn't bloat the initial bundle.
+let _mermaid = null;
+let _mmId = 0;
+async function renderMermaid(root) {
+  const blocks = root?.querySelectorAll?.("code.language-mermaid");
+  if (!blocks || !blocks.length) return;
+  if (!_mermaid) {
+    const mod = await import("mermaid");
+    _mermaid = mod.default;
+    _mermaid.initialize({
+      startOnLoad: false, theme: "neutral", securityLevel: "strict",
+      flowchart: { curve: "basis", useMaxWidth: true },
+    });
+  }
+  for (const code of blocks) {
+    const host = code.closest("pre") || code;
+    if (host.dataset.mmDone) continue;
+    host.dataset.mmDone = "1";
+    try {
+      const { svg } = await _mermaid.render(`mm${++_mmId}`, code.textContent || "");
+      const wrap = document.createElement("div");
+      wrap.className = "chat-diagram";
+      wrap.innerHTML = svg;
+      host.replaceWith(wrap);
+    } catch {
+      host.dataset.mmDone = "err";   // leave the code block visible on failure
+    }
+  }
+}
+
 marked.setOptions({ breaks: true });
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;  // 5 MB per attached image
 
@@ -12,6 +43,17 @@ const chipStyle = {
   borderRadius: 7, color: "var(--muted)", cursor: "pointer", fontSize: 11,
   padding: "3px 9px", whiteSpace: "nowrap",
 };
+const accentChip = { ...chipStyle, borderColor: "var(--indigo)", color: "var(--indigo)", fontWeight: 600 };
+
+const REPORT_PROMPT =
+  "Write a structured report on this paper with these headings: Objective, " +
+  "Background, Method, Data, Key results (with the actual numbers), Limitations, " +
+  "Significance, and Takeaway. Ground every statement in the paper.";
+
+const DIAGRAM_PROMPT =
+  "Draw the method/workflow of this paper as a Mermaid flowchart. Reply with a " +
+  "```mermaid code block containing a `flowchart TD` diagram of the key steps, " +
+  "then 2-3 sentences explaining it.";
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const DOCK_W = 460;   // default docked width (right side)
@@ -296,7 +338,20 @@ export default function PaperChatPanel({ runId, paper, extraction, cite, apiKey,
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+    renderMermaid(logRef.current);          // turn ```mermaid blocks into diagrams
   }, [messages, sending]);
+
+  // Lock the page behind the modal so the background doesn't scroll with it.
+  useEffect(() => {
+    const { overflow, paddingRight } = document.body.style;
+    const gap = window.innerWidth - document.documentElement.clientWidth;
+    document.body.style.overflow = "hidden";
+    if (gap > 0) document.body.style.paddingRight = `${gap}px`;   // avoid layout jump
+    return () => {
+      document.body.style.overflow = overflow;
+      document.body.style.paddingRight = paddingRight;
+    };
+  }, []);
 
   function onFiles(e) {
     const files = Array.from(e.target.files || []);
@@ -407,6 +462,11 @@ export default function PaperChatPanel({ runId, paper, extraction, cite, apiKey,
             {FACTS.map(([lab, key]) => (
               <button key={key} onClick={() => onFact(lab, key)} style={chipStyle}>{lab}</button>
             ))}
+            <span style={{ width: 1, height: 16, background: "var(--line)" }} />
+            <button onClick={() => askLLM(REPORT_PROMPT)} style={accentChip}
+              title="Full structured report on this paper (reads the paper)">▤ Report</button>
+            <button onClick={() => askLLM(DIAGRAM_PROMPT)} style={accentChip}
+              title="Draw the paper's method as a flowchart">⌘ Diagram</button>
           </div>
 
           <div className="chat-log" ref={logRef} style={{ flex: 1, minHeight: 0 }}>

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { ensureAuth } from "../Auth.jsx";
+import { api } from "../api/client.js";
 
 /**
  * Public marketing site — shown to signed-out visitors, before the tools app.
@@ -203,12 +204,26 @@ function Home({ login, setPage }) {
 
 function NewsSection() {
   const [domain, setDomain] = useState("All");
-  const domains = ["All", ...Array.from(new Set(NEWS.map((n) => n.domain)))];
-  const shown = domain === "All" ? NEWS : NEWS.filter((n) => n.domain === domain);
+  const [items, setItems] = useState(NEWS);   // curated fallback until live loads
+  const [live, setLive] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    api.getNews().then((r) => {
+      if (alive && r?.items?.length) { setItems(r.items); setLive(true); }
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
+  const domains = ["All", ...Array.from(new Set(items.map((n) => n.domain)))];
+  const shown = domain === "All" ? items : items.filter((n) => n.domain === domain);
   return (
     <div className="lp-band" id="lp-news">
       <h2 className="lp-cat">News in AI-driven discovery</h2>
-      <p className="lp-cat-sub">What's moving across biomedical, pharmaceutical and engineering research.</p>
+      <p className="lp-cat-sub">
+        What's moving across biomedical, pharmaceutical and engineering research.
+        {live && <span className="lp-live"> · updated daily</span>}
+      </p>
       <div className="lp-filters">
         {domains.map((d) => (
           <button key={d} className={"lp-filter" + (d === domain ? " on" : "")}
@@ -926,6 +941,7 @@ function LandingStyles() {
       .lp-news-t { font-size: 15.5px; font-weight: 700; line-height: 1.35; margin-bottom: 8px; }
       .lp-news-d { font-size: 13px; color: var(--lp-muted); line-height: 1.6; flex: 1; }
       .lp-news-src { font-size: 12px; color: var(--lp-muted2); margin-top: 14px; }
+      .lp-live { color: #2e9e5b; font-weight: 600; }
 
       /* faq */
       .lp-faq { margin-top: 24px; border-top: 1px solid var(--lp-line); }

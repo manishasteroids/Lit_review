@@ -116,6 +116,8 @@ def init_db() -> None:
     init_chat_history_table()
     from core.profile import init_profile_table
     init_profile_table()
+    from core.news import init_news_table
+    init_news_table()
 
 
 # ── Write ───────────────────────────────────────────────────────────────────

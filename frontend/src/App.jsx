@@ -16,6 +16,7 @@ import EvaluationView from "./components/EvaluationView.jsx";
 import UsageView from "./components/UsageView.jsx";
 import LandingPage from "./components/LandingPage.jsx";
 import ProfileModal from "./components/ProfileModal.jsx";
+import ExportBar from "./components/ExportBar.jsx";
 import {
   RotateCw, AlertTriangle, Sparkles, PenTool,
   BookOpen, Layers, Brain, Network, BarChart3, FlaskConical,
@@ -434,6 +435,13 @@ export default function App() {
 
   const grouped = groupSessions(sessions);
 
+  // "Welcome, <name>" — prefer the auth profile name, fall back to email local-part.
+  const firstName = (() => {
+    const m = session?.user?.user_metadata || {};
+    const n = m.full_name || m.name || (session?.user?.email || "").split("@")[0] || "";
+    return n ? String(n).trim().split(/\s+/)[0] : "";
+  })();
+
   // Signed-out visitors see the public landing page; the tools app is gated
   // behind login. (All hooks above run unconditionally, so this early return
   // is safe.)
@@ -454,7 +462,12 @@ export default function App() {
               search the live web, filter sources, extract, critique, and write a cited review.
             </div>
           </div>
-          <div style={{ flexShrink: 0, paddingTop: 4 }}>
+          <div style={{ flexShrink: 0, paddingTop: 4, display: "flex", alignItems: "center", gap: 10 }}>
+            {firstName && (
+              <span style={{ fontSize: 13.5, color: "var(--muted)", whiteSpace: "nowrap" }}>
+                Welcome, <b style={{ color: "var(--txt)", fontWeight: 600 }}>{firstName}</b>
+              </span>
+            )}
             <AuthButtons
               extraItems={[{
                 label: "Profile",
@@ -698,7 +711,10 @@ export default function App() {
                 <div className="card">
                   {tab === "review" && (
                     Object.keys(sections || {}).length > 0
-                      ? <ReviewView topic={topic} sections={sections} citeOrder={citeOrder} />
+                      ? <>
+                          <ExportBar runId={runId} onError={(m) => setError({ stage: "Export", msg: m })} />
+                          <ReviewView topic={topic} sections={sections} citeOrder={citeOrder} />
+                        </>
                       : (
                         <div style={{ textAlign: "center", padding: "28px 16px" }}>
                           <div className="eyebrow" style={{ marginBottom: 8 }}></div>
