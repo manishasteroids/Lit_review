@@ -656,6 +656,27 @@ class ChatSaveBody(BaseModel):
     messages: list[dict] = []
 
 
+class ProfileBody(BaseModel):
+    display_name: str | None = None
+    orcid: str | None = None
+    scholar_url: str | None = None
+    affiliation: str | None = None
+
+
+@router.get("/profile")
+def profile_get(user_id: str = Depends(require_user)):
+    """The signed-in user's researcher profile. DB read, no LLM."""
+    from core.profile import get_profile
+    return get_profile(user_id)
+
+
+@router.post("/profile")
+def profile_save(body: ProfileBody, user_id: str = Depends(require_user)):
+    """Update display name / ORCID / Google Scholar / affiliation."""
+    from core.profile import save_profile
+    return save_profile(user_id, body.model_dump())
+
+
 @router.get("/chat/history")
 def chat_history_get(paper_key: str, user_id: str = Depends(require_user)):
     """Load saved chat for a paper (by URL), for the signed-in user."""
