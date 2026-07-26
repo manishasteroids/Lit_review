@@ -133,6 +133,36 @@ export const api = {
       model,
     }),
 
+  // Download the written review as pptx / pdf / docx (template: ieee | arxiv).
+  // Generated server-side from existing content — no LLM cost.
+  downloadExport: async (runId, fmt, template) => {
+    const qs = template ? `?template=${encodeURIComponent(template)}` : "";
+    const res = await fetch(`${BASE}/api/runs/${runId}/export/${fmt}${qs}`, {
+      headers: await authHeaders(),
+    });
+    if (!res.ok) {
+      let detail = `Export failed (${res.status})`;
+      try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="?([^"]+)"?/.exec(cd);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = m ? m[1] : `review.${fmt}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  },
+
+  // Public science/AI news for the landing page — no auth, no LLM, cached server-side
+  getNews: () =>
+    fetch(BASE + "/api/news").then((r) => (r.ok ? r.json() : { items: [] }))
+      .catch(() => ({ items: [] })),
+
   // Researcher profile (display name, ORCID, Google Scholar) — no LLM calls
   getProfile: async () =>
     fetch(BASE + "/api/profile", { headers: await authHeaders() })

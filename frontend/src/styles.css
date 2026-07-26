@@ -223,6 +223,10 @@ a{color:var(--indigo);}
   padding:9px 11px;overflow-x:auto;margin:6px 0;}
 .chat-md pre code{background:none;border:none;padding:0;}
 .chat-md hr{border:none;border-top:1px solid var(--line);margin:10px 0;}
+/* Mermaid diagrams rendered from ```mermaid blocks in chat answers */
+.chat-diagram{background:#fff;border:1px solid var(--line);border-radius:10px;
+  padding:12px;margin:10px 0;overflow-x:auto;text-align:center;}
+.chat-diagram svg{max-width:100%;height:auto;}
 .chat-md table{border-collapse:collapse;margin:6px 0;font-size:12.5px;}
 .chat-md th,.chat-md td{border:1px solid var(--line);padding:4px 8px;text-align:left;}
 .chat-input{display:flex;gap:8px;padding:12px 14px;border-top:1px solid var(--line);}
@@ -239,8 +243,10 @@ a{color:var(--indigo);}
 .pt-actions .pt-link{line-height:1;display:inline-flex;align-items:center;}
 
 /* ── layout ── */
-.sm-wrap.wide{max-width:1560px;}
-.grid3{display:grid;grid-template-columns:230px 1fr 300px;gap:24px;align-items:start;}
+.sm-wrap.wide{max-width:1800px;padding-left:18px;padding-right:18px;}
+/* Narrower rails + tighter gaps so the working column gets the space. */
+.grid3{display:grid;grid-template-columns:196px minmax(0,1fr) 250px;gap:16px;align-items:start;}
+@media(min-width:1700px){ .grid3{grid-template-columns:210px minmax(0,1fr) 270px;gap:20px;} }
 @media(max-width:1100px){ .grid3{grid-template-columns:1fr;} .lcol,.rcol{position:relative!important;top:0!important;} }
 .lcol{display:flex;flex-direction:column;gap:18px;position:sticky;top:18px;}
 .rcol{position:sticky;top:18px;}

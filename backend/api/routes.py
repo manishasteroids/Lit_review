@@ -505,7 +505,15 @@ CHAT_FORMAT = (
     "NEVER # or ## — big headers look broken here.\n"
     "- Prefer short bullet points over long paragraphs; keep bullets to 1–2 lines.\n"
     "- Put metrics, numbers and short quotes inline; bold the key figures.\n"
-    "- Don't pad. Aim for the shortest answer that fully covers the question."
+    "- Don't pad. Aim for the shortest answer that fully covers the question.\n"
+    "\nDIAGRAMS — you CAN draw. When a flow, pipeline, architecture, timeline, "
+    "comparison or set of relationships would be clearer visually (or the user asks "
+    "for a diagram/flowchart/figure), emit a Mermaid code block and it will be "
+    "rendered as a real diagram:\n"
+    "```mermaid\nflowchart TD\n  A[Input] --> B[Step]\n  B --> C[Result]\n```\n"
+    "Use flowchart TD/LR, sequenceDiagram, or timeline. Keep node labels short and "
+    "put them in square brackets; avoid parentheses, quotes and special characters "
+    "inside labels (they break parsing). Follow the diagram with a brief explanation."
 )
 
 
@@ -654,6 +662,75 @@ def session_usage(session_id: str, user_id: str = Depends(require_user)):
 class ChatSaveBody(BaseModel):
     paper_key: str
     messages: list[dict] = []
+
+
+@router.get("/runs/{run_id}/export/{fmt}")
+def export_review(run_id: str, fmt: str, template: str = "ieee",
+                  user_id: str = Depends(require_user)):
+    """Download the written review as .pptx / .pdf / .docx.
+
+    Built locally from content the pipeline already produced — no LLM calls,
+    so exporting is free. `template` applies to docx: ieee | arxiv.
+    """
+    from fastapi.responses import Response
+    from core import exporters
+
+    run = get_run(run_id, user_id)
+    if not run.sections:
+        raise HTTPException(400, "Generate the literature review first.")
+
+    papers = _ordered_for_export(run)
+    args = (run.topic, run.sections, papers, run.synthesis or {})
+    stem = _safe_filename(exporters.review_title(run.sections, run.topic))
+
+    try:
+        if fmt == "pptx":
+            data = exporters.build_pptx(*args)
+            media = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        elif fmt == "pdf":
+            data = exporters.build_pdf(*args)
+            media = "application/pdf"
+        elif fmt == "docx":
+            data = exporters.build_docx(*args, template=template)
+            media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            stem = f"{stem}_{(template or 'ieee').lower()}"
+        else:
+            raise HTTPException(400, "Unsupported format. Use pptx, pdf or docx.")
+    except ImportError as e:
+        raise HTTPException(
+            500, f"Export dependency missing: {e}. Run: pip install -r requirements.txt")
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"Export failed: {e}")
+
+    return Response(
+        content=data, media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{stem}.{fmt}"'},
+    )
+
+
+def _ordered_for_export(run) -> list[dict]:
+    """Papers in citation order, so [n] in the text matches the reference list."""
+    return SamhitaPipeline()._ordered_papers(run)
+
+
+def _safe_filename(text: str) -> str:
+    out = re.sub(r"[^\w\s-]", "", (text or "review")).strip()
+    out = re.sub(r"\s+", "_", out)
+    return (out[:60] or "literature_review")
+
+
+@router.get("/news")
+def news_feed():
+    """Fresh AI-in-science headlines for the public landing page.
+
+    PUBLIC (no auth) — the landing page is shown to signed-out visitors.
+    Costs nothing: public RSS feeds + keyword tagging, no model calls, and
+    results are cached server-side so visitors don't hit the feeds directly.
+    """
+    from core.news import get_news
+    return get_news()
 
 
 class ProfileBody(BaseModel):

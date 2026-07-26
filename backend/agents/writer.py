@@ -11,6 +11,19 @@ from agents.base import Agent
 
 SECTION_SPECS = [
     (
+        "title",
+        "Write ONLY the title of this literature review — a clear, specific, academic "
+        "title of 8-14 words that names the subject and scope. Do not restate the user's "
+        "question verbatim, do not use quotes, a trailing period, or any prefix like "
+        "'Title:'. Output the title text and nothing else.",
+    ),
+    (
+        "abstract",
+        "Write the ABSTRACT (150-200 words, one paragraph, no citations): the scope of "
+        "this review, the body of work covered, the main themes and findings that "
+        "emerged, and the key gaps identified.",
+    ),
+    (
         "intro",
         "Write the INTRODUCTION (2 short paragraphs): frame the area, scope, and why this "
         "review matters. Cite papers as [n] where relevant.",
@@ -38,6 +51,15 @@ SYSTEM = (
     "no bullet lists. Use inline citations like [1], [2] referring to the numbered papers. "
     "Keep it tight and academic."
 )
+
+
+def _clean_title(raw: str) -> str:
+    """Models sometimes wrap the title in quotes or prefix it — strip that."""
+    import re
+    t = (raw or "").strip().splitlines()[0] if (raw or "").strip() else ""
+    t = re.sub(r"^\s*(title|heading)\s*[:\-—]\s*", "", t, flags=re.I)
+    t = t.strip().strip('"').strip("'").strip()
+    return t.rstrip(".").strip()
 
 
 class WriterAgent(Agent):
@@ -73,12 +95,17 @@ class WriterAgent(Agent):
 
         sections: dict[str, str] = {}
         for key, prompt in SECTION_SPECS:
+            # The title is one short line — don't spend a 1500-token budget on it.
+            budget = 60 if key == "title" else 1500
             if cache:
-                sections[key] = self.llm.call(
-                    user_text=prompt, system=SYSTEM, max_tokens=1500, cache_prefix=cache
+                out = self.llm.call(
+                    user_text=prompt, system=SYSTEM, max_tokens=budget, cache_prefix=cache
                 )
             else:
-                sections[key] = self.llm.call(
-                    user_text=base + "\n" + prompt, system=SYSTEM, max_tokens=1500
+                out = self.llm.call(
+                    user_text=base + "\n" + prompt, system=SYSTEM, max_tokens=budget
                 )
+            if key == "title":
+                out = _clean_title(out)
+            sections[key] = out
         return sections
