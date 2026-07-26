@@ -196,20 +196,17 @@ export default function App() {
     refreshSessions();
   }
 
-  const approvedList = papers.filter((p) => approved[p.idx]);
-  // Order approved papers by the synthesizer's ranking, but NEVER drop a paper
-  // just because the ranking omitted it (e.g. a partial/rate-limited synth
-  // result). Ranked papers come first, then any remaining approved papers.
-  const citeOrder = (() => {
-    if (!approvedList.length) return [];
-    if (!synth?.ranked?.length) return approvedList;
-    const ranked = synth.ranked
-      .map((r) => approvedList.find((p) => p.idx === r.idx))
-      .filter(Boolean);
-    const seen = new Set(ranked.map((p) => p.idx));
-    const rest = approvedList.filter((p) => !seen.has(p.idx));
-    return [...ranked, ...rest];
-  })();
+  // What shows in Sources/Review: a paper the user hasn't removed. `included`
+  // is the Sources-stage source of truth (set after filtering, toggled by
+  // remove/add); before it's populated we fall back to the filter `approved`.
+  const approvedList = papers.filter((p) =>
+    included[p.idx] !== undefined ? included[p.idx] : approved[p.idx]
+  );
+  // Keep the SEARCH-RELEVANCE order the user approved — stable from Paper Filter
+  // through Sources and matching the Writer's citation numbering (backend orders
+  // citations the same way). The synthesizer's scores still show in the Ranking
+  // module and the comparison-table Rank column; they no longer reshuffle this list.
+  const citeOrder = approvedList;
   const citeNum = {};
   citeOrder.forEach((p, i) => (citeNum[p.idx] = i + 1));
 
@@ -707,7 +704,7 @@ export default function App() {
                   )}
                   {tab === "sources" && (
                     <SourcesView
-                      citeOrder={citeOrder} extractions={extractions}
+                      citeOrder={citeOrder} extractions={extractions} ranked={synth?.ranked}
                       extractStats={extractStats} runId={runId} apiKey={apiKey} model={model}
                       papers={papers} included={included} scope={reform?.scope}
                       analysisStale={analysisStale} busy={busy}
@@ -720,6 +717,7 @@ export default function App() {
                   {tab === "graph" && <KnowledgeGraphView concepts={sideModules?.knowledge_graph} citeNum={citeNum} />}
                   {tab === "data" && (
                     <DataAnalysisView
+                      reform={reform}
                       yearDistribution={sideModules?.year_distribution}
                       comparisonTable={sideModules?.comparison_table}
                     />

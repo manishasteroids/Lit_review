@@ -25,9 +25,44 @@ function YearChart({ data }) {
   );
 }
 
-export default function DataAnalysisView({ yearDistribution, comparisonTable }) {
+function SearchPlan({ reform }) {
+  if (!reform) return null;
+  const queries = reform.queries || [];
+  const terms = reform.terms || [];
+  const chip = {
+    display: "inline-block", fontFamily: "'JetBrains Mono',monospace", fontSize: 11.5,
+    background: "var(--panel2, #f3f4f8)", border: "1px solid var(--line)",
+    borderRadius: 6, padding: "3px 9px", margin: "0 6px 6px 0", color: "var(--txt)",
+  };
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div className="eyebrow" style={{ marginBottom: 8 }}>Search plan — Query Reformulator</div>
+      {reform.scope && (
+        <div style={{ fontSize: 13, lineHeight: 1.5, marginBottom: 10, color: "var(--muted)" }}>
+          <b style={{ color: "var(--txt)" }}>Scope.</b> {reform.scope}
+        </div>
+      )}
+      {queries.length > 0 && (
+        <div style={{ marginBottom: terms.length ? 8 : 0 }}>
+          <div className="muted tiny" style={{ marginBottom: 5 }}>Queries sent to the paper search:</div>
+          {queries.map((q, i) => <span key={i} style={chip}>{q}</span>)}
+        </div>
+      )}
+      {terms.length > 0 && (
+        <div>
+          <div className="muted tiny" style={{ marginBottom: 5 }}>Key terms (used to rank relevance):</div>
+          {terms.map((t, i) => <span key={i} style={chip}>{t}</span>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function DataAnalysisView({ reform, yearDistribution, comparisonTable }) {
   return (
     <div>
+      <SearchPlan reform={reform} />
+
       <div className="eyebrow" style={{ marginBottom: 10 }}>Papers by year</div>
       <YearChart data={yearDistribution} />
 

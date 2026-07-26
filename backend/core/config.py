@@ -52,8 +52,11 @@ class Settings:
     ncbi_email: str = os.environ.get("NCBI_EMAIL", "")
     ncbi_tool: str = os.environ.get("NCBI_TOOL", "samhita")
     
-    # Supabase auth — JWT secret used to verify the token the frontend sends
+    # Supabase auth. Legacy projects sign JWTs with HS256 + this shared secret;
+    # newer projects use asymmetric keys (ES256/RS256) verified via the project's
+    # JWKS endpoint, which needs the project URL. Either path is supported.
     supabase_jwt_secret: str = os.environ.get("SUPABASE_JWT_SECRET", "")
+    supabase_url: str = os.environ.get("SUPABASE_URL", "")
     cors_origin: str = os.environ.get("CORS_ORIGIN", "http://localhost:5173")
     
     # SQLite path — overridable via DB_PATH env var for cloud deployment

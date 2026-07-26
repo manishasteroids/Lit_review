@@ -21,15 +21,23 @@ const badge = (bg, fg) => ({
   fontFamily: "'JetBrains Mono',monospace", fontSize: 10, fontWeight: 500,
   borderRadius: 5, padding: "2px 7px", background: bg, color: fg, whiteSpace: "nowrap",
 });
+// Colour a 0–100 relevance score: strong (green) / moderate (amber) / weak (grey).
+const relColor = (s) =>
+  s >= 70 ? ["var(--green-soft, #e7f6ee)", "var(--green, #2e9e5b)"]
+  : s >= 40 ? ["rgba(224,163,62,.14)", "#b8862f"]
+  : ["var(--panel2, #eef0f4)", "var(--muted)"];
  
 export default function SourcesView({
-  citeOrder, extractions, extractStats, runId, apiKey, model,
+  citeOrder, extractions, ranked = [], extractStats, runId, apiKey, model,
   papers = [], included = {}, scope,
   analysisStale = false, busy = false,
   onRemove, onAdd, onReanalyze, onGenerate, hasReview = false,
 }) {
   const extByIdx = {};
   (extractions || []).forEach((e) => (extByIdx[e.idx] = e));
+  // Synthesizer relevance/quality score (0–100) per paper, to show in the list.
+  const rankByIdx = {};
+  (ranked || []).forEach((r) => { if (r && r.idx != null) rankByIdx[r.idx] = r; });
  
   const [visible, setVisible] = useState(new Set(DEFAULT_ON));
   const [chatPaper, setChatPaper] = useState(null);
@@ -205,6 +213,13 @@ export default function SourcesView({
                         ? <span style={badge("var(--indigo-soft)", ACCENT)}>Added</span>
                         : <span style={badge("var(--green-soft, #e7f6ee)", "var(--green, #2e9e5b)")}>Included</span>}
                       {!hasExt && <span style={{ ...badge("rgba(224,163,62,.14)", "#b8862f"), marginLeft: 4 }}>no data</span>}
+                      {rankByIdx[p.idx]?.score != null && (
+                        <div style={{ marginTop: 4 }} title={rankByIdx[p.idx].reason || "Synthesizer relevance score"}>
+                          <span style={badge(...relColor(rankByIdx[p.idx].score))}>
+                            relevance {rankByIdx[p.idx].score}
+                          </span>
+                        </div>
+                      )}
                     </td>
                   )}
                   {shownCols.map((c) => {
