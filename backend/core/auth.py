@@ -9,12 +9,15 @@ sessions (tenant isolation).
 `optional_user_id` is the same but returns None instead of raising — used for
 endpoints that should work signed-out during local dev.
 """
+import logging
 from functools import lru_cache
 
 from fastapi import Header, HTTPException
 import jwt
 
 from core.config import settings
+
+log = logging.getLogger("samhita.auth")
 
 
 def _real(value: str) -> str:
@@ -52,6 +55,7 @@ def _decode(authorization: str | None) -> str | None:
         # Auth not configured (local dev without Supabase) — treat as anonymous.
         return None
     token = authorization.split(" ", 1)[1]
+    alg = "?"
     try:
         alg = (jwt.get_unverified_header(token) or {}).get("alg", "")
         if alg == "HS256":
@@ -74,7 +78,11 @@ def _decode(authorization: str | None) -> str | None:
             )
     except HTTPException:
         raise
-    except Exception:
+    except Exception as e:
+        # Log the REAL cause (alg mismatch, expired, bad audience, JWKS fetch
+        # failure, etc.) — the 401 message stays generic for the user, but the
+        # backend terminal shows exactly what verification actually rejected.
+        log.warning("JWT verify failed (alg=%s): %s: %s", alg, type(e).__name__, e)
         raise HTTPException(401, "Invalid or expired session. Please sign in again.")
     return payload.get("sub")
 

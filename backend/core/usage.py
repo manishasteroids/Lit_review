@@ -173,11 +173,33 @@ def get_usage_trend(user_id: str, days: int = 30, tz_offset_min: int = 0) -> dic
             (user_id,),
         ).fetchall()
 
+        # All-time breakdown across every session for this user — lets the Usage
+        # tab show a full by-model / by-stage picture even with no run open.
+        by_stage = conn.execute(
+            "SELECT c.stage, COUNT(*) calls, COALESCE(SUM(c.in_tok),0) in_tok, "
+            "COALESCE(SUM(c.out_tok),0) out_tok, COALESCE(SUM(c.web_searches),0) web_searches, "
+            "COALESCE(SUM(c.cost_usd),0) cost_usd, COALESCE(SUM(c.latency_ms),0) latency_ms "
+            "FROM llm_calls c JOIN sessions s ON c.session_id = s.id "
+            f"WHERE s.user_id = {_PH} GROUP BY c.stage ORDER BY SUM(c.cost_usd) DESC",
+            (user_id,),
+        ).fetchall()
+        by_model = conn.execute(
+            "SELECT c.model, c.tier, COUNT(*) calls, COALESCE(SUM(c.in_tok),0) in_tok, "
+            "COALESCE(SUM(c.out_tok),0) out_tok, COALESCE(SUM(c.cost_usd),0) cost_usd "
+            "FROM llm_calls c JOIN sessions s ON c.session_id = s.id "
+            f"WHERE s.user_id = {_PH} GROUP BY c.model, c.tier ORDER BY SUM(c.cost_usd) DESC",
+            (user_id,),
+        ).fetchall()
+
     days_asc = [dict(r) for r in by_day][::-1]   # oldest -> newest for charting
     sessions_asc = [dict(r) for r in by_session][::-1]
+    total_d = dict(total) if total else {"calls": 0, "in_tok": 0, "out_tok": 0, "cost_usd": 0}
+    total_d.setdefault("latency_ms", 0)
     return {
         "prices_effective": PRICES_EFFECTIVE,
-        "total": dict(total) if total else {"calls": 0, "in_tok": 0, "out_tok": 0, "cost_usd": 0},
+        "total": total_d,
         "by_day": days_asc,
         "by_session": sessions_asc,
+        "by_stage": [dict(r) for r in by_stage],
+        "by_model": [dict(r) for r in by_model],
     }

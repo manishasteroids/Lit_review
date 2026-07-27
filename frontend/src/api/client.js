@@ -8,13 +8,32 @@ async function authHeaders(extra = {}) {
   return token ? { ...extra, Authorization: `Bearer ${token}` } : extra;
 }
 
+// Requests that call an LLM can legitimately take a while (large corpora,
+// Deep mode), but must never hang forever — a stalled call should surface an
+// error the UI can show, not spin indefinitely. 75s covers a slow Deep answer
+// over many sources with headroom.
+const REQUEST_TIMEOUT_MS = 75_000;
+
 async function request(path, body) {
-  const send = async () =>
-    fetch(BASE + path, {
-      method: "POST",
-      headers: await authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify(body || {}),
-    });
+  const send = async () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      return await fetch(BASE + path, {
+        method: "POST",
+        headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(body || {}),
+        signal: ctrl.signal,
+      });
+    } catch (e) {
+      if (e.name === "AbortError") {
+        throw new Error("Timed out waiting for a response. The model may be rate-limited — try again in a moment.");
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   let res = await send();
   // A 401 usually means the access token expired mid-session — refresh once and
   // retry before surfacing an error to the user.
@@ -74,9 +93,9 @@ async function streamPost(path, body, onEvent) {
 /**
  * Stream progress events from the search stage via SSE.
  */
-function streamRun(topic, apiKey, model, mode, onEvent) {
+function streamRun(topic, apiKey, model, mode, onEvent, projectId) {
   return streamPost("/api/runs/stream",
-    { topic, api_key: apiKey || undefined, model, mode }, onEvent);
+    { topic, api_key: apiKey || undefined, model, mode, project_id: projectId || undefined }, onEvent);
 }
 
 /* One function per pipeline stage — mirrors backend/api/routes.py 1:1 */
@@ -132,6 +151,40 @@ export const api = {
       api_key: apiKey,
       model,
     }),
+
+  // ── Studio: multi-paper chat + artifacts ────────────────────────────────
+  studioChat: (runId, question, paperIdxs, history, chatMode, apiKey) =>
+    request(`/api/runs/${runId}/studio/chat`, {
+      question, paper_idxs: paperIdxs || [], history: history || [],
+      chat_mode: chatMode, api_key: apiKey,
+    }),
+
+  studioArtifact: (runId, artifact, paperIdxs, chatMode, apiKey) =>
+    request(`/api/runs/${runId}/studio/${artifact}`, {
+      question: "", paper_idxs: paperIdxs || [], chat_mode: chatMode, api_key: apiKey,
+    }),
+
+  // Download a generated Studio artifact — no extra model cost
+  studioExport: async (runId, fmt, content, title, paperIdxs) => {
+    const res = await fetch(`${BASE}/api/runs/${runId}/studio/export/${fmt}`, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ content, title, paper_idxs: paperIdxs || [] }),
+    });
+    if (!res.ok) {
+      let detail = `Export failed (${res.status})`;
+      try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="?([^"]+)"?/.exec(cd);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = m ? m[1] : `studio.${fmt}`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  },
 
   // Download the written review as pptx / pdf / docx (template: ieee | arxiv).
   // Generated server-side from existing content — no LLM cost.
@@ -196,6 +249,49 @@ export const api = {
   getUsageTrend: async (days = 30) =>
     fetch(BASE + "/api/usage/trend?days=" + days + "&tz_offset=" + new Date().getTimezoneOffset(),
       { headers: await authHeaders() }).then((r) => r.json()),
+
+  // ── Projects: folder a line of research (runs + saved papers + notes) ──
+  listProjects: async () =>
+    fetch(BASE + "/api/projects", { headers: await authHeaders() }).then((r) => r.json()),
+  createProject: (name, description) =>
+    request("/api/projects", { name, description }),
+  getProject: async (id) =>
+    fetch(BASE + "/api/projects/" + id, { headers: await authHeaders() }).then((r) => r.json()),
+  updateProject: async (id, patch) =>
+    fetch(BASE + "/api/projects/" + id, {
+      method: "PATCH",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(patch || {}),
+    }).then((r) => r.json()),
+  deleteProject: async (id, keepRuns = true) =>
+    fetch(BASE + "/api/projects/" + id + "?keep_runs=" + keepRuns, {
+      method: "DELETE",
+      headers: await authHeaders(),
+    }).then((r) => r.json()),
+  assignRunProject: (runId, projectId) =>
+    request(`/api/runs/${runId}/project`, { project_id: projectId }),
+  addProjectPaper: (projectId, paper, source) =>
+    request(`/api/projects/${projectId}/papers`, { paper, source: source || "manual" }),
+  removeProjectPaper: async (projectId, paperId) =>
+    fetch(BASE + `/api/projects/${projectId}/papers/${paperId}`, {
+      method: "DELETE", headers: await authHeaders(),
+    }).then((r) => r.json()),
+  addProjectNote: (projectId, title, body) =>
+    request(`/api/projects/${projectId}/notes`, { title, body }),
+  updateProjectNote: async (projectId, noteId, patch) =>
+    fetch(BASE + `/api/projects/${projectId}/notes/${noteId}`, {
+      method: "PATCH",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(patch || {}),
+    }).then((r) => r.json()),
+  removeProjectNote: async (projectId, noteId) =>
+    fetch(BASE + `/api/projects/${projectId}/notes/${noteId}`, {
+      method: "DELETE", headers: await authHeaders(),
+    }).then((r) => r.json()),
+  zoteroImport: (projectId, apiKey, libraryId, libraryType) =>
+    request(`/api/projects/${projectId}/zotero/import`, {
+      api_key: apiKey, library_id: libraryId, library_type: libraryType || "user",
+    }),
 
   // Session history — no LLM calls
   listSessions: async () =>

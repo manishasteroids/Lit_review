@@ -130,8 +130,13 @@ export default function UsageView({ runId }) {
 
   useEffect(() => { load(); }, [load]);
 
-  const total = usage?.total || { calls: 0, in_tok: 0, out_tok: 0, cost_usd: 0, latency_ms: 0 };
+  // When a run is open, show that run's breakdown; otherwise fall back to the
+  // all-time breakdown (across every session) so the tab is useful with no
+  // active session instead of going blank.
+  const scoped = runId ? usage : trend;
+  const total = scoped?.total || { calls: 0, in_tok: 0, out_tok: 0, cost_usd: 0, latency_ms: 0 };
   const hasData = total.calls > 0;
+  const scopeLabel = runId ? "this run" : "all time";
 
   return (
     <div>
@@ -192,15 +197,15 @@ export default function UsageView({ runId }) {
 
       {err && <div className="err" style={{ marginBottom: 12 }}>{err}</div>}
 
-      {runId && !hasData && !loading && (
-        <div className="muted tiny">No model calls recorded for this session yet.</div>
-      )}
-      {!runId && (
-        <div className="muted tiny" style={{ marginBottom: 8 }}>Open a review to see its per-stage breakdown below.</div>
+      {!hasData && !loading && (
+        <div className="muted tiny">
+          {runId ? "No model calls recorded for this session yet." : "No model calls recorded yet."}
+        </div>
       )}
 
       {hasData && (
         <>
+          <div style={{ ...S.label, marginBottom: 6 }}>breakdown — {scopeLabel}</div>
           {/* Totals */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 18 }}>
             <div style={S.card}>
@@ -234,7 +239,7 @@ export default function UsageView({ runId }) {
               </tr>
             </thead>
             <tbody>
-              {(usage.by_model || []).map((r) => (
+              {(scoped.by_model || []).map((r) => (
                 <tr key={r.model + r.tier}>
                   <td style={S.td}>{r.model}</td>
                   <td style={S.td}><span style={S.badge(r.tier)}>{TIER_META[r.tier]?.label || r.tier}</span></td>
@@ -261,7 +266,7 @@ export default function UsageView({ runId }) {
               </tr>
             </thead>
             <tbody>
-              {(usage.by_stage || []).map((r) => (
+              {(scoped.by_stage || []).map((r) => (
                 <tr key={r.stage}>
                   <td style={S.td}>{STAGE_LABEL[r.stage] || r.stage}</td>
                   <td style={S.tdNum}>{r.calls}</td>
@@ -294,9 +299,9 @@ export default function UsageView({ runId }) {
           )}
 
           <div className="muted tiny" style={{ marginTop: 6, lineHeight: 1.6 }}>
-            Costs computed from list prices effective {usage.prices_effective} (USD per 1M tokens),
-            using actual token counts returned by the model — including cache tokens and
-            server-side web-search fees. Free-tier models show $0 but still record tokens.
+            Costs computed from list prices effective {scoped.prices_effective}, using actual
+            token counts returned by the model — including cache tokens and server-side
+            web-search fees. Free-tier models show $0 but still record tokens.
           </div>
         </>
       )}

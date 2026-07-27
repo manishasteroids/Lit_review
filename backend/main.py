@@ -1,6 +1,19 @@
 """
 Entrypoint. Run with:  uvicorn main:app --reload --port 8015
 """
+import os
+
+# Some Python installs (notably python.org's macOS installer, and some pyenv
+# builds) ship without wiring into the OS trust store, so any plain-urllib
+# HTTPS call — e.g. PyJWT's PyJWKClient fetching Supabase's JWKS to verify
+# ES256/RS256 tokens — fails with "CERTIFICATE_VERIFY_FAILED: unable to get
+# local issuer certificate" even though the site's certificate is fine.
+# Point OpenSSL at certifi's bundled CA file instead, before anything else
+# in the process makes an HTTPS request. Safe no-op if already set.
+import certifi
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
