@@ -118,6 +118,8 @@ def init_db() -> None:
     init_profile_table()
     from core.news import init_news_table
     init_news_table()
+    from core.projects import init_projects_tables
+    init_projects_tables()
 
 
 # ── Write ───────────────────────────────────────────────────────────────────
@@ -169,7 +171,7 @@ def list_sessions(user_id: str) -> list[dict]:
     """Summary rows for one user only — no data blob. No LLM calls."""
     with _conn() as conn:
         rows = conn.execute(
-            f"SELECT id, topic, stage, paper_count, created_at, updated_at "
+            f"SELECT id, topic, stage, paper_count, created_at, updated_at, project_id "
             f"FROM sessions WHERE user_id = {_PH} ORDER BY updated_at DESC",
             (user_id,),
         ).fetchall()

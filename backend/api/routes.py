@@ -63,6 +63,7 @@ class CreateRunBody(BaseModel):
     api_key: str | None = None
     model: str | None = None
     mode: str | None = None      # lite | medium | deep (drives papers + models + depth)
+    project_id: str | None = None  # optionally file this run under a project
 
 
 class FilterBody(BaseModel):
@@ -155,6 +156,9 @@ async def create_run_stream(body: CreateRunBody, user_id: str = Depends(require_
                     "mode": run.mode,
                 },
             )
+            if body.project_id:
+                from core.projects import assign_session
+                assign_session(run.run_id, user_id, body.project_id)
             await queue.put({
                 "type": "done",
                 "run_id": run.run_id,
@@ -201,6 +205,9 @@ def create_run(body: CreateRunBody, user_id: str = Depends(require_user)):
         data={"runId": run.run_id, "topic": run.topic, "reform": run.reform,
               "papers": run.papers, "approved": ap, "mode": run.mode},
     )
+    if body.project_id:
+        from core.projects import assign_session
+        assign_session(run.run_id, user_id, body.project_id)
     return {"run_id": run.run_id, "reform": run.reform, "papers": run.papers, "stage": run.stage}
  
  
@@ -664,6 +671,192 @@ class ChatSaveBody(BaseModel):
     messages: list[dict] = []
 
 
+class StudioChatBody(BaseModel):
+    question: str
+    paper_idxs: list[int] = []          # selected sources; empty = all included
+    history: list[dict] = []
+    api_key: str | None = None
+    model: str | None = None
+    chat_mode: str | None = None        # quick (Gemini) | deep (Sonnet)
+
+
+@router.post("/runs/{run_id}/studio/chat")
+def studio_chat(run_id: str, body: StudioChatBody, user_id: str = Depends(require_user)):
+    """Chat grounded in MULTIPLE selected papers.
+
+    Context is built from the cached extractions + abstracts we already have —
+    no PDF fetching — so a question across 20 papers stays fast and cheap.
+    Returns the answer plus suggested follow-up questions.
+    """
+    run = get_run(run_id, user_id)
+    wanted = set(body.paper_idxs or [])
+    papers = [p for p in (run.approved_papers or run.papers or [])
+              if not wanted or p.get("idx") in wanted]
+    if not papers:
+        raise HTTPException(400, "Select at least one source to chat about.")
+
+    ext_by_idx = {e.get("idx"): e for e in (run.extractions or [])}
+    cite = {p["idx"]: i + 1 for i, p in enumerate(papers)}
+
+    blocks = []
+    for p in papers:
+        e = ext_by_idx.get(p.get("idx"), {})
+        lines = [f'[{cite[p["idx"]]}] {p.get("title","")} — {p.get("authors","")} ({p.get("year","?")})']
+        for k in ("method", "finding", "metrics", "data", "limitation", "contribution"):
+            v = e.get(k)
+            if v and v != "n/a":
+                lines.append(f"  {k}: {v}")
+        abs_ = (p.get("abstract") or "")[:900]
+        if abs_:
+            lines.append(f"  abstract: {abs_}")
+        blocks.append("\n".join(lines))
+    corpus = "\n\n".join(blocks)
+
+    convo = ""
+    for m in (body.history or [])[-8:]:
+        role = "User" if m.get("role") == "user" else "Assistant"
+        convo += f"{role}: {m.get('content','')}\n"
+    convo += f"User: {body.question}\nAssistant:"
+
+    chat_models = {"quick": settings.gemini_model or "gemini-2.5-flash",
+                   "deep": "claude-sonnet-4-6"}
+    model = chat_models.get(body.chat_mode) if body.chat_mode else (body.model or settings.mid_model)
+    llm = LLMClient(api_key=body.api_key, model=model, run_id=run_id, stage="chat")
+
+    system = (
+        "You are a research assistant answering questions across a SET of papers the "
+        "user selected. Ground every claim in the provided sources and cite them "
+        f"inline as [n] using the numbers given. There are {len(papers)} sources. "
+        "Compare and contrast across papers where useful; say plainly when the "
+        "sources don't cover something rather than guessing." + CHAT_FORMAT +
+        "\n\nSOURCES:\n" + corpus
+    )
+    try:
+        answer = llm.call(user_text=convo, system=system, max_tokens=1400)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"Studio chat failed: {e}")
+
+    return {
+        "answer": answer,
+        "sources": [{"n": cite[p["idx"]], "idx": p["idx"], "title": p.get("title")} for p in papers],
+        "followups": _followups(body.question, answer, len(papers)),
+    }
+
+
+def _followups(question: str, answer: str, n_sources: int) -> list[str]:
+    """Suggested next questions — derived locally, so they cost nothing."""
+    a = (answer or "").lower()
+    q = (question or "").lower()
+    out = []
+    if n_sources > 1:
+        out.append("Where do these sources disagree?")
+    if "limitation" not in q and "limitation" not in a:
+        out.append("What are the main limitations across these papers?")
+    if "method" not in q:
+        out.append("Compare the methods used in each paper.")
+    if "gap" not in q:
+        out.append("What research gaps do these papers leave open?")
+    if any(w in a for w in ("%", "increase", "reduc", "improv", "accuracy", "score")):
+        out.append("Summarise the reported numbers in a table.")
+    out.append("Draw a diagram of how these findings connect.")
+    return out[:4]
+
+
+@router.post("/runs/{run_id}/studio/{artifact}")
+def studio_artifact(run_id: str, artifact: str, body: StudioChatBody,
+                    user_id: str = Depends(require_user)):
+    """Generate a Studio artifact (report | deck outline) over the selected
+    papers, returned as text the UI can show and then export."""
+    prompts = {
+        "report": ("Write a structured research report across these sources with headings: "
+                   "Overview, Themes, Methods compared, Key findings with numbers, "
+                   "Disagreements, Limitations, Gaps and Conclusion. Cite as [n]."),
+        "deck": ("Draft a slide deck outline across these sources. Use '## Slide N: Title' "
+                 "for each slide followed by 3-5 concise bullets. Cover: overview, themes, "
+                 "methods, key findings with numbers, gaps, and conclusion. Cite as [n]."),
+        "briefing": ("Write a one-page briefing for a colleague new to this topic: what "
+                     "this body of work establishes, what's contested, and what to read first. Cite as [n]."),
+    }
+    if artifact not in prompts:
+        raise HTTPException(400, "Unknown artifact. Use report, deck or briefing.")
+    body = body.model_copy(update={"question": prompts[artifact]})
+    result = studio_chat(run_id, body, user_id)
+    return {"artifact": artifact, "content": result["answer"], "sources": result["sources"]}
+
+
+class StudioExportBody(BaseModel):
+    content: str
+    title: str | None = None
+    paper_idxs: list[int] = []
+
+
+@router.post("/runs/{run_id}/studio/export/{fmt}")
+def studio_export(run_id: str, fmt: str, body: StudioExportBody,
+                  user_id: str = Depends(require_user)):
+    """Download a generated Studio artifact as .pptx / .pdf / .docx.
+    Built locally from the text already generated — no extra model cost."""
+    from fastapi.responses import Response
+    from core import exporters
+
+    run = get_run(run_id, user_id)
+    wanted = set(body.paper_idxs or [])
+    papers = [p for p in (run.approved_papers or run.papers or [])
+              if not wanted or p.get("idx") in wanted]
+    title = body.title or "Research report"
+
+    # Turn the generated markdown into the {section: text} shape the exporters use.
+    sections = _sections_from_markdown(body.content, title)
+    args = (title, sections, papers, run.synthesis or {})
+    stem = _safe_filename(title)
+    try:
+        if fmt == "pptx":
+            data = exporters.build_pptx(*args)
+            media = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        elif fmt == "pdf":
+            data = exporters.build_pdf(*args)
+            media = "application/pdf"
+        elif fmt == "docx":
+            data = exporters.build_docx(*args, template="arxiv")
+            media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        else:
+            raise HTTPException(400, "Unsupported format. Use pptx, pdf or docx.")
+    except ImportError as e:
+        raise HTTPException(500, f"Export dependency missing: {e}. Run: pip install -r requirements.txt")
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"Export failed: {e}")
+
+    return Response(content=data, media_type=media,
+                    headers={"Content-Disposition": f'attachment; filename="{stem}.{fmt}"'})
+
+
+def _sections_from_markdown(md: str, title: str) -> dict:
+    """Split '## Heading' / '**Heading**' markdown into exporter sections."""
+    text = md or ""
+    parts = re.split(r"\n(?=#{1,3}\s)", text)
+    out, first = {"title": title}, []
+    keys = ["abstract", "intro", "synthesis", "gaps", "future"]
+    ki = 0
+    for part in parts:
+        m = re.match(r"#{1,3}\s*(.+)", part)
+        if not m:
+            first.append(part.strip())
+            continue
+        bodytext = part[m.end():].strip()
+        if ki < len(keys):
+            out[keys[ki]] = f"{m.group(1).strip()}\n\n{bodytext}" if bodytext else m.group(1).strip()
+            ki += 1
+        else:                      # overflow → append to the last section
+            out[keys[-1]] = out.get(keys[-1], "") + f"\n\n{m.group(1).strip()}\n\n{bodytext}"
+    lead = "\n\n".join(p for p in first if p)
+    if lead:
+        out["abstract"] = (lead + "\n\n" + out.get("abstract", "")).strip()
+    if len(out) == 1:              # no headings at all
+        out["synthesis"] = text
+    return out
+
+
 @router.get("/runs/{run_id}/export/{fmt}")
 def export_review(run_id: str, fmt: str, template: str = "ieee",
                   user_id: str = Depends(require_user)):
@@ -767,6 +960,151 @@ def chat_history_save(body: ChatSaveBody, user_id: str = Depends(require_user)):
     from core.chat_history import save_chat
     save_chat(user_id, body.paper_key, body.messages)
     return {"ok": True}
+
+
+class ProjectBody(BaseModel):
+    name: str
+    description: str | None = None
+
+
+class ProjectUpdateBody(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+class ProjectPaperBody(BaseModel):
+    paper: dict
+    source: str | None = "manual"
+
+
+class ProjectNoteBody(BaseModel):
+    title: str | None = ""
+    body: str | None = ""
+
+
+class AssignProjectBody(BaseModel):
+    project_id: str | None = None  # None unfiles the run
+
+
+class ZoteroImportBody(BaseModel):
+    api_key: str
+    library_id: str
+    library_type: str = "user"  # "user" | "group"
+
+
+@router.get("/projects")
+def projects_list(user_id: str = Depends(require_user)):
+    """All of the signed-in user's projects, with counts. No LLM."""
+    from core.projects import list_projects
+    return {"projects": list_projects(user_id)}
+
+
+@router.post("/projects")
+def projects_create(body: ProjectBody, user_id: str = Depends(require_user)):
+    from core.projects import create_project
+    return create_project(user_id, body.name, body.description or "")
+
+
+@router.get("/projects/{project_id}")
+def projects_get(project_id: str, user_id: str = Depends(require_user)):
+    from core.projects import get_project
+    proj = get_project(project_id, user_id)
+    if not proj:
+        raise HTTPException(404, "Project not found.")
+    return proj
+
+
+@router.patch("/projects/{project_id}")
+def projects_update(project_id: str, body: ProjectUpdateBody, user_id: str = Depends(require_user)):
+    from core.projects import update_project
+    proj = update_project(project_id, user_id, body.name, body.description)
+    if not proj:
+        raise HTTPException(404, "Project not found.")
+    return proj
+
+
+@router.delete("/projects/{project_id}")
+def projects_delete(project_id: str, keep_runs: bool = True, user_id: str = Depends(require_user)):
+    """Delete a project. Runs filed under it are kept (unfiled) unless
+    keep_runs=false is passed explicitly."""
+    from core.projects import delete_project
+    ok = delete_project(project_id, user_id, keep_runs=keep_runs)
+    if not ok:
+        raise HTTPException(404, "Project not found.")
+    return {"ok": True}
+
+
+@router.post("/projects/{project_id}/papers")
+def projects_add_paper(project_id: str, body: ProjectPaperBody, user_id: str = Depends(require_user)):
+    from core.projects import add_paper, get_project
+    if not get_project(project_id, user_id):
+        raise HTTPException(404, "Project not found.")
+    return add_paper(project_id, user_id, body.paper, body.source or "manual")
+
+
+@router.delete("/projects/{project_id}/papers/{paper_id}")
+def projects_remove_paper(project_id: str, paper_id: str, user_id: str = Depends(require_user)):
+    from core.projects import remove_paper
+    ok = remove_paper(project_id, user_id, paper_id)
+    if not ok:
+        raise HTTPException(404, "Saved paper not found.")
+    return {"ok": True}
+
+
+@router.post("/projects/{project_id}/notes")
+def projects_add_note(project_id: str, body: ProjectNoteBody, user_id: str = Depends(require_user)):
+    from core.projects import add_note, get_project
+    if not get_project(project_id, user_id):
+        raise HTTPException(404, "Project not found.")
+    return add_note(project_id, user_id, body.title or "", body.body or "")
+
+
+@router.patch("/projects/{project_id}/notes/{note_id}")
+def projects_update_note(project_id: str, note_id: str, body: ProjectNoteBody,
+                          user_id: str = Depends(require_user)):
+    from core.projects import update_note
+    note = update_note(project_id, user_id, note_id, body.title, body.body)
+    if not note:
+        raise HTTPException(404, "Note not found.")
+    return note
+
+
+@router.delete("/projects/{project_id}/notes/{note_id}")
+def projects_remove_note(project_id: str, note_id: str, user_id: str = Depends(require_user)):
+    from core.projects import remove_note
+    ok = remove_note(project_id, user_id, note_id)
+    if not ok:
+        raise HTTPException(404, "Note not found.")
+    return {"ok": True}
+
+
+@router.post("/runs/{run_id}/project")
+def assign_run_project(run_id: str, body: AssignProjectBody, user_id: str = Depends(require_user)):
+    """File (or unfile) an existing run under a project."""
+    from core.projects import assign_session
+    ok = assign_session(run_id, user_id, body.project_id)
+    if not ok:
+        raise HTTPException(404, "Run or project not found.")
+    return {"ok": True}
+
+
+@router.post("/projects/{project_id}/zotero/import")
+def projects_zotero_import(project_id: str, body: ZoteroImportBody, user_id: str = Depends(require_user)):
+    """Pull items from a Zotero library (read-only) and save them into this
+    project's paper list. The API key is used once and never stored."""
+    from core.projects import add_paper, get_project
+    from core.zotero import fetch_library_items
+    if not get_project(project_id, user_id):
+        raise HTTPException(404, "Project not found.")
+    try:
+        items = fetch_library_items(body.api_key, body.library_id, body.library_type)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach Zotero: {e}")
+    for paper in items:
+        add_paper(project_id, user_id, paper, source="zotero")
+    return {"imported": len(items)}
 
 
 @router.get("/usage/trend")

@@ -16,11 +16,13 @@ import EvaluationView from "./components/EvaluationView.jsx";
 import UsageView from "./components/UsageView.jsx";
 import LandingPage from "./components/LandingPage.jsx";
 import ProfileModal from "./components/ProfileModal.jsx";
+import ProjectsModal from "./components/ProjectsModal.jsx";
 import ExportBar from "./components/ExportBar.jsx";
+import StudioView from "./components/StudioView.jsx";
 import {
   RotateCw, AlertTriangle, Sparkles, PenTool,
   BookOpen, Layers, Brain, Network, BarChart3, FlaskConical,
-  Plus, Trash2, Coins,
+  Plus, Trash2, Coins, MessageSquare,
 } from "./components/icons.jsx";
 
 // Source icons shown in the progress feed
@@ -33,6 +35,7 @@ const SOURCE_ICON = {
 const TOOLS = [
   ["review", BookOpen, "Review"],
   ["sources", Layers, "Sources"],
+  ["studio", MessageSquare, "Studio"],
   ["critique", Brain, "Critique"],
   ["graph", Network, "Knowledge graph"],
   ["data", BarChart3, "Data analysis"],
@@ -104,6 +107,15 @@ export default function App() {
 
   const [notes, setNotes] = useState({}); // paper idx -> note text
   const [accountTab, setAccountTab] = useState(null);  // "profile" | "settings" | null
+  const [showProjects, setShowProjects] = useState(false);
+  const [projects, setProjects] = useState([]);
+  const [selectedProject, setSelectedProject] = useState("");  // project to file the NEXT run under
+
+  const refreshProjects = useCallback(() => {
+    if (signedOut) { setProjects([]); return; }
+    api.listProjects().then((d) => setProjects(d.projects || [])).catch(() => {});
+  }, [signedOut]);
+  useEffect(() => { refreshProjects(); }, [refreshProjects]);
 
   const [runId, setRunId] = useState(null);
   const [reform, setReform] = useState(null);
@@ -238,7 +250,8 @@ export default function App() {
             if (event.step === "reformulate") setStage("reformulate");
             if (event.step === "search") setStage("search");
           }
-        }
+        },
+        selectedProject || undefined
       );
       setRunId(res.run_id);
       setReform(res.reform);
@@ -249,6 +262,7 @@ export default function App() {
       setDone((d) => ({ ...d, query: true, reformulate: true, search: true }));
       setStage("filter");
       refreshSessions();
+      if (selectedProject) refreshProjects();
     } catch (e) {
       setError({ stage: "Query Reformulator / Academic Search", msg: e.message });
       setStage("query");
@@ -452,6 +466,13 @@ export default function App() {
       {accountTab && (
         <ProfileModal user={session?.user} tab={accountTab} onClose={() => setAccountTab(null)} />
       )}
+
+      {showProjects && (
+        <ProjectsModal
+          onClose={() => { setShowProjects(false); refreshProjects(); }}
+          onOpenRun={(id) => { setShowProjects(false); restoreSession(id); }}
+        />
+      )}
       <div className="sm-wrap wide">
         <div className="sm-head" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 20 }}>
           <div>
@@ -496,6 +517,15 @@ export default function App() {
         <div className="grid3">
           {/* LEFT: Tools + History */}
           <div className="lcol">
+            <button
+              className="btn"
+              disabled={busy}
+              onClick={() => { if (!busy) { reset(); setTopic(""); } }}
+              style={{ width: "100%", justifyContent: "center", display: "flex", alignItems: "center", gap: 6 }}
+            >
+              <Plus size={14} /> New chat
+            </button>
+
             <div className="panel">
               <div className="eyebrow" style={{ marginBottom: 12 }}>Tools</div>
               {TOOLS.map(([k, Ic, lab]) => (
@@ -509,6 +539,40 @@ export default function App() {
                 </button>
               ))}
             </div>
+
+            {!signedOut && (
+              <div className="panel">
+                <div style={H.head}>
+                  <span className="eyebrow">Projects</span>
+                  <button style={H.newBtn} onClick={() => setShowProjects(true)} title="Manage projects">
+                    <Plus size={14} />
+                  </button>
+                </div>
+                {stage === "query" && (
+                  <>
+                    <select
+                      value={selectedProject}
+                      onChange={(e) => setSelectedProject(e.target.value)}
+                      style={{
+                        width: "100%", fontFamily: "'JetBrains Mono',monospace", fontSize: 11.5,
+                        color: "var(--txt)", background: "var(--card,#fff)", border: "1px solid var(--line)",
+                        borderRadius: 7, padding: "6px 8px", marginTop: 2,
+                      }}
+                    >
+                      <option value="">No project (unfiled)</option>
+                      {projects.map((p) => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                    {projects.length === 0 && (
+                      <div style={{ ...H.empty, padding: "6px 2px 0" }}>
+                        Create a project to file this search and its papers, notes and history under it.
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
 
             <div className="panel">
               <div style={H.head}>
@@ -745,6 +809,10 @@ export default function App() {
                       onReanalyze={reanalyzeSources} onGenerate={runWrite}
                       hasReview={Object.keys(sections || {}).length > 0}
                     />
+                  )}
+                  {tab === "studio" && (
+                    <StudioView runId={runId} papers={citeOrder}
+                      extractions={extractions} apiKey={apiKey} />
                   )}
                   {tab === "critique" && <CritiqueView synth={synth} />}
                   {tab === "graph" && <KnowledgeGraphView concepts={sideModules?.knowledge_graph} citeNum={citeNum} />}

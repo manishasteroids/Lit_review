@@ -145,7 +145,7 @@ class LLMClient:
         # Retry on free-tier rate limits (many concurrent extraction batches
         # can trip the RPM cap); back off and try again a few times.
         resp = None
-        for attempt in range(4):
+        for attempt in range(3):
             try:
                 resp = self._gclient.models.generate_content(
                     model=self._gemini_model,
@@ -155,8 +155,8 @@ class LLMClient:
                 break
             except Exception as e:
                 msg = str(e).lower()
-                if attempt < 3 and ("429" in msg or "quota" in msg or "rate" in msg or "resource_exhausted" in msg):
-                    time.sleep(2 * (attempt + 1))
+                if attempt < 2 and ("429" in msg or "quota" in msg or "rate" in msg or "resource_exhausted" in msg):
+                    time.sleep(1.5 * (attempt + 1))   # 1.5s, then 3s — fail fast instead of stacking 30s timeouts
                     continue
                 raise
         latency_ms = int((time.perf_counter() - t0) * 1000)
