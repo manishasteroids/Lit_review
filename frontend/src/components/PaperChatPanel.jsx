@@ -295,7 +295,7 @@ export default function PaperChatPanel({ runId, paper, extraction, cite, apiKey,
   // History follows the PAPER (by URL), not the run — so it persists across runs
   // and devices. The DB is authoritative; localStorage is an offline cache.
   const paperKey = paper?.url || paper?.doi || paper?.title || "";
-  const storeKey = `samhita-chat:${paperKey}`;
+  const storeKey = `sift-chat:${paperKey}`;
   const loadedKey = useRef(null);
 
   useEffect(() => {

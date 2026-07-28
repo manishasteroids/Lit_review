@@ -25,6 +25,8 @@ import {
   Plus, Trash2, Coins, MessageSquare,
 } from "./components/icons.jsx";
 
+import MethodsPanel from "./components/MethodsPanel.jsx";
+
 // Source icons shown in the progress feed
 const SOURCE_ICON = {
   semantic_scholar: "🔬",
@@ -40,6 +42,7 @@ const TOOLS = [
   ["graph", Network, "Knowledge graph"],
   ["data", BarChart3, "Data analysis"],
   ["eval", FlaskConical, "Evaluation"],
+  ["methods", FlaskConical, "Methods"],
   ["usage", Coins, "Token usage"],
 ];
 
@@ -127,6 +130,7 @@ export default function App() {
   const [sections, setSections] = useState({});
   const [sideModules, setSideModules] = useState(null);
   const [evalRes, setEvalRes] = useState(null);
+  const [experimentPlan, setExperimentPlan] = useState(null);
   const [tab, setTab] = useState("review");
   const reviewRef = useRef(null);
   const isDone = stage === "done";
@@ -166,6 +170,7 @@ export default function App() {
     setRunId(null); setReform(null); setPapers([]); setApproved({});
     setExtractions([]); setExtractStats(null); setSynth(null); setSections({}); setSideModules(null);
     setEvalRes(null); setError(null); setDone({}); setStage("query");
+    setExperimentPlan(null);
     setTab("review"); setProgressMsgs([]); setNotes({});
     setIncluded({}); setAnalysisStale(false);
   }
@@ -394,6 +399,18 @@ export default function App() {
     }
   }
 
+  async function runDesignExperiments() {
+    setBusy(true); setError(null);
+    try {
+      const res = await api.designExperiments(runId, apiKey || undefined, model);
+      setExperimentPlan(res.experiment_plan);
+    } catch (e) {
+      setError({ stage: "Experiment Designer", msg: e.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function download(filename, text, type = "text/plain;charset=utf-8") {
     const blob = new Blob([text], { type });
     const url = URL.createObjectURL(blob);
@@ -477,7 +494,7 @@ export default function App() {
         <div className="sm-head" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 20 }}>
           <div>
             <div className="eyebrow" style={{ marginBottom: 8 }}>Multi-agent literature review · live pipeline</div>
-            <div className="sm-title"><b>Saṃhitā</b> <span style={{ color: "var(--muted)", fontWeight: 400 }}>/ lit-review agent</span></div>
+            <div className="sm-title"><b>Sift</b> <span style={{ color: "var(--muted)", fontWeight: 400 }}>/ lit-review agent</span></div>
             <div className="sm-gloss">
               Enter a research question and watch it move through the agent pipeline — reformulate,
               search the live web, filter sources, extract, critique, and write a cited review.
@@ -824,6 +841,7 @@ export default function App() {
                     />
                   )}
                   {tab === "eval" && <EvaluationView evalRes={evalRes} busy={busy} onEvaluate={runEvaluate} />}
+                  {tab === "methods" && <MethodsPanel plan={experimentPlan} busy={busy} onDesign={runDesignExperiments} papers={papers} />}
                   {tab === "usage" && <UsageView runId={runId} />}
                 </div>
 
@@ -843,7 +861,7 @@ export default function App() {
             )}
 
             <div className="foot">
-              Talks to the Saṃhitā backend (FastAPI) running at the address in <code>VITE_API_BASE</code>.
+              Talks to the Sift backend (FastAPI) running at the address in <code>VITE_API_BASE</code>.
               The Anthropic key lives server-side by default — only paste one above if you want to
               override the server's key for this run.
             </div>

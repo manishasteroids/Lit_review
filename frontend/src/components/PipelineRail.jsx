@@ -63,9 +63,9 @@ export default function PipelineRail({ stage, busy, done, kg, ranked, dataReady,
             <div className="meta">
               <div className="lab">{s.label}</div>
               <div className="sub">{s.sub}</div>
-              {s.key === "search"
+              {/* {s.key === "search"
                 ? <ModelChip apis />
-                : <ModelChip model={stageModels[s.key]} />}
+                : <ModelChip model={stageModels[s.key]} />} */}
             </div>
           </div>
         );

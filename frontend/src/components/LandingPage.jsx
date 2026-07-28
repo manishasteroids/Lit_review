@@ -57,7 +57,7 @@ function TopBar({ page, setPage, login }) {
     <header className="lp-bar">
       <div className="lp-bar-in">
         <div className="lp-logo" onClick={() => setPage("home")}>
-          Saṃhitā<span className="dot">.</span>
+          Sift<span className="dot">.</span>
         </div>
 
         <nav className="lp-nav">
@@ -270,7 +270,7 @@ function SiteFooter() {
     <footer className="lp-footer">
       <div className="lp-footer-in">
         <div>
-          <div className="lp-logo">Saṃhitā<span className="dot">.</span></div>
+          <div className="lp-logo">Sift<span className="dot">.</span></div>
           <div className="lp-foot-tag">Interactive Scientific AI Research Assistant</div>
         </div>
         <div className="lp-socials">
@@ -296,7 +296,7 @@ function SiteFooter() {
         </div>
       </div>
       <div className="lp-foot-legal">
-        © {new Date().getFullYear()} Saṃhitā · Built for researchers
+        © {new Date().getFullYear()} Sift · Built for researchers
       </div>
     </footer>
   );
@@ -530,7 +530,7 @@ const LOOP = [
 const PUBS = [
   {
     kind: "White paper", status: "In preparation", state: "wip",
-    title: "Saṃhitā: a multi-agent architecture for automated literature review",
+    title: "Sift: a multi-agent architecture for automated literature review",
     desc: "System design across query reformulation, multi-source retrieval, relevance ranking, structured extraction, critique and cited writing — with cost and latency benchmarks per stage.",
     href: null,
   },
@@ -629,7 +629,7 @@ const COLLAB = [
 
 const STEPS = [
   { k: "Ask", d: "Your research question" },
-  { k: "Search", d: "4 academic databases" },
+  { k: "Search", d: "Ranked by relevance" },
   { k: "Filter", d: "You approve sources" },
   { k: "Extract", d: "Structured findings" },
   { k: "Critique", d: "Themes & gaps" },
@@ -639,7 +639,7 @@ const STEPS = [
 const FEATURES = [
   {
     title: "Gather papers",
-    body: "Ask a question in plain language. Saṃhitā reformulates it into precise search queries, then searches Semantic Scholar, arXiv, OpenAlex and PubMed at once — ranking results by relevance to your topic, not just citation count.",
+    body: "Ask a question in plain language. Sift reformulates it into precise search queries, then searches Semantic Scholar, arXiv, OpenAlex and PubMed at once — ranking results by relevance to your topic, not just citation count.",
     points: ["Four databases in one search", "Relevance-first ranking", "Up to 100 papers per review"],
     visual: GatherVisual,
   },

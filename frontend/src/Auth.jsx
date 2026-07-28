@@ -296,7 +296,7 @@ function LoginModal({ onDismiss }) {
           {mode === "signin" ? "Sign in to continue" : "Create your account"}
         </h2>
         <p style={{ color: "#6b6b7b", fontSize: 14, marginTop: 0, marginBottom: 22 }}>
-          Saṃhitā saves your searches, notes and reviews to your account.
+          Sift saves your searches, notes and reviews to your account.
         </p>
  
         <button onClick={google} type="button" style={{

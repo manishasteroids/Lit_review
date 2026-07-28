@@ -119,6 +119,9 @@ export const api = {
   evaluate: (runId, apiKey, model) =>
     request(`/api/runs/${runId}/evaluate`, { api_key: apiKey, model }),
 
+  designExperiments: (runId, apiKey, model) =>
+    request(`/api/runs/${runId}/experiments`, { api_key: apiKey, model }),
+
   // Sources-page editing
   resolvePaper: (runId, identifier) =>
     request(`/api/runs/${runId}/resolve`, { identifier }),

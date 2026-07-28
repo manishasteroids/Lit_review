@@ -17,7 +17,7 @@ import jwt
 
 from core.config import settings
 
-log = logging.getLogger("samhita.auth")
+log = logging.getLogger("sift.auth")
 
 
 def _real(value: str) -> str:

@@ -12,7 +12,7 @@ from typing import Optional
 import httpx
 
 BASE = "https://api.zotero.org"
-UA = {"User-Agent": "Samhita-LitReview/1.0 (research assistant; Zotero import)"}
+UA = {"User-Agent": "Sift-LitReview/1.0 (research assistant; Zotero import)"}
 PAGE_SIZE = 100
 MAX_ITEMS = 500  # hard cap per import so one click can't pull an entire huge library
 
@@ -63,7 +63,7 @@ def _to_paper(item: dict) -> Optional[dict]:
 
 def fetch_library_items(api_key: str, library_id: str, library_type: str = "user") -> list[dict]:
     """Fetch up to MAX_ITEMS top-level items from a Zotero personal ("user") or
-    group library, converted to Samhita's paper shape. Raises on auth/network
+    group library, converted to Sift's paper shape. Raises on auth/network
     failure so the route can surface a clear error."""
     kind = "groups" if library_type == "group" else "users"
     headers = {**UA, "Zotero-API-Key": api_key, "Zotero-API-Version": "3"}
