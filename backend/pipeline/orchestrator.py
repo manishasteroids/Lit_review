@@ -25,6 +25,8 @@ from core.config import settings
 from core.llm_client import LLMClient
 from pipeline.data_analysis import comparison_table, year_distribution
 from pipeline.knowledge_graph import build_knowledge_graph
+
+from agents.experiment_designer import ExperimentDesignerAgent
  
  
 @dataclass
@@ -38,6 +40,7 @@ class RunState:
     synthesis: Optional[dict] = None
     sections: dict = field(default_factory=dict)
     eval_result: Optional[dict] = None
+    experiment_plan: Optional[dict] = None
     stage: str = "query"
     mode: Optional[str] = None      # search mode, so later stages reuse its models
     extract_stats: Optional[dict] = None   # full-text coverage for Deep runs
@@ -46,7 +49,7 @@ class RunState:
 RUNS: dict[str, RunState] = {}
  
  
-class SamhitaPipeline:
+class SiftPipeline:
     """One instance per request; agents are cheap to construct."""
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None,
@@ -86,6 +89,7 @@ class SamhitaPipeline:
         self.synthesizer = CriticSynthesizerAgent(self.mid)
         self.writer = WriterAgent(self.main)
         self.evaluator = EvaluatorAgent(self.mid)
+        self.experiment_designer = ExperimentDesignerAgent(self.mid)
 
     def _attribute(self, run_id: str) -> None:
         """Tag every per-purpose client with the session id for the usage ledger."""
@@ -236,4 +240,13 @@ class SamhitaPipeline:
         # synthesizer's scores still surface in the Ranking module and the
         # comparison table's Rank column — they just no longer reshuffle the list.
         return run.approved_papers
+    
+    # ---- method & experiment designer --------------
+    def design_experiments(self, run: RunState) -> dict:
+        self._attribute(run.run_id)
+        self.mid.stage = "experiments"
+        run.experiment_plan = self.experiment_designer.run(
+            run.topic, run.synthesis or {}, run.extractions
+        )
+        return run.experiment_plan
  

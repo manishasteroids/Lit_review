@@ -9,7 +9,7 @@ Session persistence layer.
 HOW TO SWITCH TO POSTGRESQL WHEN DEPLOYING TO A SERVER
 ───────────────────────────────────────────────────────
 1. pip install psycopg2-binary
-2. Add DATABASE_URL=postgresql://user:password@host:5432/samhita to .env
+2. Add DATABASE_URL=postgresql://user:password@host:5432/sift to .env
 3. Comment out the SQLITE BLOCK and uncomment the POSTGRESQL BLOCK below.
    That is the ONLY change needed — no other files touch the DB.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

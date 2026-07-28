@@ -20,7 +20,7 @@ import httpx
 
 from core.db import _conn, _PH
 
-UA = {"User-Agent": "Samhita-LitReview/1.0 (research assistant; news reader)"}
+UA = {"User-Agent": "Sift-LitReview/1.0 (research assistant; news reader)"}
 TTL_SECONDS = 60 * 60 * 6          # refresh at most every 6 hours
 MAX_ITEMS = 24
 CACHE_KEY = "science_ai_news"

@@ -38,7 +38,7 @@ export default function SessionSidebar({ sessions = [], currentRunId, busy, onSe
   return (
     <aside style={styles.sidebar}>
       <div style={styles.header}>
-        <span style={styles.logo}>Saṃhitā</span>
+        <span style={styles.logo}>Sift</span>
         <button style={styles.newBtn} onClick={onNewChat} disabled={busy} title="New review">
           <Plus size={16} />
         </button>

@@ -19,7 +19,7 @@ from core.db import (delete_all_for_user, delete_session, get_session,
 from core.llm_client import LLMClient
 from core.paper_text import fetch_paper_pdf, fetch_paper_text
 from core.usage import get_usage
-from pipeline.orchestrator import RUNS, RunState, SamhitaPipeline
+from pipeline.orchestrator import RUNS, RunState, SiftPipeline
  
 router = APIRouter(prefix="/api")
  
@@ -134,7 +134,7 @@ async def create_run_stream(body: CreateRunBody, user_id: str = Depends(require_
  
     async def run_pipeline():
         try:
-            pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model, mode=body.mode)
+            pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=body.mode)
             run = await asyncio.to_thread(
                 pipeline.reformulate_and_search, body.topic, on_progress
             )
@@ -189,7 +189,7 @@ async def create_run_stream(body: CreateRunBody, user_id: str = Depends(require_
  
 @router.post("/runs")
 def create_run(body: CreateRunBody, user_id: str = Depends(require_user)):
-    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model, mode=body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=body.mode)
     try:
         run = pipeline.reformulate_and_search(body.topic)
     except Exception as e:
@@ -218,13 +218,13 @@ def filter_papers(run_id: str, body: FilterBody, user_id: str = Depends(require_
     run = get_run(run_id, user_id)
     if len(body.approved_indices) < 2:
         raise HTTPException(400, "Approve at least 2 papers to build a review.")
-    SamhitaPipeline().apply_filter(run, body.approved_indices)
+    SiftPipeline().apply_filter(run, body.approved_indices)
     return {"run_id": run.run_id, "approved_count": len(run.approved_papers), "stage": run.stage}
  
  
 def _persist_done(run, user_id, notes=None, side=None):
     """Save a run in its 'done' state (post-synthesis / post-write)."""
-    pipeline = SamhitaPipeline()
+    pipeline = SiftPipeline()
     if side is None:
         side = pipeline.side_modules(run)
     approved_map = {p["idx"]: True for p in run.approved_papers}
@@ -248,7 +248,7 @@ def _persist_done(run, user_id, notes=None, side=None):
 @router.post("/runs/{run_id}/synthesize")
 def synthesize(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
-    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
     try:
         pipeline.extract_and_synthesize(run)
     except Exception as e:
@@ -271,7 +271,7 @@ async def synthesize_stream(run_id: str, body: SynthesizeBody, user_id: str = De
 
     async def work():
         try:
-            pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model,
+            pipeline = SiftPipeline(api_key=body.api_key, model=body.model,
                                        mode=run.mode or body.mode)
             await asyncio.to_thread(pipeline.extract_and_synthesize, run, on_progress)
             side = _persist_done(run, user_id, notes=body.notes)
@@ -302,7 +302,7 @@ async def synthesize_stream(run_id: str, body: SynthesizeBody, user_id: str = De
 @router.post("/runs/{run_id}/write")
 def write(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
-    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
     try:
         pipeline.write(run)
     except Exception as e:
@@ -340,7 +340,7 @@ def resolve_paper(run_id: str, body: ResolveBody, user_id: str = Depends(require
     papers, each flagged if it duplicates a paper already in the run."""
     run = get_run(run_id, user_id)
     try:
-        candidates = SamhitaPipeline().resolve_candidates(body.identifier)
+        candidates = SiftPipeline().resolve_candidates(body.identifier)
     except Exception as e:
         raise HTTPException(502, f"Lookup failed: {e}")
     existing_titles = {_norm_title(p.get("title")) for p in run.papers}
@@ -363,7 +363,7 @@ def add_paper(run_id: str, body: AddPaperBody, user_id: str = Depends(require_us
         raise HTTPException(400, "That paper has no title — pick a different result.")
     if _is_duplicate(run, body.paper):
         raise HTTPException(409, "This paper is already in your sources.")
-    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model,
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model,
                                mode=run.mode or getattr(body, "mode", None))
     try:
         res = pipeline.add_paper(run, body.paper)
@@ -380,7 +380,7 @@ def reanalyze(run_id: str, body: ReanalyzeBody, user_id: str = Depends(require_u
     run = get_run(run_id, user_id)
     if len(body.included_indices) < 1:
         raise HTTPException(400, "Include at least one source before updating the analysis.")
-    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model,
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model,
                                mode=run.mode or getattr(body, "mode", None))
     try:
         pipeline.reanalyze(run, body.included_indices)
@@ -395,12 +395,22 @@ def reanalyze(run_id: str, body: ReanalyzeBody, user_id: str = Depends(require_u
 @router.post("/runs/{run_id}/evaluate")
 def evaluate(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
-    pipeline = SamhitaPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
     try:
         result = pipeline.evaluate(run)
     except Exception as e:
         raise HTTPException(502, f"Evaluator failed: {e}")
     return {"run_id": run.run_id, "eval_result": result}
+
+@router.post("/runs/{run_id}/experiments")
+def design_experiments(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
+    run = get_run(run_id, user_id)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    try:
+        result = pipeline.design_experiments(run)
+    except Exception as e:
+        raise HTTPException(502, f"Experiment designer failed: {e}")
+    return {"run_id": run.run_id, "experiment_plan": result}
  
  
 @router.post("/runs/{run_id}/assess")
@@ -643,7 +653,7 @@ def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require
 @router.get("/runs/{run_id}")
 def get_run_state(run_id: str, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
-    pipeline = SamhitaPipeline()
+    pipeline = SiftPipeline()
     return {
         "run_id": run.run_id, "topic": run.topic, "reform": run.reform,
         "papers": run.papers, "approved_papers": run.approved_papers,
@@ -905,7 +915,7 @@ def export_review(run_id: str, fmt: str, template: str = "ieee",
 
 def _ordered_for_export(run) -> list[dict]:
     """Papers in citation order, so [n] in the text matches the reference list."""
-    return SamhitaPipeline()._ordered_papers(run)
+    return SiftPipeline()._ordered_papers(run)
 
 
 def _safe_filename(text: str) -> str:

@@ -1,10 +1,10 @@
-# Saṃhitā — multi-agent literature review pipeline
+# Sift — multi-agent literature review pipeline
 
 A real implementation of the pipeline diagram: a FastAPI backend with one
 file per agent, and a React frontend that drives it stage by stage.
 
 ```
-samhita/
+sift/
 ├── backend/                     FastAPI app — the agent pipeline
 │   ├── main.py                  entrypoint (uvicorn main:app)
 │   ├── core/
@@ -58,7 +58,7 @@ with Neo4j) without touching anything else.
 cd backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # then put your ANTHROPIC_API_KEY in .env
+cp .env.example .env
 uvicorn main:app --reload --port 8015
 ```
 

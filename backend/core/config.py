@@ -39,7 +39,7 @@ class Settings:
 
     cors_origin: str = os.environ.get("CORS_ORIGIN", "http://localhost:5173")
     # SQLite path — overridable via DB_PATH env var for cloud deployment
-    db_path: str = os.environ.get("DB_PATH", str(Path(__file__).parent.parent / "samhita.db"))
+    db_path: str = os.environ.get("DB_PATH", str(Path(__file__).parent.parent / "sift.db"))
     
     # Semantic Scholar
     s2_api_key: str = os.environ.get("S2_API_KEY", "")
@@ -50,7 +50,7 @@ class Settings:
     # PubMed
     ncbi_api_key: str = os.environ.get("NCBI_API_KEY", "")
     ncbi_email: str = os.environ.get("NCBI_EMAIL", "")
-    ncbi_tool: str = os.environ.get("NCBI_TOOL", "samhita")
+    ncbi_tool: str = os.environ.get("NCBI_TOOL", "sift")
     
     # Supabase auth. Legacy projects sign JWTs with HS256 + this shared secret;
     # newer projects use asymmetric keys (ES256/RS256) verified via the project's
@@ -60,7 +60,7 @@ class Settings:
     cors_origin: str = os.environ.get("CORS_ORIGIN", "http://localhost:5173")
     
     # SQLite path — overridable via DB_PATH env var for cloud deployment
-    db_path: str = os.environ.get("DB_PATH", str(Path(__file__).parent.parent / "samhita.db"))
+    db_path: str = os.environ.get("DB_PATH", str(Path(__file__).parent.parent / "sift.db"))
 
 
 settings = Settings()

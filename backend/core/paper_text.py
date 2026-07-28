@@ -10,12 +10,14 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
+from core.config import settings
+
 _CACHE: dict[str, str | None] = {}
 _PDF_CACHE: dict[str, bytes | None] = {}
 MAX_CHARS = 40_000          # ~10k tokens; keeps text prompts affordable
 MAX_PDF_BYTES = 25_000_000  # stay under Anthropic's PDF request limit
 TIMEOUT = 25.0
-HEADERS = {"User-Agent": "Samhita-LitReview/1.0 (research assistant)"}
+HEADERS = {"User-Agent": "Sift-LitReview/1.0 (research assistant)"}
 
 
 def _is_safe_url(url: str | None) -> bool:

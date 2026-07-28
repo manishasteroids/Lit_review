@@ -94,11 +94,11 @@ export function ModeBar({ modes, mode, setMode }) {
         </select>
         <ChevronRight size={14} className="model-caret" />
       </div>
-      {current?.blurb && (
+      {/* {current?.blurb && (
         <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.4 }}>
           {current.blurb}
         </div>
-      )}
+      )} */}
     </div>
   );
 }

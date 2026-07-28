@@ -33,7 +33,7 @@ from core.config import settings
 S2_SEARCH = "https://api.semanticscholar.org/graph/v1/paper/search"
 S2_FIELDS = "title,abstract,year,venue,authors,externalIds,openAccessPdf,citationCount,url"
 ARXIV_API = "http://export.arxiv.org/api/query"
-UA = {"User-Agent": "Samhita-LitReview/1.0 (research assistant)"}
+UA = {"User-Agent": "Sift-LitReview/1.0 (research assistant)"}
  
 PUBMED_ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
@@ -448,7 +448,7 @@ def _mailto() -> str:
  
  
 def _pubmed_base() -> dict:
-    base = {"tool": getattr(settings, "ncbi_tool", "") or "samhita"}
+    base = {"tool": getattr(settings, "ncbi_tool", "") or "sift"}
     email = getattr(settings, "ncbi_email", "") or getattr(settings, "unpaywall_email", "")
     if email:
         base["email"] = email

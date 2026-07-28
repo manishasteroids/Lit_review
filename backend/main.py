@@ -30,7 +30,7 @@ from core.db import init_db
 
 MAX_BODY_BYTES = 15 * 1024 * 1024  # 15 MB cap on request bodies
 
-app = FastAPI(title="Saṃhitā — multi-agent literature review pipeline")
+app = FastAPI(title="Sift — multi-agent literature review pipeline")
 
 
 @app.on_event("startup")
