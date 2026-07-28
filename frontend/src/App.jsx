@@ -878,6 +878,7 @@ export default function App() {
               dataReady={!!sideModules}
               models={pipelineModels}
               showMemory={false}
+              hasPlan={!!experimentPlan}
             />
           </div>
         </div>

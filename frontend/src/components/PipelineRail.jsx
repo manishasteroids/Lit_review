@@ -1,7 +1,7 @@
 import React from "react";
 import {
   Sparkles, Filter, Search, Check, FileText, Brain, PenTool,
-  RotateCw, Network, ListOrdered, BarChart3,
+  RotateCw, Network, ListOrdered, BarChart3, FlaskConical,
 } from "./icons.jsx";
 import { shortModel, tierOf, TIER_META } from "../modelTiers.js";
 
@@ -35,9 +35,10 @@ export const STAGES = [
   { key: "extract", label: "Reader & Extractor", sub: "Parses text, extracts info", icon: FileText, kind: "step" },
   { key: "synthesize", label: "Critic & Synthesizer", sub: "Detects gaps & biases", icon: Brain, kind: "step" },
   { key: "write", label: "Writer Agent", sub: "Structured literature review", icon: PenTool, kind: "output" },
+  { key: "experiments", label: "Method & Experiment Designer", sub: "Testable experiment plans", icon: FlaskConical, kind: "output" },
 ];
 
-export default function PipelineRail({ stage, busy, done, kg, ranked, dataReady, models }) {
+export default function PipelineRail({ stage, busy, done, kg, ranked, dataReady, models, hasPlan }) {
   const curIdx = STAGES.findIndex((s) => s.key === stage);
   const stageModels = models?.stages || {};
 
@@ -47,7 +48,7 @@ export default function PipelineRail({ stage, busy, done, kg, ranked, dataReady,
       {STAGES.map((s, i) => {
         const Icon = s.icon;
         const isActive = stage === s.key && busy;
-        const isDone = done[s.key];
+        const isDone = s.key === "experiments" ? hasPlan : done[s.key];
         const reached = i <= curIdx;
         const dotCls =
           "dot " + (s.kind === "entry" ? "entry " : s.kind === "output" ? "output " : "") +
