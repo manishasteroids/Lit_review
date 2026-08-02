@@ -102,7 +102,8 @@ class AcademicSearchAgent(Agent):
     name = "academic_search"
 
     def run(self, topic: str, queries: list[str], limit: int = 50,
-            terms: list[str] | None = None, scope: str | None = None) -> list[dict]:
+            terms: list[str] | None = None, scope: str | None = None,
+            domain: str | None = None) -> list[dict]:
         # `search_terms` selects the candidate POOL (topic + first 2 queries);
         # the reformulator's `terms`/`scope` are used only to RANK.
         search_terms = _uniq([topic, *(queries or [])])[:3]
@@ -136,6 +137,17 @@ class AcademicSearchAgent(Agent):
         for i, p in enumerate(papers):
             p["idx"] = i
             p.pop("cites", None)
+
+        # Phase 1 of pre-indexing: opportunistically backfill the local corpus
+        # with whatever this live search already found — free (no extra API
+        # calls), and warms the index for the fast local-search path that
+        # later phases will add. Never blocks or breaks the actual search.
+        try:
+            from core.corpus import upsert_papers
+            upsert_papers(papers, domain=domain or "other")
+        except Exception:
+            pass
+
         return papers
  
     # ── Single-paper resolution (Sources page "Add paper") ────────────────

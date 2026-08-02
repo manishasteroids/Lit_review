@@ -10,14 +10,21 @@ async function authHeaders(extra = {}) {
 
 // Requests that call an LLM can legitimately take a while (large corpora,
 // Deep mode), but must never hang forever — a stalled call should surface an
-// error the UI can show, not spin indefinitely. 75s covers a slow Deep answer
-// over many sources with headroom.
+// error the UI can show, not spin indefinitely. 75s covers a slow single-call
+// answer over many sources with headroom.
 const REQUEST_TIMEOUT_MS = 75_000;
 
-async function request(path, body) {
+// The Writer agent isn't one call — it writes title/abstract/intro/synthesis/
+// gaps/future as 6 sequential LLM calls in one request so each section stays
+// focused. Even at a normal ~10-15s per call that's over a minute end-to-end,
+// so it needs real headroom instead of the single-call timeout tripping on
+// ordinary latency.
+const WRITE_TIMEOUT_MS = 240_000;
+
+async function request(path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
   const send = async () => {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       return await fetch(BASE + path, {
         method: "POST",
@@ -114,7 +121,7 @@ export const api = {
       { api_key: apiKey, model, notes }, onEvent),
 
   write: (runId, apiKey, model, notes) =>
-    request(`/api/runs/${runId}/write`, { api_key: apiKey, model, notes }),
+    request(`/api/runs/${runId}/write`, { api_key: apiKey, model, notes }, WRITE_TIMEOUT_MS),
 
   evaluate: (runId, apiKey, model) =>
     request(`/api/runs/${runId}/evaluate`, { api_key: apiKey, model }),
