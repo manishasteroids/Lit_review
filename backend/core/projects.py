@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from core.db import _conn, _PH
+from core.db import _conn, _PH, _existing_columns
 
 
 def init_projects_tables() -> None:
@@ -64,7 +64,8 @@ def init_projects_tables() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS ix_pn_project ON project_notes(project_id)")
 
         # sessions.project_id — a run can (optionally) be filed under a project.
-        existing = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        # existing = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        existing = _existing_columns(conn, "sessions")
         if "project_id" not in existing:
             conn.execute("ALTER TABLE sessions ADD COLUMN project_id TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS ix_sessions_project ON sessions(project_id)")

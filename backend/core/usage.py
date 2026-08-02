@@ -11,7 +11,7 @@ sees always matches what actually went over the wire.
 from datetime import datetime, timezone
 from typing import Optional
 
-from core.db import _conn, _PH
+from core.db import _conn, _PH, _AUTO_ID, _existing_columns
 from core.pricing import cost_usd, tier_of, PRICES_EFFECTIVE
 
 
@@ -28,9 +28,9 @@ def init_usage_table() -> None:
     existing (older-schema) table. Called from db.init_db()."""
     with _conn() as conn:
         conn.execute(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS llm_calls (
-                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                id             {_AUTO_ID},
                 session_id     TEXT,
                 stage          TEXT,
                 model          TEXT,
@@ -48,7 +48,7 @@ def init_usage_table() -> None:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS ix_llm_calls_session ON llm_calls(session_id)")
         # migrate DBs created before these columns existed
-        existing = {row[1] for row in conn.execute("PRAGMA table_info(llm_calls)").fetchall()}
+        existing = _existing_columns(conn, "llm_calls")
         for col, decl in _EXTRA_COLS:
             if col not in existing:
                 conn.execute(f"ALTER TABLE llm_calls ADD COLUMN {col} {decl}")
