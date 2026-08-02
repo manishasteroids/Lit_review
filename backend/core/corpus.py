@@ -47,6 +47,21 @@ def init_corpus_table() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS ix_papers_domain ON papers(domain)")
         conn.execute("CREATE INDEX IF NOT EXISTS ix_papers_year ON papers(year)")
 
+        # Phase 3: tracks the last successful incremental sync per source, so
+        # the daily job knows to pull only what's new since last time instead
+        # of re-fetching (and re-parsing) everything on every run.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sync_state (
+                source        TEXT PRIMARY KEY,
+                last_synced   TEXT,
+                last_run_at   TEXT,
+                last_status   TEXT,
+                records_added INTEGER DEFAULT 0
+            )
+            """
+        )
+
 
 def _norm_title(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip()
@@ -95,6 +110,43 @@ def upsert_papers(papers: list[dict], domain: str = "other") -> None:
                 )
     except Exception:  # noqa: BLE001 — corpus is a cache, never a hard dependency
         pass
+
+
+def get_last_sync(source: str) -> Optional[str]:
+    """ISO date the given source (e.g. 'pubmed', 'biorxiv') was last
+    successfully synced through, or None if it's never been run."""
+    with _conn() as conn:
+        row = conn.execute(
+            f"SELECT last_synced FROM sync_state WHERE source = {_PH}", (source,)
+        ).fetchone()
+    return row["last_synced"] if row else None
+
+
+def set_last_sync(source: str, synced_through: str, status: str = "ok",
+                   records_added: int = 0) -> None:
+    """Record a completed (or failed) sync attempt. `synced_through` is the
+    date (YYYY-MM-DD) the pull covered up to — next run resumes from here."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _conn() as conn:
+        conn.execute(
+            f"""
+            INSERT INTO sync_state (source, last_synced, last_run_at, last_status, records_added)
+            VALUES ({_PH},{_PH},{_PH},{_PH},{_PH})
+            ON CONFLICT(source) DO UPDATE SET
+                last_synced   = excluded.last_synced,
+                last_run_at   = excluded.last_run_at,
+                last_status   = excluded.last_status,
+                records_added = excluded.records_added
+            """,
+            (source, synced_through, now, status, records_added),
+        )
+
+
+def sync_status() -> list[dict]:
+    """All sources' sync state, for a status page / CLI check."""
+    with _conn() as conn:
+        rows = conn.execute("SELECT * FROM sync_state ORDER BY source").fetchall()
+    return [dict(r) for r in rows]
 
 
 def corpus_stats(domain: Optional[str] = None) -> dict:

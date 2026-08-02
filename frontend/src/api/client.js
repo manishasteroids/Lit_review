@@ -18,8 +18,14 @@ const REQUEST_TIMEOUT_MS = 75_000;
 // gaps/future as 6 sequential LLM calls in one request so each section stays
 // focused. Even at a normal ~10-15s per call that's over a minute end-to-end,
 // so it needs real headroom instead of the single-call timeout tripping on
-// ordinary latency.
-const WRITE_TIMEOUT_MS = 240_000;
+// ordinary latency. A large source count (40-50 papers) means a bigger corpus
+// block on every one of those 6 calls, and if the account is anywhere near an
+// Anthropic rate limit the SDK's own internal retry/backoff can silently add
+// tens of seconds PER call — so this needs real headroom even outside Deep
+// mode. Deep mode writes meaningfully longer sections on top of that (up to
+// 3000 output tokens each, on Opus), so it gets the largest allowance.
+const WRITE_TIMEOUT_MS = 360_000;
+const WRITE_TIMEOUT_MS_DEEP = 600_000;
 
 async function request(path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
   const send = async () => {
@@ -120,8 +126,9 @@ export const api = {
     streamPost(`/api/runs/${runId}/synthesize/stream`,
       { api_key: apiKey, model, notes }, onEvent),
 
-  write: (runId, apiKey, model, notes) =>
-    request(`/api/runs/${runId}/write`, { api_key: apiKey, model, notes }, WRITE_TIMEOUT_MS),
+  write: (runId, apiKey, model, notes, mode) =>
+    request(`/api/runs/${runId}/write`, { api_key: apiKey, model, notes },
+      mode === "deep" ? WRITE_TIMEOUT_MS_DEEP : WRITE_TIMEOUT_MS),
 
   evaluate: (runId, apiKey, model) =>
     request(`/api/runs/${runId}/evaluate`, { api_key: apiKey, model }),

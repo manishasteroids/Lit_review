@@ -298,12 +298,12 @@ class AcademicSearchAgent(Agent):
                     if not p.get("title"):
                         continue
                     out.append({
-                        "title": p.get("title", ""),
+                        "title": _clean(p.get("title", "")),
                         "authors": _fmt_authors([a.get("name") for a in (p.get("authors") or [])]),
                         "year": p.get("year"),
-                        "venue": p.get("venue") or "",
+                        "venue": _clean(p.get("venue") or ""),
                         "url": _s2_url(p),
-                        "abstract": p.get("abstract") or "",
+                        "abstract": _clean(p.get("abstract") or ""),
                         "cites": p.get("citationCount") or 0,
                         "source": "semantic_scholar",
                     })
@@ -498,8 +498,16 @@ def _uniq(items: list[str]) -> list[str]:
     return out
  
  
+_TAG_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]*(?:\s[^<>]*)?>")
+
+
 def _clean(s: str) -> str:
-    return " ".join((s or "").split())
+    """Collapse whitespace and strip stray HTML/XML markup. Some sources
+    (OpenAlex/Crossref-derived records, Semantic Scholar) pass publisher
+    metadata straight through with inline formatting tags still in it, e.g.
+    "<scp>A</scp>lzheimer's disease" — those need to render as plain text
+    everywhere (the UI, and every export format)."""
+    return " ".join(_TAG_RE.sub("", s or "").split())
  
  
 def _reconstruct_abstract(inv: dict) -> str:

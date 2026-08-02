@@ -19,6 +19,7 @@ import ProfileModal from "./components/ProfileModal.jsx";
 import ProjectsModal from "./components/ProjectsModal.jsx";
 import ExportBar from "./components/ExportBar.jsx";
 import StudioView from "./components/StudioView.jsx";
+import { useConfirm } from "./components/ConfirmModal.jsx";
 import {
   RotateCw, AlertTriangle, Sparkles, PenTool,
   BookOpen, Layers, Brain, Network, BarChart3, FlaskConical,
@@ -100,6 +101,7 @@ export default function App() {
 
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("claude-sonnet-4-6");  // still used for paper chat
+  const [confirmAsync, confirmModal] = useConfirm();
   const [mode, setMode] = useState("medium");               // search mode drives the pipeline
   const [modes, setModes] = useState([]);
   const [topic, setTopic] = useState("");
@@ -269,7 +271,7 @@ export default function App() {
       refreshSessions();
       if (selectedProject) refreshProjects();
     } catch (e) {
-      setError({ stage: "Query Reformulator / Academic Search", msg: e.message });
+      setError({ stage: "Query Reformulator / Academic Search", msg: e.message, retry: runStart });
       setStage("query");
     } finally {
       setBusy(false);
@@ -315,7 +317,7 @@ export default function App() {
       refreshSessions();
       setTimeout(() => reviewRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
     } catch (e) {
-      setError({ stage: "Reader & Extractor / Critic & Synthesizer", msg: e.message });
+      setError({ stage: "Reader & Extractor / Critic & Synthesizer", msg: e.message, retry: runApprove });
     } finally {
       setBusy(false);
     }
@@ -361,7 +363,7 @@ export default function App() {
       setAnalysisStale(false);
       refreshSessions();
     } catch (e) {
-      setError({ stage: "Update analysis", msg: e.message });
+      setError({ stage: "Update analysis", msg: e.message, retry: reanalyzeSources });
     } finally {
       setBusy(false);
     }
@@ -374,14 +376,14 @@ export default function App() {
     // no status is visible during generation).
     setBusy(true); setError(null); setStage("write");
     try {
-      const writeRes = await api.write(runId, apiKey || undefined, model, notes);
+      const writeRes = await api.write(runId, apiKey || undefined, model, notes, mode);
       setSections(writeRes.sections);
       if (writeRes.side_modules) setSideModules(writeRes.side_modules);
       setDone((d) => ({ ...d, write: true }));
       setTab("review");
       refreshSessions();
     } catch (e) {
-      setError({ stage: "Writer Agent", msg: e.message });
+      setError({ stage: "Writer Agent", msg: e.message, retry: runWrite });
     } finally {
       setBusy(false); setStage("done");
     }
@@ -393,7 +395,7 @@ export default function App() {
       const res = await api.evaluate(runId, apiKey || undefined, model);
       setEvalRes(res.eval_result);
     } catch (e) {
-      setError({ stage: "Evaluator", msg: e.message });
+      setError({ stage: "Evaluator", msg: e.message, retry: runEvaluate });
     } finally {
       setBusy(false);
     }
@@ -405,7 +407,7 @@ export default function App() {
       const res = await api.designExperiments(runId, apiKey || undefined, model);
       setExperimentPlan(res.experiment_plan);
     } catch (e) {
-      setError({ stage: "Experiment Designer", msg: e.message });
+      setError({ stage: "Experiment Designer", msg: e.message, retry: runDesignExperiments });
     } finally {
       setBusy(false);
     }
@@ -480,6 +482,8 @@ export default function App() {
 
   return (
     <div className="sm-root">
+      {confirmModal}
+
       {accountTab && (
         <ProfileModal user={session?.user} tab={accountTab} onClose={() => setAccountTab(null)} />
       )}
@@ -517,7 +521,9 @@ export default function App() {
                 label: "Delete all my data",
                 danger: true,
                 onClick: async () => {
-                  if (!window.confirm("Permanently delete all your saved runs? This cannot be undone.")) return;
+                  const ok = await confirmAsync("Permanently delete all your saved runs? This cannot be undone.",
+                    { title: "Delete all data?", danger: true, confirmLabel: "Delete everything" });
+                  if (!ok) return;
                   try {
                     await api.deleteAllSessions();
                     reset(); setTopic("");
@@ -680,7 +686,14 @@ export default function App() {
                 <div>
                   <b>{error.stage} failed.</b> {error.msg}
                   <div style={{ marginTop: 8 }}>
-                    <button className="btn ghost sm" onClick={() => { setError(null); if (papers.length) runApprove(); else runStart(); }}>
+                    <button
+                      className="btn ghost sm"
+                      onClick={() => {
+                        const retry = error.retry || (papers.length ? runApprove : runStart);
+                        setError(null);
+                        retry();
+                      }}
+                    >
                       <RotateCw size={13} /> Retry stage
                     </button>
                   </div>

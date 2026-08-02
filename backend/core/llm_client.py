@@ -8,6 +8,7 @@ the Gemini path converts them to google-genai Parts.
 """
 import base64
 import json
+import logging
 import re
 import time
 from typing import Any, Optional
@@ -16,6 +17,23 @@ import anthropic
 
 from .config import settings
 from .usage import record_call
+
+log = logging.getLogger("samhita.llm")
+
+
+def _build_gemini_client():
+    """Construct a google-genai Client with a bounded timeout so a bad key /
+    network issue errors cleanly instead of hanging. Shared by the primary
+    Gemini provider path and the Anthropic->Gemini fallback path."""
+    from google import genai
+    try:
+        from google.genai import types as _gt
+        return genai.Client(
+            api_key=settings.gemini_api_key,
+            http_options=_gt.HttpOptions(timeout=30_000),
+        )
+    except Exception:
+        return genai.Client(api_key=settings.gemini_api_key)
 
 
 class LLMClient:
@@ -30,21 +48,18 @@ class LLMClient:
         self.provider = "gemini" if "gemini" in self.model.lower() else "anthropic"
 
         if self.provider == "gemini":
-            from google import genai  # lazy import so Claude-only setups don't need it
-            # 30s timeout so an invalid key / network issue errors cleanly
-            # instead of hanging the pipeline. Falls back if the option is
-            # unsupported by the installed google-genai version.
-            try:
-                from google.genai import types as _gt
-                self._gclient = genai.Client(
-                    api_key=settings.gemini_api_key,
-                    http_options=_gt.HttpOptions(timeout=30_000),
-                )
-            except Exception:
-                self._gclient = genai.Client(api_key=settings.gemini_api_key)
+            self._gclient = _build_gemini_client()  # lazy import so Claude-only setups don't need it
             self._gemini_model = settings.gemini_model if self.model == "gemini" else self.model
         else:
-            self.client = anthropic.Anthropic(api_key=api_key or settings.anthropic_api_key)
+            # max_retries=1 (down from the SDK's default of 2): the SDK's own
+            # retry/backoff on 429/5xx is exactly what can silently turn one
+            # "call" into several minutes of hidden waiting (see the slow-call
+            # warning below) — better to fail this attempt fast and let our
+            # own Gemini fallback take over than sit through it.
+            self.client = anthropic.Anthropic(
+                api_key=api_key or settings.anthropic_api_key, max_retries=1,
+            )
+            self._gclient = None  # lazily built only if a fallback is actually needed
 
         # set by the orchestrator/routes so every call is attributed to a
         # session and a pipeline stage in the token/cost ledger.
@@ -64,7 +79,7 @@ class LLMClient:
             # Gemini uses a different caching API; just fold the prefix into the
             # prompt so the call still works (no Anthropic-style caching here).
             gem_text = f"{cache_prefix}\n{user_text or ''}" if cache_prefix else user_text
-            return self._call_gemini(gem_text, system, max_tokens, content)
+            return self._call_gemini(gem_text, system, max_tokens, content, model=self._gemini_model)
 
         # `content` lets callers pass multimodal blocks (text + document/PDF +
         # image). `cache_prefix` marks a stable prefix for prompt caching —
@@ -89,9 +104,49 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
 
+        # Cap how long we'll wait on Anthropic before giving up on THIS call
+        # and falling back — scaled to the output budget so a legitimately
+        # long Deep-mode section isn't cut off, but a stuck/rate-limited call
+        # doesn't get to eat the whole request timeout by itself.
+        per_call_timeout = min(180.0, max(60.0, max_tokens / 20.0))
+
         t0 = time.perf_counter()
-        resp = self.client.messages.create(**kwargs)
+        try:
+            resp = self.client.messages.create(**kwargs, timeout=per_call_timeout)
+        except (anthropic.APITimeoutError, anthropic.RateLimitError,
+                anthropic.OverloadedError, anthropic.InternalServerError,
+                anthropic.APIConnectionError) as e:
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            if not settings.gemini_api_key:
+                log.warning(
+                    "Anthropic call failed after %.1fs (stage=%s model=%s): %s — "
+                    "no GEMINI_API_KEY set, cannot fall back, re-raising",
+                    latency_ms / 1000, self.stage, self.model, type(e).__name__,
+                )
+                raise
+            log.warning(
+                "Anthropic call failed after %.1fs (stage=%s model=%s): %s — "
+                "falling back to Gemini for this call",
+                latency_ms / 1000, self.stage, self.model, type(e).__name__,
+            )
+            fallback_model = settings.gemini_model or "gemini-2.5-flash"
+            gem_text = f"{cache_prefix}\n{user_text or ''}" if cache_prefix else user_text
+            out = self._call_gemini(gem_text, system, max_tokens, content, model=fallback_model)
+            log.warning("Gemini fallback (%s) completed for stage=%s", fallback_model, self.stage)
+            return out
         latency_ms = int((time.perf_counter() - t0) * 1000)
+        # A single call taking this long usually means the Anthropic SDK's own
+        # built-in retry/backoff kicked in underneath us (429 rate limit or a
+        # transient 5xx) — surfacing it here makes that visible in the backend
+        # terminal instead of just a mysterious frontend timeout, since a
+        # multi-call stage like the Writer (6 sequential calls) can blow past
+        # its request timeout even though no single call ever "failed".
+        if latency_ms > 20_000:
+            log.warning(
+                "slow LLM call: stage=%s model=%s latency=%.1fs (>20s often means "
+                "the SDK is silently retrying a rate-limited/5xx response)",
+                self.stage, self.model, latency_ms / 1000,
+            )
 
         # record token usage + dollar cost for this call (best-effort; never
         # raises into the pipeline). resp.usage carries the real counts,
@@ -110,10 +165,20 @@ class LLMClient:
 
         return "\n".join(b.text for b in resp.content if b.type == "text").strip()
 
-    def _call_gemini(self, user_text, system, max_tokens, content) -> str:
+    def _call_gemini(self, user_text, system, max_tokens, content, model: str) -> str:
         """Route the same request to Google Gemini, converting Anthropic-style
-        content blocks (text / document / image) into google-genai Parts."""
+        content blocks (text / document / image) into google-genai Parts.
+        `model` is explicit (rather than always self._gemini_model) so this
+        also works as a mid-call fallback FROM an Anthropic-backed instance,
+        which has no _gemini_model/_gclient of its own until one is needed."""
         from google.genai import types
+
+        if self._gclient is None:
+            try:
+                self._gclient = _build_gemini_client()
+            except Exception as e:
+                log.warning("could not build Gemini fallback client: %s", e)
+                raise
 
         parts = []
         if content is not None:
@@ -148,7 +213,7 @@ class LLMClient:
         for attempt in range(3):
             try:
                 resp = self._gclient.models.generate_content(
-                    model=self._gemini_model,
+                    model=model,
                     contents=parts,
                     config=config,
                 )
@@ -168,8 +233,13 @@ class LLMClient:
         out_tok = getattr(um, "candidates_token_count", 0) or 0
         out_tok += getattr(um, "thoughts_token_count", 0) or 0
         cache_read = getattr(um, "cached_content_token_count", 0) or 0
+        # Attribute to the model actually used, not self.model — when this
+        # runs as a fallback from an Anthropic-backed instance, self.model is
+        # still the Claude model id, and mislabeling would both corrupt the
+        # cost ledger (charging Claude rates for Gemini tokens) and hide that
+        # a fallback happened.
         record_call(
-            self.run_id, self.stage, self.model, in_tok, out_tok, latency_ms,
+            self.run_id, self.stage, model, in_tok, out_tok, latency_ms,
             cache_read=cache_read,
         )
 

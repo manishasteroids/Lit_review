@@ -149,7 +149,7 @@ class SiftPipeline:
         run.extract_stats = self.extractor.full_text_stats
         self.mid.stage = "synthesize"
         emit("synthesize", "Detecting themes, gaps & biases across the papers…")
-        run.synthesis = self.synthesizer.run(run.extractions)
+        run.synthesis = self.synthesizer.run(run.extractions, deep=self.full_text)
         run.stage = "write"
         return run
  
@@ -159,7 +159,8 @@ class SiftPipeline:
         self.main.stage = "write"
         ordered = self._ordered_papers(run)
         extractions_by_idx = {e["idx"]: e for e in run.extractions}
-        run.sections = self.writer.run(run.topic, ordered, extractions_by_idx, run.synthesis or {})
+        run.sections = self.writer.run(run.topic, ordered, extractions_by_idx, run.synthesis or {},
+                                        deep=self.full_text)
         run.stage = "done"
         return run
  
@@ -204,7 +205,7 @@ class SiftPipeline:
         included_exts = [e for e in run.extractions if e.get("idx") in inc]
         self.llm.run_id = run.run_id
         self.llm.stage = "synthesize"
-        run.synthesis = self.synthesizer.run(included_exts)
+        run.synthesis = self.synthesizer.run(included_exts, deep=self.full_text)
         run.sections = {}          # draft literature review is now outdated
         run.stage = "done"
         return run
