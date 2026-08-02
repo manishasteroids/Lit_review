@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
 import PaperChatPanel from "./PaperChatPanel.jsx";
+import { useConfirm } from "./ConfirmModal.jsx";
  
 const COLUMNS = [
   { key: "paper", label: "Paper", always: true, width: 300 },
@@ -45,6 +46,7 @@ export default function SourcesView({
   const [selected, setSelected] = useState(new Set());
   const [showAdd, setShowAdd] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [confirmAsync, confirmModal] = useConfirm();
  
   const editable = typeof onRemove === "function";  // Sources editing wired from App
   const citeNumOf = (idx) => citeOrder.findIndex((p) => p.idx === idx) + 1;
@@ -74,19 +76,23 @@ export default function SourcesView({
  
   const canGenerate = includedCount >= 1 && !busy && !adding && !analysisStale;
  
-  function removeSelected() {
+  async function removeSelected() {
     const ids = allIdx.filter((i) => selected.has(i));
     if (!ids.length) return;
-    if (!window.confirm(
+    const ok = await confirmAsync(
       `Remove ${ids.length} paper${ids.length > 1 ? "s" : ""} from your sources? ` +
-      "They'll be excluded from the synthesis, ranking, knowledge graph, citations and review."
-    )) return;
+      "They'll be excluded from the synthesis, ranking, knowledge graph, citations and review.",
+      { danger: true, confirmLabel: "Remove" }
+    );
+    if (!ok) return;
     onRemove(ids);
     setSelected(new Set());
   }
  
-  function removeOne(idx) {
-    if (!window.confirm("Remove this paper from your sources?")) return;
+  async function removeOne(idx) {
+    const ok = await confirmAsync("Remove this paper from your sources?",
+      { danger: true, confirmLabel: "Remove" });
+    if (!ok) return;
     onRemove([idx]);
     setSelected((prev) => { const n = new Set(prev); n.delete(idx); return n; });
     setDetailPaper(null);
@@ -94,11 +100,11 @@ export default function SourcesView({
  
   async function generate() {
     if (!canGenerate) return;
-    const ok = window.confirm(
-      `Generate the literature review?\n\n` +
-      `• ${includedCount} papers included\n` +
-      (removedCount ? `• ${removedCount} paper${removedCount > 1 ? "s" : ""} removed\n` : "") +
-      (addedCount ? `• ${addedCount} paper${addedCount > 1 ? "s" : ""} manually added\n` : "")
+    const ok = await confirmAsync(
+      `${includedCount} papers included\n` +
+      (removedCount ? `${removedCount} paper${removedCount > 1 ? "s" : ""} removed\n` : "") +
+      (addedCount ? `${addedCount} paper${addedCount > 1 ? "s" : ""} manually added\n` : ""),
+      { title: "Generate the literature review?", confirmLabel: "Generate" }
     );
     if (ok) onGenerate();
   }
@@ -299,6 +305,8 @@ export default function SourcesView({
           cite={citeNumOf(chatPaper.idx)} apiKey={apiKey} model={model}
           onClose={() => setChatPaper(null)} />
       )}
+
+      {confirmModal}
     </div>
   );
 }

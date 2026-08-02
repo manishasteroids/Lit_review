@@ -41,6 +41,32 @@ class ReaderExtractorAgent(Agent):
         "Keep every field grounded in the provided text; use \"n/a\" if truly unknown."
     )
 
+    # Deep mode reads the FULL paper text, not just the abstract — so the
+    # output has to be allowed to actually be longer, or all that extra
+    # signal gets thrown away at this step and Synthesizer/Writer never see
+    # it (this was the root cause of Deep-mode reviews reading almost
+    # identically to Medium: same model tier improvements downstream, but
+    # fed from an equally terse extraction either way).
+    DEEP_SYSTEM = (
+        "You are a reader/extractor agent doing a DEEP read of the full paper text (not just "
+        "the abstract) for a systematic literature review. Extract substantive, detailed "
+        "structured info per paper — use the extra material you were given; don't compress it "
+        "down to the same length you'd use for an abstract-only skim. "
+        "Respond ONLY with a JSON array (no markdown): "
+        '[{"idx":number,'
+        '"method":"the methodology/approach in detail, <=40 words — include model/technique '
+        'names, key parameters or design choices",'
+        '"finding":"the key result(s) in detail, <=45 words — include specific numbers where given",'
+        '"data":"dataset/system/cohort used, with size if stated, or n/a",'
+        '"metrics":"quantitative results (scores, AUROC, p-values, sample sizes, effect sizes) or n/a",'
+        '"limitation":"1-2 substantive limitations the authors note or that are evident",'
+        '"contribution":"the paper\'s main contribution, 2 sentences",'
+        '"relevance":"why this paper matters to the review topic, 1-2 sentences",'
+        '"concepts":[3-5 short concept tags]}]. '
+        "Keep every field grounded in the provided text; use \"n/a\" if truly unknown. Do not "
+        "pad with filler — every extra word should carry real information from the paper."
+    )
+
     # Larger batches = fewer model calls, which matters on free/rate-limited
     # providers (e.g. Gemini) whose limit is requests-per-minute.
     BATCH_SIZE = 20
@@ -51,17 +77,21 @@ class ReaderExtractorAgent(Agent):
 
     full_text_stats = None   # {total, fetched, fell_back, cached} after a Deep run
 
-    def _extract_batch(self, batch: list[dict]) -> list[dict]:
+    def _extract_batch(self, batch: list[dict], full_text: bool = False) -> list[dict]:
         corpus = "\n".join(
             # `_text` (fetched full text) is used in Deep mode; else the abstract.
             f"[#{p['idx']}] {p['title']} ({p.get('year', '?')}). "
             f"{p.get('_text') or p.get('abstract', '')}"
             for p in batch
         )
-        # Output budget scales with batch size so 20 extractions don't truncate.
-        max_tokens = min(8000, 400 * len(batch))
+        # Output budget scales with batch size so extractions don't truncate.
+        # Deep mode's fields are allowed to run much longer (see DEEP_SYSTEM),
+        # so it needs a proportionally bigger per-paper output budget too.
+        per_paper = 900 if full_text else 400
+        max_tokens = min(8000, per_paper * len(batch))
+        system = self.DEEP_SYSTEM if full_text else self.SYSTEM
         try:
-            out = self.llm.call(user_text=f"Papers:\n{corpus}", system=self.SYSTEM, max_tokens=max_tokens)
+            out = self.llm.call(user_text=f"Papers:\n{corpus}", system=system, max_tokens=max_tokens)
             parsed = self.llm.parse_json(out)
         except Exception:
             parsed = []
@@ -130,14 +160,16 @@ class ReaderExtractorAgent(Agent):
             batches = [todo[i:i + size] for i in range(0, len(todo), size)]
             if len(batches) <= 1:
                 for b in batches:
-                    fresh.extend(self._extract_batch(b))
+                    fresh.extend(self._extract_batch(b, full_text=full_text))
                     for p in b:
                         emit(p)
             else:
+                from functools import partial
                 with ThreadPoolExecutor(max_workers=min(self.MAX_WORKERS, len(batches))) as ex:
                     # zip pairs each batch with its result (map preserves order),
                     # so we can emit the titles as each batch finishes.
-                    for b, batch_result in zip(batches, ex.map(self._extract_batch, batches)):
+                    extract_fn = partial(self._extract_batch, full_text=full_text)
+                    for b, batch_result in zip(batches, ex.map(extract_fn, batches)):
                         fresh.extend(batch_result)
                         for p in b:
                             emit(p)
@@ -153,7 +185,7 @@ class ReaderExtractorAgent(Agent):
             if missing:
                 size = batch_size or self.BATCH_SIZE
                 for b in [missing[i:i + size] for i in range(0, len(missing), size)]:
-                    fresh.extend(self._extract_batch(b))
+                    fresh.extend(self._extract_batch(b, full_text=full_text))
                     for p in b:
                         emit(p, "retried")
                 got = {e.get("idx") for e in fresh if e.get("idx") is not None}

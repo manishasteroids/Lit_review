@@ -877,24 +877,31 @@ def export_review(run_id: str, fmt: str, template: str = "ieee",
     """
     from fastapi.responses import Response
     from core import exporters
+    from pipeline.data_analysis import comparison_table, year_distribution
 
     run = get_run(run_id, user_id)
     if not run.sections:
         raise HTTPException(400, "Generate the literature review first.")
 
     papers = _ordered_for_export(run)
+    extractions_by_idx = {e["idx"]: e for e in (run.extractions or [])}
+    ranked_by_idx = {r["idx"]: r for r in ((run.synthesis or {}).get("ranked") or [])}
+    comparison = comparison_table(papers, extractions_by_idx, ranked_by_idx)
+    year_dist = year_distribution(papers)
+
     args = (run.topic, run.sections, papers, run.synthesis or {})
+    kwargs = {"comparison": comparison, "year_dist": year_dist}
     stem = _safe_filename(exporters.review_title(run.sections, run.topic))
 
     try:
         if fmt == "pptx":
-            data = exporters.build_pptx(*args)
+            data = exporters.build_pptx(*args, **kwargs)
             media = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
         elif fmt == "pdf":
-            data = exporters.build_pdf(*args)
+            data = exporters.build_pdf(*args, **kwargs)
             media = "application/pdf"
         elif fmt == "docx":
-            data = exporters.build_docx(*args, template=template)
+            data = exporters.build_docx(*args, template=template, **kwargs)
             media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             stem = f"{stem}_{(template or 'ieee').lower()}"
         else:
