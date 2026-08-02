@@ -34,9 +34,28 @@ function SearchPlan({ reform }) {
     background: "var(--panel2, #f3f4f8)", border: "1px solid var(--line)",
     borderRadius: 6, padding: "3px 9px", margin: "0 6px 6px 0", color: "var(--txt)",
   };
+  const domain = reform.domain;
   return (
     <div style={{ marginBottom: 24 }}>
-      <div className="eyebrow" style={{ marginBottom: 8 }}>Search plan — Query Reformulator</div>
+      <div className="eyebrow" style={{ marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
+        Search plan — Query Reformulator
+        {domain && (
+          <span
+            title={domain === "biomedical"
+              ? "Classified as biomedical — eligible for the pre-indexed fast search path"
+              : "Classified outside the pre-indexed domain — uses live search"}
+            style={{
+              fontFamily: "'JetBrains Mono',monospace", fontSize: 9.5, fontWeight: 600,
+              textTransform: "none", letterSpacing: 0, borderRadius: 5, padding: "2px 7px",
+              color: domain === "biomedical" ? "var(--green)" : "var(--muted)",
+              background: domain === "biomedical" ? "var(--green-soft)" : "var(--panel2, #f3f4f8)",
+              border: domain === "biomedical" ? "none" : "1px solid var(--line)",
+            }}
+          >
+            {domain === "biomedical" ? "biomedical · fast path" : "domain: other"}
+          </span>
+        )}
+      </div>
       {reform.scope && (
         <div style={{ fontSize: 13, lineHeight: 1.5, marginBottom: 10, color: "var(--muted)" }}>
           <b style={{ color: "var(--txt)" }}>Scope.</b> {reform.scope}

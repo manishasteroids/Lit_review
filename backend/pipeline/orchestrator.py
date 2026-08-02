@@ -121,7 +121,8 @@ class SiftPipeline:
         self.fast.stage = "search"
         run.papers = self.searcher.run(
             topic, queries, limit=self.search_limit,
-            terms=run.reform.get("terms"), scope=run.reform.get("scope"))
+            terms=run.reform.get("terms"), scope=run.reform.get("scope"),
+            domain=run.reform.get("domain"))
         emit("search", f"Found {len(run.papers)} papers — aggregating results…")
  
         run.stage = "filter"

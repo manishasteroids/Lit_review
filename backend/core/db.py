@@ -120,6 +120,8 @@ def init_db() -> None:
     init_news_table()
     from core.projects import init_projects_tables
     init_projects_tables()
+    from core.corpus import init_corpus_table
+    init_corpus_table()
 
 
 # ── Write ───────────────────────────────────────────────────────────────────
