@@ -21,7 +21,7 @@ import re
 from datetime import datetime, timezone
 from typing import Optional
 
-from core.db import _conn, _PH
+from core.db import _conn, _PH, _add_column
 
 
 def init_corpus_table() -> None:
@@ -44,6 +44,11 @@ def init_corpus_table() -> None:
             )
             """
         )
+        
+        # Backfill columns on any pre-existing 'papers' table (CREATE TABLE
+        # IF NOT EXISTS won't add columns to a table that already exists).
+        _add_column(conn, "papers", "domain", "TEXT DEFAULT 'other'")
+        _add_column(conn, "papers", "year", "INTEGER")
         conn.execute("CREATE INDEX IF NOT EXISTS ix_papers_domain ON papers(domain)")
         conn.execute("CREATE INDEX IF NOT EXISTS ix_papers_year ON papers(year)")
 
