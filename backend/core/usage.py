@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from core.db import _conn, _PH, _AUTO_ID, _existing_columns
-from core.pricing import cost_usd, tier_of, PRICES_EFFECTIVE
+from core.pricing import cost_usd, tier_of, PRICES_EFFECTIVE, IMAGE_MODEL, IMAGE_PRICE_USD
 
 
 # extra columns added after the first version — migrated in on startup
@@ -84,6 +84,27 @@ def record_call(
                  c, latency_ms or 0, datetime.now(timezone.utc).isoformat()),
             )
     except Exception:  # noqa: BLE001 — a broken ledger must never break a run
+        pass
+
+
+def record_image_call(session_id: Optional[str], stage: str, count: int = 1) -> None:
+    """Log slide-illustration image generations (flat per-image price, see
+    core.pricing.IMAGE_PRICE_USD) — same ledger as text calls, so it shows up
+    in the existing by-model / by-stage / trend breakdowns without any new UI."""
+    if not session_id or count <= 0:
+        return
+    try:
+        c = round(IMAGE_PRICE_USD * count, 6)
+        with _conn() as conn:
+            conn.execute(
+                f"INSERT INTO llm_calls "
+                f"(session_id,stage,model,tier,in_tok,out_tok,cache_write_tok,cache_read_tok,"
+                f"web_searches,cost_usd,latency_ms,created_at) "
+                f"VALUES ({_PH},{_PH},{_PH},{_PH},0,0,0,0,0,{_PH},0,{_PH})",
+                (session_id, stage, IMAGE_MODEL, tier_of(IMAGE_MODEL),
+                 c, datetime.now(timezone.utc).isoformat()),
+            )
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -191,13 +212,29 @@ def get_usage_trend(user_id: str, days: int = 30, tz_offset_min: int = 0) -> dic
             (user_id,),
         ).fetchall()
 
+        # This calendar month's spend so far, in the user's LOCAL timezone —
+        # computed directly in SQL (not derived from by_day, which is capped
+        # at `days` and would silently under-count once a month runs longer
+        # than that window). "Pending amount" in the UI = this figure; there's
+        # no real billing/subscription system, so it's presented as spend
+        # tracking, not an amount owed.
+        this_month = conn.execute(
+            "SELECT COUNT(*) calls, COALESCE(SUM(c.cost_usd),0) cost_usd "
+            "FROM llm_calls c JOIN sessions s ON c.session_id = s.id "
+            f"WHERE s.user_id = {_PH} "
+            "AND substr(datetime(c.created_at, ?), 1, 7) = substr(datetime('now', ?), 1, 7)",
+            (user_id, tz_mod, tz_mod),
+        ).fetchone()
+
     days_asc = [dict(r) for r in by_day][::-1]   # oldest -> newest for charting
     sessions_asc = [dict(r) for r in by_session][::-1]
     total_d = dict(total) if total else {"calls": 0, "in_tok": 0, "out_tok": 0, "cost_usd": 0}
     total_d.setdefault("latency_ms", 0)
+    this_month_d = dict(this_month) if this_month else {"calls": 0, "cost_usd": 0}
     return {
         "prices_effective": PRICES_EFFECTIVE,
         "total": total_d,
+        "this_month": this_month_d,
         "by_day": days_asc,
         "by_session": sessions_asc,
         "by_stage": [dict(r) for r in by_stage],

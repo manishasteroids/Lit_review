@@ -128,26 +128,119 @@ def reference_list(papers: list[dict]) -> list[dict]:
 # ── PPTX ───────────────────────────────────────────────────────────────────
 
 def build_pptx(topic: str, sections: dict, papers: list[dict], synthesis: dict,
-                comparison: list[dict] | None = None, year_dist: list[dict] | None = None) -> bytes:
+                comparison: list[dict] | None = None, year_dist: list[dict] | None = None,
+                images: dict[str, bytes] | None = None,
+                slide_bullets: dict[str, list[str]] | None = None) -> bytes:
+    """`images` (optional, opt-in, costs money — see core/image_gen.py) maps a
+    SECTION_ORDER key ("intro", "synthesis", ...) to a generated illustration;
+    that section's FIRST slide gets a narrower bullet column plus the image,
+    everything else is unchanged when omitted (the normal, free export).
+
+    `slide_bullets` (optional — see agents/slide_writer.py) maps a section key
+    to presentation-native bullets for that section, replacing the default
+    mechanical sentence-split of the report prose. A section missing from
+    this dict (call failed, or the caller didn't generate it) just falls back
+    to the old behavior, so this is always safe to omit or partially fill."""
     from pptx import Presentation
     from pptx.util import Inches, Pt
     from pptx.dml.color import RGBColor
     from pptx.chart.data import CategoryChartData
     from pptx.enum.chart import XL_CHART_TYPE
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.oxml.ns import qn
 
     prs = Presentation()
     prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)   # 16:9
     accent = RGBColor(*ACCENT)
     link_rgb = RGBColor(*LINK_COLOR)
+    accent_light = RGBColor(*(min(255, c + 130) for c in ACCENT))
+    accent_mid = RGBColor(*(min(255, c + 65) for c in ACCENT))
     title = review_title(sections, topic)
     cite_urls = citation_urls(papers)
 
-    def bullets_slide(heading, bullets, note=None, linkify=False):
+    def _no_line(shape):
+        shape.line.fill.background()
+
+    def _no_dashed(shape):
+        """Dashed outline, no fill — used for the 'gaps' motif to visually
+        read as open/incomplete rather than solid."""
+        shape.fill.background()
+        shape.line.color.rgb = accent
+        shape.line.width = Pt(2.5)
+        ln = shape.line._get_or_add_ln()
+        dash = ln.makeelement(qn("a:prstDash"), {"val": "dash"})
+        ln.append(dash)
+
+    def draw_motif(s, key):
+        """A small set of free, programmatic vector diagrams — one per
+        section type — drawn with plain pptx autoshapes. No AI model, no
+        cost, always available (unlike the opt-in AI illustration below,
+        which overrides this when the caller supplies a real image)."""
+        x, y, size = Inches(9.3), Inches(2.6), Inches(3.2)
+        try:
+            if key == "abstract":
+                # a ring — "the whole picture, at a glance"
+                shp = s.shapes.add_shape(MSO_SHAPE.DONUT, x, y, size, size)
+                shp.fill.solid(); shp.fill.fore_color.rgb = accent_light
+                _no_line(shp)
+            elif key == "intro":
+                # narrowing bars — scoping down into the topic
+                widths = [size, size * 0.72, size * 0.46]
+                colors = [accent_light, accent_mid, accent]
+                for i, (w, col) in enumerate(zip(widths, colors)):
+                    bar = s.shapes.add_shape(
+                        MSO_SHAPE.ROUNDED_RECTANGLE,
+                        x + (size - w) / 2, y + Inches(0.05) + i * Inches(1.05), w, Inches(0.75))
+                    bar.fill.solid(); bar.fill.fore_color.rgb = col
+                    _no_line(bar)
+            elif key == "synthesis":
+                # three overlapping circles — themes converging
+                r = size * 0.62
+                offs = [(0, 0, accent_light), (size - r, 0, accent_mid), (size / 2 - r / 2, size - r, accent)]
+                for dx, dy, col in offs:
+                    c = s.shapes.add_shape(MSO_SHAPE.OVAL, x + dx, y + dy, r, r)
+                    c.fill.solid(); c.fill.fore_color.rgb = col
+                    _no_line(c)
+            elif key == "gaps":
+                # a dashed, unfilled ring — something open/incomplete
+                shp = s.shapes.add_shape(MSO_SHAPE.OVAL, x + size * 0.1, y + size * 0.1,
+                                          size * 0.8, size * 0.8)
+                _no_dashed(shp)
+            elif key == "future":
+                # chevrons pointing forward — next steps
+                for i in range(3):
+                    w = size * 0.42
+                    chev = s.shapes.add_shape(
+                        MSO_SHAPE.CHEVRON, x + i * (w * 0.72), y + size * 0.35, w, size * 0.3)
+                    chev.fill.solid()
+                    chev.fill.fore_color.rgb = [accent_light, accent_mid, accent][i]
+                    _no_line(chev)
+        except Exception:
+            pass  # a motif is a nice-to-have, never worth failing the export over
+
+    def bullets_slide(heading, bullets, note=None, linkify=False, image_bytes=None, motif_key=None):
         s = prs.slides.add_slide(prs.slide_layouts[1])
         s.shapes.title.text = heading
         s.shapes.title.text_frame.paragraphs[0].runs[0].font.size = Pt(30)
         s.shapes.title.text_frame.paragraphs[0].runs[0].font.color.rgb = accent
-        body = s.placeholders[1].text_frame
+        body_ph = s.placeholders[1]
+        if image_bytes:
+            # Narrow the bullet column to make room for the illustration on
+            # the right instead of the usual full-width text block.
+            body_ph.left, body_ph.top = Inches(0.5), Inches(1.6)
+            body_ph.width, body_ph.height = Inches(6.9), Inches(5.4)
+            try:
+                s.shapes.add_picture(io.BytesIO(image_bytes), Inches(7.8), Inches(1.6),
+                                      width=Inches(5.0), height=Inches(5.0))
+            except Exception:
+                pass  # a corrupt/unsupported image should never break the export
+        elif motif_key:
+            # Free vector fallback/default — narrower column, smaller motif
+            # (it's an accent, not a full illustration).
+            body_ph.left, body_ph.top = Inches(0.5), Inches(1.6)
+            body_ph.width, body_ph.height = Inches(8.3), Inches(5.4)
+            draw_motif(s, motif_key)
+        body = body_ph.text_frame
         body.word_wrap = True
         first = True
         for b in bullets:
@@ -188,18 +281,34 @@ def build_pptx(topic: str, sections: dict, papers: list[dict], synthesis: dict,
         text = (sections or {}).get(key)
         if not text:
             continue
-        chunks = _paras(text)
-        # split long sections across slides (max ~5 bullets each)
-        bullets = []
-        for c in chunks:
-            for sent in re.split(r"(?<=[.!?])\s+", c):
-                sent = sent.strip()
-                if len(sent) > 12:
-                    bullets.append(sent if len(sent) <= 220 else sent[:217] + "…")
+        # Prefer slide-native bullets (agents/slide_writer.py, Gemini) when the
+        # caller supplied them — actual presentation-style points instead of
+        # academic sentences mechanically chopped out of the report prose.
+        # Falls back to the old sentence-split for any section that wasn't
+        # rewritten (call failed, rate-limited, or the caller opted out).
+        written = [_sanitize(b) for b in (slide_bullets or {}).get(key, []) if (b or "").strip()]
+        if written:
+            bullets = written
+        else:
+            chunks = _paras(text)
+            # split long sections across slides (max ~5 bullets each)
+            bullets = []
+            for c in chunks:
+                for sent in re.split(r"(?<=[.!?])\s+", c):
+                    sent = sent.strip()
+                    if len(sent) > 12:
+                        bullets.append(sent if len(sent) <= 220 else sent[:217] + "…")
+        section_image = (images or {}).get(key)
         for n in range(0, len(bullets), 5):
             part = bullets[n:n + 5]
             head = label if n == 0 else f"{label} (cont.)"
-            bullets_slide(head, part, linkify=True)
+            bullets_slide(
+                head, part, linkify=True,
+                image_bytes=section_image if n == 0 else None,
+                # Free vector motif by default; the AI image (if present)
+                # takes priority — bullets_slide only draws one or the other.
+                motif_key=key if (n == 0 and not section_image) else None,
+            )
 
     # Themes & gaps from the synthesis
     themes = [_sanitize(t) for t in ((synthesis or {}).get("themes") or [])]

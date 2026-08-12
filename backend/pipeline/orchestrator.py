@@ -44,6 +44,8 @@ class RunState:
     stage: str = "query"
     mode: Optional[str] = None      # search mode, so later stages reuse its models
     extract_stats: Optional[dict] = None   # full-text coverage for Deep runs
+    slide_images: dict = field(default_factory=dict)  # section key -> generated image bytes (opt-in, cached so repeat exports don't re-charge)
+    slide_bullets: dict = field(default_factory=dict)  # section key -> Gemini-written slide bullets (cached so repeat pptx exports don't re-call Gemini)
 
 
 RUNS: dict[str, RunState] = {}

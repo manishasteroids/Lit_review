@@ -62,5 +62,10 @@ class Settings:
     # SQLite path — overridable via DB_PATH env var for cloud deployment
     db_path: str = os.environ.get("DB_PATH", str(Path(__file__).parent.parent / "sift.db"))
 
+    # Where locally-uploaded source files (PDF/DOCX added via Sources >
+    # "Upload a file") are stored on disk, keyed by run id. Overridable via
+    # UPLOADS_DIR for deployments with a mounted/persistent volume.
+    uploads_dir: str = os.environ.get("UPLOADS_DIR", str(Path(__file__).parent.parent / "data" / "uploads"))
+
 
 settings = Settings()

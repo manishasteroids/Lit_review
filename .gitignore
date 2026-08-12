@@ -26,3 +26,7 @@ _nd*.jpg
 *.db
 *.sqlite
 *.sqlite3
+
+# User-uploaded source files (Sources > "Upload a file") — real user
+# documents, not source code; never belongs in the repo.
+backend/data/

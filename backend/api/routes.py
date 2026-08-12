@@ -8,7 +8,7 @@ import json
 import re
 from datetime import datetime, timezone
  
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
  
@@ -352,8 +352,200 @@ def resolve_paper(run_id: str, body: ResolveBody, user_id: str = Depends(require
             dupe = True
         c["duplicate"] = dupe
     return {"candidates": candidates}
- 
- 
+
+
+@router.get("/runs/{run_id}/papers/{idx}/pdf")
+def paper_pdf(run_id: str, idx: int, user_id: str = Depends(require_user)):
+    """Serve a paper's raw PDF bytes for the in-app read-only viewer (Phase 1
+    of paper annotation — see core/paper_text.py). Same open-access lookup
+    Paper Chat already uses server-side (direct link, or Unpaywall via DOI);
+    this just exposes it to the browser instead of only feeding it to a
+    model. 404 if the paper has no reachable open-access copy — same
+    "fell back to abstract" cases already surfaced elsewhere in the UI."""
+    from fastapi.responses import Response
+    from core.paper_text import fetch_paper_pdf
+
+    run = get_run(run_id, user_id)
+    paper = next((p for p in run.papers if p.get("idx") == idx), None)
+    if not paper:
+        raise HTTPException(404, "Paper not found in this run.")
+
+    # Locally-uploaded sources (Sources > "Upload a file") have their own file
+    # on disk instead of a fetchable URL — serve that directly. A .docx upload
+    # has no PDF to show; say so explicitly rather than a generic 404.
+    local_path = paper.get("local_file")
+    if local_path:
+        import os
+        full_path = os.path.join(settings.uploads_dir, local_path)
+        if not local_path.lower().endswith(".pdf"):
+            raise HTTPException(404, "This source was uploaded as a Word document — in-app PDF preview isn't available for it yet.")
+        if not os.path.isfile(full_path):
+            raise HTTPException(404, "The uploaded file for this source is missing.")
+        with open(full_path, "rb") as f:
+            data = f.read()
+        return Response(content=data, media_type="application/pdf")
+
+    data = fetch_paper_pdf(paper.get("url"))
+    if not data:
+        raise HTTPException(404, "No open-access PDF found for this paper.")
+    return Response(content=data, media_type="application/pdf")
+
+
+class AnnotationBody(BaseModel):
+    kind: str            # "highlight" | "underline" | "comment"
+    page: int
+    rects: list[dict]    # [{x,y,w,h}, ...] in PDF-point space at scale=1
+    color: str | None = None
+    snippet: str | None = None   # the selected text
+    comment: str | None = None   # only for kind == "comment"
+
+
+def _paper_or_404(run, idx: int) -> dict:
+    paper = next((p for p in run.papers if p.get("idx") == idx), None)
+    if not paper:
+        raise HTTPException(404, "Paper not found in this run.")
+    return paper
+
+
+@router.get("/runs/{run_id}/papers/{idx}/annotations")
+def get_annotations(run_id: str, idx: int, user_id: str = Depends(require_user)):
+    """List saved highlights/underlines/comments for one paper (Phase 2 of
+    in-app PDF reading). Annotations are keyed by paper identity, not run —
+    see core.annotations.paper_key_of — so they follow the paper if it's
+    re-added to a different run."""
+    from core.annotations import list_annotations, paper_key_of
+
+    run = get_run(run_id, user_id)
+    paper = _paper_or_404(run, idx)
+    return {"annotations": list_annotations(user_id, paper_key_of(paper))}
+
+
+@router.post("/runs/{run_id}/papers/{idx}/annotations")
+def create_annotation(run_id: str, idx: int, body: AnnotationBody, user_id: str = Depends(require_user)):
+    from core.annotations import add_annotation, paper_key_of
+
+    run = get_run(run_id, user_id)
+    paper = _paper_or_404(run, idx)
+    if body.kind not in ("highlight", "underline", "comment"):
+        raise HTTPException(400, "kind must be highlight, underline, or comment.")
+    if not body.rects:
+        raise HTTPException(400, "An annotation needs at least one rect.")
+    ann = add_annotation(
+        user_id, paper_key_of(paper), body.kind, body.page, body.rects,
+        color=body.color, snippet=body.snippet, comment=body.comment,
+    )
+    if not ann:
+        raise HTTPException(500, "Couldn't save that annotation.")
+    return ann
+
+
+@router.delete("/runs/{run_id}/papers/{idx}/annotations/{annotation_id}")
+def remove_annotation(run_id: str, idx: int, annotation_id: int, user_id: str = Depends(require_user)):
+    from core.annotations import delete_annotation, paper_key_of
+
+    run = get_run(run_id, user_id)
+    paper = _paper_or_404(run, idx)
+    ok = delete_annotation(user_id, paper_key_of(paper), annotation_id)
+    if not ok:
+        raise HTTPException(404, "Annotation not found.")
+    return {"ok": True}
+
+
+@router.post("/runs/{run_id}/upload_paper")
+async def upload_paper(
+    run_id: str,
+    file: UploadFile = File(...),
+    title: str | None = Form(None),
+    api_key: str | None = Form(None),
+    model: str | None = Form(None),
+    notes: str | None = Form(None),  # JSON-encoded {idx: note} — same shape as SynthesizeBody.notes
+    user_id: str = Depends(require_user),
+):
+    """Add a source from a locally-uploaded PDF or DOCX file — for papers
+    that aren't discoverable through the search/lookup path (unpublished
+    drafts, paywalled scans the user already has, internal reports). Text is
+    extracted locally, run through the same Reader & Extractor as every other
+    source, and the original file is kept on disk so the in-app PDF viewer
+    can show it back (PDFs only; DOCX has no in-app preview yet)."""
+    import os
+    import re as _re
+    from core.paper_text import docx_bytes_to_text, pdf_bytes_to_text
+
+    run = get_run(run_id, user_id)
+    name = file.filename or "upload"
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in (".pdf", ".docx"):
+        raise HTTPException(400, "Only PDF and DOCX files are supported.")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "That file appears to be empty.")
+    max_bytes = 25_000_000
+    if len(data) > max_bytes:
+        raise HTTPException(400, "File is too large (25MB limit).")
+
+    text = pdf_bytes_to_text(data) if ext == ".pdf" else docx_bytes_to_text(data)
+    if not text or not text.strip():
+        raise HTTPException(400, "Couldn't extract any text from that file — it may be a scanned image without a text layer.")
+
+    guessed_title = (title or "").strip()
+    if not guessed_title:
+        # Fall back to the first non-trivial line of the extracted text, else the filename.
+        for line in text.splitlines():
+            line = line.strip()
+            if 8 <= len(line) <= 200:
+                guessed_title = line
+                break
+        if not guessed_title:
+            guessed_title = os.path.splitext(name)[0]
+
+    paper = {
+        "title": guessed_title,
+        "authors": "",
+        "year": None,
+        "venue": "uploaded file",
+        "abstract": text[:1500],
+        "url": None,
+        "source": "upload",
+    }
+    if _is_duplicate(run, paper):
+        raise HTTPException(409, "A source with this title is already in your sources.")
+
+    pipeline = SiftPipeline(api_key=api_key, model=model, mode=run.mode)
+    # Assign the idx the same way add_paper() does, so the saved file can be
+    # named after it and matched back up after pipeline.add_paper() appends.
+    new_idx = max((p.get("idx", -1) for p in run.papers), default=-1) + 1
+    # Feed the full extracted text straight to the extractor (reader_extractor
+    # reads `_text` before falling back to `abstract`) — skips a re-fetch that
+    # would fail anyway since there's no URL, and Deep mode gets full-text
+    # depth on this source too instead of only the excerpt above.
+    paper["_text"] = text[:6000]
+
+    try:
+        res = pipeline.add_paper(run, paper)
+    except Exception as e:
+        raise HTTPException(502, f"Adding paper failed: {e}")
+
+    # Persist the raw file to disk, named by this run + the idx add_paper()
+    # just assigned, so paper_pdf() can serve it back for the PDF viewer.
+    safe_name = _re.sub(r"[^A-Za-z0-9_.-]+", "_", name)[-80:]
+    run_dir = os.path.join(settings.uploads_dir, run_id)
+    os.makedirs(run_dir, exist_ok=True)
+    stored_name = f"{new_idx}_{safe_name}"
+    with open(os.path.join(run_dir, stored_name), "wb") as f:
+        f.write(data)
+    res["paper"]["local_file"] = os.path.join(run_id, stored_name)
+    # add_paper() appended `paper` (the same dict object) into run.papers, so
+    # updating res["paper"] in place keeps run.papers / run.approved_papers in sync.
+
+    try:
+        notes_dict = json.loads(notes) if notes else None
+    except Exception:
+        notes_dict = None
+    _persist_done(run, user_id, notes=notes_dict)
+    return res
+
+
 @router.post("/runs/{run_id}/add_paper")
 def add_paper(run_id: str, body: AddPaperBody, user_id: str = Depends(require_user)):
     """Add one resolved paper and run extraction on it. Marks downstream
@@ -868,12 +1060,18 @@ def _sections_from_markdown(md: str, title: str) -> dict:
 
 
 @router.get("/runs/{run_id}/export/{fmt}")
-def export_review(run_id: str, fmt: str, template: str = "ieee",
+def export_review(run_id: str, fmt: str, template: str = "ieee", illustrate: bool = False,
                   user_id: str = Depends(require_user)):
     """Download the written review as .pptx / .pdf / .docx.
 
     Built locally from content the pipeline already produced — no LLM calls,
     so exporting is free. `template` applies to docx: ieee | arxiv.
+
+    `illustrate` (pptx only) is an explicit opt-in that costs real money — it
+    generates one AI illustration per section (core/image_gen.py) via Gemini's
+    image model. Images are cached on the run (RunState.slide_images) so
+    re-downloading the same run's deck doesn't regenerate/recharge; a section
+    whose image generation fails just exports as plain text, same as today.
     """
     from fastapi.responses import Response
     from core import exporters
@@ -892,6 +1090,48 @@ def export_review(run_id: str, fmt: str, template: str = "ieee",
     args = (run.topic, run.sections, papers, run.synthesis or {})
     kwargs = {"comparison": comparison, "year_dist": year_dist}
     stem = _safe_filename(exporters.review_title(run.sections, run.topic))
+
+    if fmt == "pptx":
+        # Slide-native bullets (agents/slide_writer.py, Gemini — free tier,
+        # same as extraction) instead of the old mechanical sentence-split.
+        # Cached on the run so repeat downloads don't re-call the model.
+        # Best-effort: any section that fails just falls back inside
+        # build_pptx() to the sentence-split, so this can never break export.
+        try:
+            from agents.slide_writer import SlideWriterAgent
+            from concurrent.futures import ThreadPoolExecutor
+            missing = [(k, l) for k, l in exporters.SECTION_ORDER
+                       if (run.sections or {}).get(k) and k not in run.slide_bullets]
+            if missing:
+                writer = SlideWriterAgent(LLMClient(
+                    model=settings.gemini_model or "gemini-2.5-flash",
+                    run_id=run_id, stage="slide_write"))
+                def _write(item):
+                    k, label = item
+                    return k, writer.run(label, run.sections[k], run.topic)
+                with ThreadPoolExecutor(max_workers=min(4, len(missing))) as ex:
+                    for k, bullets in ex.map(_write, missing):
+                        if bullets:
+                            run.slide_bullets[k] = bullets
+        except Exception:
+            pass  # export still works via the mechanical fallback
+        kwargs["slide_bullets"] = run.slide_bullets
+
+    if fmt == "pptx" and illustrate:
+        from core.image_gen import build_prompt, generate_image
+        from core.usage import record_image_call
+        generated = 0
+        for key, label in exporters.SECTION_ORDER:
+            text = (run.sections or {}).get(key)
+            if not text or key in run.slide_images:
+                continue
+            img = generate_image(build_prompt(label, text, run.topic))
+            if img:
+                run.slide_images[key] = img[0]   # (bytes, mime_type) -> keep bytes only
+                generated += 1
+        if generated:
+            record_image_call(run_id, "illustrate", generated)
+        kwargs["images"] = run.slide_images
 
     try:
         if fmt == "pptx":

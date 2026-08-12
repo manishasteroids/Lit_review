@@ -27,6 +27,68 @@ const REQUEST_TIMEOUT_MS = 75_000;
 const WRITE_TIMEOUT_MS = 360_000;
 const WRITE_TIMEOUT_MS_DEEP = 600_000;
 
+// Authenticated GET with the same 401-refresh-retry + real error surfacing as
+// request() below — several GET endpoints (usage trend, etc.) used to bypass
+// this with a raw fetch(...).then(r => r.json()), so an expired token (or any
+// non-2xx) just resolved with a wrong-shaped body or silently rejected,
+// leaving the caller's .catch(() => {}) with nothing to show the user and a
+// whole UI section (e.g. the usage trend charts) quietly vanishing.
+async function getJSON(path) {
+  const send = async () => fetch(BASE + path, { headers: await authHeaders() });
+  let res = await send();
+  if (res.status === 401 && (await refreshAccessToken())) {
+    res = await send();
+  }
+  if (!res.ok) {
+    let detail = "Request failed (" + res.status + ")";
+    try {
+      const j = await res.json();
+      if (j.detail) detail = j.detail;
+    } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// Same 401-refresh-retry pattern as getJSON, but for a binary body (the
+// paper PDF viewer needs raw bytes, not JSON) — used by api.getPaperPdf().
+async function getBinary(path) {
+  const send = async () => fetch(BASE + path, { headers: await authHeaders() });
+  let res = await send();
+  if (res.status === 401 && (await refreshAccessToken())) {
+    res = await send();
+  }
+  if (!res.ok) {
+    let detail = res.status === 404
+      ? "No open-access PDF found for this paper."
+      : "Request failed (" + res.status + ")";
+    try {
+      const j = await res.json();
+      if (j.detail) detail = j.detail;
+    } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.arrayBuffer();
+}
+
+// Same 401-refresh-retry pattern as getJSON, but DELETE with no body.
+async function del(path) {
+  const send = async () => fetch(BASE + path, { method: "DELETE", headers: await authHeaders() });
+  let res = await send();
+  if (res.status === 401 && (await refreshAccessToken())) {
+    res = await send();
+  }
+  if (!res.ok) {
+    let detail = "Request failed (" + res.status + ")";
+    try {
+      const j = await res.json();
+      if (j.detail) detail = j.detail;
+    } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
 async function request(path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
   const send = async () => {
     const ctrl = new AbortController();
@@ -50,6 +112,44 @@ async function request(path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
   let res = await send();
   // A 401 usually means the access token expired mid-session — refresh once and
   // retry before surfacing an error to the user.
+  if (res.status === 401 && (await refreshAccessToken())) {
+    res = await send();
+  }
+  if (!res.ok) {
+    let detail = "Request failed (" + res.status + ")";
+    try {
+      const j = await res.json();
+      if (j.detail) detail = j.detail;
+    } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// Multipart POST for file uploads (Sources > "Upload a file") — same
+// 401-refresh-retry + error surfacing as request(), but the body is
+// FormData so the browser sets its own Content-Type (multipart boundary).
+async function postForm(path, formData, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const send = async () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      return await fetch(BASE + path, {
+        method: "POST",
+        headers: await authHeaders(),
+        body: formData,
+        signal: ctrl.signal,
+      });
+    } catch (e) {
+      if (e.name === "AbortError") {
+        throw new Error("Timed out waiting for a response. Try again in a moment.");
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  let res = await send();
   if (res.status === 401 && (await refreshAccessToken())) {
     res = await send();
   }
@@ -133,6 +233,22 @@ export const api = {
   evaluate: (runId, apiKey, model) =>
     request(`/api/runs/${runId}/evaluate`, { api_key: apiKey, model }),
 
+  // Raw PDF bytes for the in-app read-only viewer (Phase 1 of paper
+  // annotation). Throws with a friendly message on 404 (no open-access copy).
+  getPaperPdf: (runId, idx) =>
+    getBinary(`/api/runs/${runId}/papers/${idx}/pdf`),
+
+  // Phase 2 — highlights/underlines/comments made while reading a paper.
+  listAnnotations: (runId, idx) =>
+    getJSON(`/api/runs/${runId}/papers/${idx}/annotations`),
+
+  addAnnotation: (runId, idx, { kind, page, rects, color, snippet, comment }) =>
+    request(`/api/runs/${runId}/papers/${idx}/annotations`,
+      { kind, page, rects, color, snippet, comment }),
+
+  deleteAnnotation: (runId, idx, annotationId) =>
+    del(`/api/runs/${runId}/papers/${idx}/annotations/${annotationId}`),
+
   designExperiments: (runId, apiKey, model) =>
     request(`/api/runs/${runId}/experiments`, { api_key: apiKey, model }),
 
@@ -142,6 +258,17 @@ export const api = {
 
   addPaper: (runId, paper, apiKey, model, notes) =>
     request(`/api/runs/${runId}/add_paper`, { paper, api_key: apiKey, model, notes }),
+
+  // Add a source from a local PDF/DOCX file — extraction runs server-side in
+  // the same call, so this returns {paper, extraction} just like addPaper.
+  uploadPaper: (runId, file, apiKey, model, notes) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (apiKey) fd.append("api_key", apiKey);
+    if (model) fd.append("model", model);
+    if (notes) fd.append("notes", JSON.stringify(notes));
+    return postForm(`/api/runs/${runId}/upload_paper`, fd, WRITE_TIMEOUT_MS);
+  },
 
   reanalyze: (runId, includedIndices, apiKey, model, notes) =>
     request(`/api/runs/${runId}/reanalyze`, {
@@ -204,9 +331,16 @@ export const api = {
   },
 
   // Download the written review as pptx / pdf / docx (template: ieee | arxiv).
-  // Generated server-side from existing content — no LLM cost.
-  downloadExport: async (runId, fmt, template) => {
-    const qs = template ? `?template=${encodeURIComponent(template)}` : "";
+  // Generated server-side from existing content — no LLM cost, UNLESS
+  // `illustrate` is set (pptx only): that's an explicit opt-in that generates
+  // one AI image per section and costs real money — see ExportBar.jsx's cost
+  // disclosure before this is ever called with illustrate=true. Images are
+  // cached server-side per run, so re-downloading doesn't recharge.
+  downloadExport: async (runId, fmt, template, illustrate) => {
+    const params = new URLSearchParams();
+    if (template) params.set("template", template);
+    if (illustrate) params.set("illustrate", "true");
+    const qs = params.toString() ? `?${params.toString()}` : "";
     const res = await fetch(`${BASE}/api/runs/${runId}/export/${fmt}${qs}`, {
       headers: await authHeaders(),
     });
@@ -259,13 +393,11 @@ export const api = {
       "&mode=" + encodeURIComponent(mode || "")).then((r) => r.json()),
 
   // Token usage & cost for a session — no LLM calls
-  getUsage: async (runId) =>
-    fetch(BASE + "/api/sessions/" + runId + "/usage", { headers: await authHeaders() }).then((r) => r.json()),
+  getUsage: (runId) => getJSON("/api/sessions/" + runId + "/usage"),
 
   // Per-day token + cost trend for the signed-in user (grouped in local time)
-  getUsageTrend: async (days = 30) =>
-    fetch(BASE + "/api/usage/trend?days=" + days + "&tz_offset=" + new Date().getTimezoneOffset(),
-      { headers: await authHeaders() }).then((r) => r.json()),
+  getUsageTrend: (days = 30) =>
+    getJSON("/api/usage/trend?days=" + days + "&tz_offset=" + new Date().getTimezoneOffset()),
 
   // ── Projects: folder a line of research (runs + saved papers + notes) ──
   listProjects: async () =>

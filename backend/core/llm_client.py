@@ -247,11 +247,16 @@ class LLMClient:
 
     @staticmethod
     def parse_json(text: str) -> Any:
-        """Models occasionally wrap JSON in prose or code fences. Strip that."""
+        """Models occasionally wrap JSON in prose or code fences, or append
+        trailing commentary after the actual JSON value. Strip fences/leading
+        prose, then parse with raw_decode() — which reads exactly ONE JSON
+        value from the start of the string and stops, ignoring whatever
+        comes after it. The previous approach (slice to the LAST '}'/']' in
+        the whole text, then json.loads the slice) broke with a
+        'JSONDecodeError: Extra data' whenever the model appended any
+        trailing text that itself contained a brace/bracket — raw_decode()
+        can't hit that failure mode since it never looks past the first
+        complete value."""
         t = re.sub(r"```json", "", text, flags=re.I).replace("```", "").strip()
         start = next((i for i, c in enumerate(t) if c in "[{"), 0)
-        t = t[start:]
-        end = max(t.rfind("}"), t.rfind("]"))
-        if end > -1:
-            t = t[: end + 1]
-        return json.loads(t)
+        return json.JSONDecoder().raw_decode(t[start:])[0]

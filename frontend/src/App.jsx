@@ -23,7 +23,7 @@ import { useConfirm } from "./components/ConfirmModal.jsx";
 import {
   RotateCw, AlertTriangle, Sparkles, PenTool,
   BookOpen, Layers, Brain, Network, BarChart3, FlaskConical,
-  Plus, Trash2, Coins, MessageSquare,
+  Plus, Trash2, Coins, MessageSquare, ArrowLeft,
 } from "./components/icons.jsx";
 
 import MethodsPanel from "./components/MethodsPanel.jsx";
@@ -134,6 +134,7 @@ export default function App() {
   const [evalRes, setEvalRes] = useState(null);
   const [experimentPlan, setExperimentPlan] = useState(null);
   const [tab, setTab] = useState("review");
+  const [prevTab, setPrevTab] = useState("review"); // Studio opens full-screen — Back returns here
   const reviewRef = useRef(null);
   const isDone = stage === "done";
 
@@ -346,6 +347,21 @@ export default function App() {
     return np;
   }
 
+  // Same as addPaperToSources, but for a locally-uploaded PDF/DOCX instead of
+  // a resolved search result — extraction happens server-side in one call.
+  async function uploadPaperToSources(file) {
+    const res = await api.uploadPaper(runId, file, apiKey || undefined, model, notes);
+    const np = { ...res.paper, added: true };
+    setPapers((prev) => [...prev, np]);
+    if (res.extraction) {
+      setExtractions((prev) => [...prev.filter((e) => e.idx !== np.idx), res.extraction]);
+    }
+    setIncluded((prev) => ({ ...prev, [np.idx]: true }));
+    setAnalysisStale(true);
+    refreshSessions();
+    return np;
+  }
+
   async function reanalyzeSources() {
     const includedIndices = papers.filter((p) => included[p.idx]).map((p) => p.idx);
     if (includedIndices.length < 1) {
@@ -484,6 +500,47 @@ export default function App() {
     <div className="sm-root">
       {confirmModal}
 
+      {/* Studio opens as a near-full-screen overlay instead of a cramped
+          embedded panel — it's a whole workspace (chat + report/deck/brief
+          generation), not a small side tool. Back returns to whatever tab
+          was showing before Studio was opened. */}
+      {tab === "studio" && isDone && (
+        <div
+          style={{
+            position: "fixed", inset: 0, background: "rgba(20,20,30,.55)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            zIndex: 800, padding: "3vh 3vw",
+          }}
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setTab(prevTab); }}
+        >
+          <div
+            style={{
+              width: "100%", height: "100%", maxWidth: "100%",
+              background: "var(--bg, #f4f5f9)", borderRadius: 14,
+              boxShadow: "0 30px 90px rgba(0,0,0,.35)",
+              display: "flex", flexDirection: "column", overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                display: "flex", alignItems: "center", gap: 10,
+                padding: "12px 18px", borderBottom: "1px solid var(--line)",
+                background: "var(--card, #fff)", flex: "0 0 auto",
+              }}
+            >
+              <button className="btn ghost sm" onClick={() => setTab(prevTab)}>
+                <ArrowLeft size={14} /> Back
+              </button>
+              <span style={{ fontWeight: 700, fontSize: 14.5 }}>Studio</span>
+              <span className="muted tiny">Chat, report, deck & briefing across your sources</span>
+            </div>
+            <div style={{ flex: "1 1 auto", overflow: "auto", padding: 18 }}>
+              <StudioView runId={runId} papers={citeOrder} extractions={extractions} apiKey={apiKey} />
+            </div>
+          </div>
+        </div>
+      )}
+
       {accountTab && (
         <ProfileModal user={session?.user} tab={accountTab} onClose={() => setAccountTab(null)} />
       )}
@@ -551,16 +608,29 @@ export default function App() {
 
             <div className="panel">
               <div className="eyebrow" style={{ marginBottom: 12 }}>Tools</div>
-              {TOOLS.map(([k, Ic, lab]) => (
-                <button
-                  key={k}
-                  className={"tool-item" + (isDone && tab === k ? " on" : "") + (isDone ? "" : " disabled")}
-                  disabled={!isDone}
-                  onClick={() => isDone && setTab(k)}
-                >
-                  <Ic size={14} /> {lab}
-                </button>
-              ))}
+              {TOOLS.map(([k, Ic, lab]) => {
+                // Token usage isn't tied to any one run — it's useful with no
+                // active session too (spend trend, all-time totals) — so it
+                // stays enabled regardless of where the current run is.
+                const enabled = isDone || k === "usage";
+                return (
+                  <button
+                    key={k}
+                    className={"tool-item" + (enabled && tab === k ? " on" : "") + (enabled ? "" : " disabled")}
+                    disabled={!enabled}
+                    onClick={() => {
+                      if (!enabled) return;
+                      // Studio opens as a full-screen overlay (see below) —
+                      // remember what was showing underneath so Back returns
+                      // to it instead of an arbitrary tab.
+                      if (k === "studio" && tab !== "studio") setPrevTab(tab);
+                      setTab(k);
+                    }}
+                  >
+                    <Ic size={14} /> {lab}
+                  </button>
+                );
+              })}
             </div>
 
             {!signedOut && (
@@ -701,7 +771,16 @@ export default function App() {
               </div>
             )}
 
-            {stage === "query" && <QueryInput topic={topic} setTopic={setTopic} busy={busy} onRun={runStart} />}
+            {/* Don't compete with the Token Usage card below: before any run
+                starts, stage stays "query" indefinitely, and Token Usage is
+                the one tab reachable at that point (see `enabled` above) —
+                without this check both the topic-input form AND the usage
+                card would stack in the same column, making usage look like
+                it "doesn't show" until you scroll past the form, or start a
+                run (which permanently moves stage off "query"). */}
+            {stage === "query" && tab !== "usage" && (
+              <QueryInput topic={topic} setTopic={setTopic} busy={busy} onRun={runStart} />
+            )}
 
             {busy && (stage === "reformulate" || stage === "search") && (
               reform ? (
@@ -836,16 +915,15 @@ export default function App() {
                       papers={papers} included={included} scope={reform?.scope}
                       analysisStale={analysisStale} busy={busy}
                       onRemove={removeSources} onAdd={addPaperToSources}
+                      onUpload={uploadPaperToSources}
                       onReanalyze={reanalyzeSources} onGenerate={runWrite}
                       hasReview={Object.keys(sections || {}).length > 0}
                     />
                   )}
-                  {tab === "studio" && (
-                    <StudioView runId={runId} papers={citeOrder}
-                      extractions={extractions} apiKey={apiKey} />
-                  )}
                   {tab === "critique" && <CritiqueView synth={synth} />}
-                  {tab === "graph" && <KnowledgeGraphView concepts={sideModules?.knowledge_graph} citeNum={citeNum} />}
+                  {tab === "graph" && (
+                    <KnowledgeGraphView concepts={sideModules?.knowledge_graph} citeNum={citeNum} papers={citeOrder} />
+                  )}
                   {tab === "data" && (
                     <DataAnalysisView
                       reform={reform}
@@ -855,7 +933,6 @@ export default function App() {
                   )}
                   {tab === "eval" && <EvaluationView evalRes={evalRes} busy={busy} onEvaluate={runEvaluate} />}
                   {tab === "methods" && <MethodsPanel plan={experimentPlan} busy={busy} onDesign={runDesignExperiments} papers={papers} />}
-                  {tab === "usage" && <UsageView runId={runId} />}
                 </div>
 
                 <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -870,6 +947,17 @@ export default function App() {
                   <button className="btn ghost sm" disabled={!citeOrder.length} onClick={() => exportShortlist("csv")}>Export .csv</button>
                   <button className="btn ghost sm" disabled={!citeOrder.length} onClick={() => exportShortlist("bib")}>Export .bib</button>
                 </div>
+              </div>
+            )}
+
+            {/* Token usage stands alone from the pipeline stage — usable with
+                no active run (falls back to the all-time spend trend) or
+                mid-run/done (shows this session's live totals so far). Kept
+                outside the {isDone && ...} block above so it doesn't need a
+                finished run to be reachable. */}
+            {tab === "usage" && (
+              <div className="card">
+                <UsageView runId={runId} />
               </div>
             )}
 

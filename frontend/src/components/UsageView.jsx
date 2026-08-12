@@ -113,14 +113,23 @@ export default function UsageView({ runId }) {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState(null);
 
+  const [trendErr, setTrendErr] = useState(null);
+
   const load = useCallback(() => {
     setErr(null);
+    setTrendErr(null);
     // Only block with a spinner when we have nothing cached to show yet.
     const haveCached = _trendCache != null && (!runId || _usageCache.has(runId));
     setLoading(!haveCached);
     api.getUsageTrend()
       .then((t) => { _trendCache = t; setTrend(t); })
-      .catch(() => {});
+      .catch((e) => {
+        // This used to be swallowed entirely, so the "usage over time" charts
+        // would just silently vanish with no indication why (usually an
+        // expired session token). Surface it instead.
+        console.warn("getUsageTrend failed:", e);
+        setTrendErr(e.message || "Failed to load usage trend");
+      });
     if (!runId) { setUsage(null); setLoading(false); return; }
     api.getUsage(runId)
       .then((u) => { _usageCache.set(runId, u); setUsage(u); })
@@ -157,11 +166,21 @@ export default function UsageView({ runId }) {
         </div>
       )}
 
+      {trendErr && !trend && (
+        <div className="err" style={{ marginBottom: 16 }}>
+          Couldn't load your usage-over-time trend: {trendErr}
+        </div>
+      )}
+
       {/* Your usage over time — across all sessions, independent of the current run */}
       {trend && (
         <div style={{ marginBottom: 22 }}>
           <div style={S.label}>your usage over time</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, margin: "8px 0 14px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, margin: "8px 0 14px" }}>
+            <div style={S.card}>
+              <div style={S.bignum}>{fmtUSD(trend.this_month?.cost_usd)}</div>
+              <div style={S.label}>spent this month</div>
+            </div>
             <div style={S.card}>
               <div style={S.bignum}>{fmtUSD(trend.total.cost_usd)}</div>
               <div style={S.label}>total spent (all runs)</div>
@@ -174,6 +193,11 @@ export default function UsageView({ runId }) {
               <div style={S.bignum}>{trend.total.calls || 0}</div>
               <div style={S.label}>total model calls</div>
             </div>
+          </div>
+          <div className="muted tiny" style={{ margin: "-6px 0 14px" }}>
+            "Spent this month" tracks your actual model-call cost for the current calendar month —
+            Sift doesn't have a billing/subscription plan, so this isn't an amount owed anywhere,
+            just what your API usage has cost so far.
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
             <SeriesChart
