@@ -156,6 +156,8 @@ def init_db() -> None:
     init_projects_tables()
     from core.corpus import init_corpus_table
     init_corpus_table()
+    from core.annotations import init_annotations_table
+    init_annotations_table()
 
 
 # ── Write ───────────────────────────────────────────────────────────────────

@@ -33,6 +33,7 @@ function Ic({ name, size = 16, color, className, style }) {
     case "trash2": return <svg {...c}><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /><line x1="10" y1="11" x2="10" y2="17" /><line x1="14" y1="11" x2="14" y2="17" /></svg>;
     case "coins": return <svg {...c}><circle cx="8" cy="8" r="6" /><path d="M18.09 10.37A6 6 0 1 1 10.34 18" /><path d="M7 6h1v4" /><path d="M16.71 13.88l.7.71-2.82 2.82" /></svg>;
     case "zap": return <svg {...c}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" /></svg>;
+    case "arrow-left": return <svg {...c}><line x1="19" y1="12" x2="5" y2="12" /><polyline points="12 19 5 12 12 5" /></svg>;
     default: return <svg {...c}><circle cx="12" cy="12" r="9" /></svg>;
   }
 }
@@ -63,3 +64,4 @@ export const Clock = (p) => <Ic name="clock" {...p} />;
 export const Coins = (p) => <Ic name="coins" {...p} />;
 export const Zap = (p) => <Ic name="zap" {...p} />;
 export const MessageSquare = (p) => <Ic name="message-square" {...p} />;
+export const ArrowLeft = (p) => <Ic name="arrow-left" {...p} />;

@@ -39,6 +39,14 @@ CACHE_READ_MULT = 0.10
 # Server-side tools billed per request, on TOP of tokens.
 WEB_SEARCH_PER_1K = 10.0  # USD per 1,000 web_search requests
 
+# Slide illustrations (opt-in, see core/image_gen.py). Flat per-image price —
+# Gemini bills image output as a fixed token count per generation, not
+# proportional to prompt length, so a flat rate is accurate enough here.
+# NOTE: gemini-2.5-flash-image is slated to retire 2026-10-02 per Google's
+# announcement — re-check this before then.
+IMAGE_MODEL = "gemini-2.5-flash-image"
+IMAGE_PRICE_USD = 0.039
+
 
 def _lookup(model: str) -> Tuple[float, float, str]:
     if model in _PRICING:

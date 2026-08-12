@@ -10,7 +10,7 @@ grow across runs instead of being rebuilt per-review.
 from collections import defaultdict
 
 
-def build_knowledge_graph(extractions: list[dict], top_n: int = 8) -> list[dict]:
+def build_knowledge_graph(extractions: list[dict], top_n: int = 18) -> list[dict]:
     concept_map: dict[str, dict] = defaultdict(lambda: {"label": "", "papers": []})
     for e in extractions:
         for c in e.get("concepts", []):

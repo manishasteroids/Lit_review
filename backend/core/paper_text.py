@@ -96,6 +96,31 @@ def _pdf_to_text(data: bytes) -> str:
         return ""
 
 
+# Public wrappers for locally-uploaded files (Sources > "Upload a file") —
+# same extraction, just named for an external caller instead of the
+# URL-fetch pipeline above.
+def pdf_bytes_to_text(data: bytes) -> str:
+    return _pdf_to_text(data)
+
+
+def docx_bytes_to_text(data: bytes) -> str:
+    try:
+        import docx
+    except Exception:
+        return ""
+    try:
+        doc = docx.Document(io.BytesIO(data))
+        parts = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    if cell.text and cell.text.strip():
+                        parts.append(cell.text.strip())
+        return "\n".join(parts).strip()
+    except Exception:
+        return ""
+
+
 _DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>&]+", re.I)
 
 

@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
 import PaperChatPanel from "./PaperChatPanel.jsx";
+import PdfViewer from "./PdfViewer.jsx";
 import { useConfirm } from "./ConfirmModal.jsx";
  
 const COLUMNS = [
@@ -32,7 +33,7 @@ export default function SourcesView({
   citeOrder, extractions, ranked = [], extractStats, runId, apiKey, model,
   papers = [], included = {}, scope,
   analysisStale = false, busy = false,
-  onRemove, onAdd, onReanalyze, onGenerate, hasReview = false,
+  onRemove, onAdd, onUpload, onReanalyze, onGenerate, hasReview = false,
 }) {
   const extByIdx = {};
   (extractions || []).forEach((e) => (extByIdx[e.idx] = e));
@@ -43,6 +44,7 @@ export default function SourcesView({
   const [visible, setVisible] = useState(new Set(DEFAULT_ON));
   const [chatPaper, setChatPaper] = useState(null);
   const [detailPaper, setDetailPaper] = useState(null);
+  const [readPaper, setReadPaper] = useState(null);
   const [selected, setSelected] = useState(new Set());
   const [showAdd, setShowAdd] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -236,6 +238,7 @@ export default function SourcesView({
                           <div className="pt-meta">{p.authors || "—"} · {p.year || "—"} · {p.venue || "preprint"}</div>
                           <div className="pt-actions">
                             {p.url && <a href={p.url} target="_blank" rel="noreferrer" className="pt-link">link</a>}
+                            <button className="pt-chat-btn" onClick={() => setReadPaper(p)}>read</button>
                             <button className="pt-chat-btn" onClick={() => setChatPaper(p)}>chat</button>
                             {editable && <button className="pt-chat-btn" onClick={() => setDetailPaper(p)}>details</button>}
                             {editable && <button className="pt-chat-btn" onClick={() => removeOne(p.idx)}>remove</button>}
@@ -287,6 +290,17 @@ export default function SourcesView({
               setAdding(false);
             }
           }}
+          onUpload={onUpload && (async (file) => {
+            setAdding(true);
+            try {
+              await onUpload(file);
+              setShowAdd(false);
+            } catch (e) {
+              throw e;   // surfaced inside the modal
+            } finally {
+              setAdding(false);
+            }
+          })}
         />
       )}
  
@@ -297,6 +311,7 @@ export default function SourcesView({
           onClose={() => setDetailPaper(null)}
           onRemove={editable ? () => removeOne(detailPaper.idx) : null}
           onChat={() => { setChatPaper(detailPaper); setDetailPaper(null); }}
+          onRead={() => { setReadPaper(detailPaper); setDetailPaper(null); }}
         />
       )}
  
@@ -306,18 +321,24 @@ export default function SourcesView({
           onClose={() => setChatPaper(null)} />
       )}
 
+      {readPaper && (
+        <PdfViewer runId={runId} paper={readPaper} onClose={() => setReadPaper(null)} />
+      )}
+
       {confirmModal}
     </div>
   );
 }
  
 /* ── Add paper modal ─────────────────────────────────────────── */
-function AddPaperModal({ runId, busy, onClose, onAdd }) {
+function AddPaperModal({ runId, busy, onClose, onAdd, onUpload }) {
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(false);
   const [cands, setCands] = useState(null);
   const [err, setErr] = useState(null);
- 
+  const [uploadErr, setUploadErr] = useState(null);
+  const [fileName, setFileName] = useState(null);
+
   async function lookup(e) {
     e?.preventDefault();
     if (!q.trim()) return;
@@ -332,7 +353,7 @@ function AddPaperModal({ runId, busy, onClose, onAdd }) {
       setLoading(false);
     }
   }
- 
+
   async function pick(p) {
     setErr(null);
     try {
@@ -341,14 +362,29 @@ function AddPaperModal({ runId, busy, onClose, onAdd }) {
       setErr(e2.message);
     }
   }
- 
+
+  async function handleFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";  // allow picking the same file again after an error
+    if (!file) return;
+    setUploadErr(null);
+    setFileName(file.name);
+    try {
+      await onUpload(file);
+    } catch (e2) {
+      setUploadErr(e2.message);
+    } finally {
+      setFileName(null);
+    }
+  }
+
   return (
     <Overlay onClose={onClose}>
       <h3 style={{ margin: "0 0 4px", fontSize: 18 }}>Add a paper</h3>
       <div className="muted tiny" style={{ marginBottom: 14 }}>
         Paste a DOI, PubMed ID, arXiv ID, or paper URL — or search by title.
       </div>
- 
+
       <form onSubmit={lookup} style={{ display: "flex", gap: 8 }}>
         <input autoFocus value={q} onChange={(e) => setQ(e.target.value)}
           placeholder="10.1000/xyz · 2401.01234 · 39876543 · or a title…"
@@ -357,13 +393,13 @@ function AddPaperModal({ runId, busy, onClose, onAdd }) {
           {loading ? "…" : "Look up"}
         </button>
       </form>
- 
+
       {err && <div style={{ color: "#c0392b", fontSize: 13, marginTop: 10 }}>{err}</div>}
- 
+
       {cands && cands.length === 0 && (
         <div className="muted tiny" style={{ marginTop: 14 }}>No matches found. Try a different identifier or title.</div>
       )}
- 
+
       {cands && cands.length > 0 && (
         <div style={{ marginTop: 14, maxHeight: 340, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
           {cands.map((p, i) => (
@@ -387,10 +423,25 @@ function AddPaperModal({ runId, busy, onClose, onAdd }) {
           ))}
         </div>
       )}
- 
+
       {busy && (
         <div className="muted tiny" style={{ marginTop: 12 }}>
           Retrieving & extracting the paper — this runs the same reader/extractor as your other sources…
+        </div>
+      )}
+
+      {onUpload && (
+        <div style={{ marginTop: 18, paddingTop: 16, borderTop: "1px solid var(--line)" }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 3 }}>Or upload a file</div>
+          <div className="muted tiny" style={{ marginBottom: 10 }}>
+            For papers not indexed anywhere — unpublished drafts, a scan you already have, an internal report. PDF or Word, up to 25MB.
+          </div>
+          <label className={"btn ghost sm" + (busy ? " disabled" : "")} style={{ display: "inline-block", cursor: busy ? "default" : "pointer" }}>
+            {fileName ? `Uploading ${fileName}…` : "Choose PDF or DOCX…"}
+            <input type="file" accept=".pdf,.docx" onChange={handleFile}
+              disabled={busy} style={{ display: "none" }} />
+          </label>
+          {uploadErr && <div style={{ color: "#c0392b", fontSize: 13, marginTop: 8 }}>{uploadErr}</div>}
         </div>
       )}
     </Overlay>
@@ -398,7 +449,7 @@ function AddPaperModal({ runId, busy, onClose, onAdd }) {
 }
  
 /* ── Paper detail view ───────────────────────────────────────── */
-function PaperDetail({ paper, ext, onClose, onRemove, onChat }) {
+function PaperDetail({ paper, ext, onClose, onRemove, onChat, onRead }) {
   const fields = [
     ["Method", ext.method], ["Key finding", ext.finding], ["Dataset", ext.data],
     ["Metrics", ext.metrics], ["Limitation", ext.limitation],
@@ -446,6 +497,7 @@ function PaperDetail({ paper, ext, onClose, onRemove, onChat }) {
  
       <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
         <button className="btn sm" onClick={onChat}>Chat with paper</button>
+        {onRead && <button className="btn ghost sm" onClick={onRead}>Read PDF</button>}
         <span style={{ flex: 1 }} />
         <button className="btn ghost sm" onClick={onClose}>Keep</button>
         {onRemove && <button className="btn ghost sm" onClick={onRemove} style={{ color: "#c0392b" }}>Remove</button>}
