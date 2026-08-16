@@ -133,6 +133,9 @@ export default function App() {
   const [sideModules, setSideModules] = useState(null);
   const [evalRes, setEvalRes] = useState(null);
   const [experimentPlan, setExperimentPlan] = useState(null);
+  const [experimentCritique, setExperimentCritique] = useState(null);
+  const [experimentIterations, setExperimentIterations] = useState(0);
+  const [experimentDebate, setExperimentDebate] = useState({});  // hypothesis index -> [{argument,stance,response}]
   const [tab, setTab] = useState("review");
   const [prevTab, setPrevTab] = useState("review"); // Studio opens full-screen — Back returns here
   const reviewRef = useRef(null);
@@ -173,7 +176,7 @@ export default function App() {
     setRunId(null); setReform(null); setPapers([]); setApproved({});
     setExtractions([]); setExtractStats(null); setSynth(null); setSections({}); setSideModules(null);
     setEvalRes(null); setError(null); setDone({}); setStage("query");
-    setExperimentPlan(null);
+    setExperimentPlan(null); setExperimentCritique(null); setExperimentIterations(0); setExperimentDebate({});
     setTab("review"); setProgressMsgs([]); setNotes({});
     setIncluded({}); setAnalysisStale(false);
   }
@@ -198,6 +201,10 @@ export default function App() {
         setSections(secs);
         setSideModules(d.sideModules || null);
         setNotes(d.notes || {});
+        setExperimentPlan(d.experimentPlan || null);
+        setExperimentCritique(d.experimentCritique || null);
+        setExperimentIterations((d.experimentIterations || []).length);
+        setExperimentDebate(d.experimentDebate || {});
         const inc = {};
         Object.entries(d.approved || {}).forEach(([k, v]) => { if (v) inc[Number(k)] = true; });
         setIncluded(inc);
@@ -274,6 +281,31 @@ export default function App() {
     } catch (e) {
       setError({ stage: "Query Reformulator / Academic Search", msg: e.message, retry: runStart });
       setStage("query");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Studio-only entry: skip search entirely, land on Sources with an empty
+  // paper list ready for "+ Add paper" > "Or upload a file" — once at least
+  // one document is uploaded, Studio (and everything else — Update analysis,
+  // Generate literature review — all still work, since this is just a run
+  // with papers=[] rather than a different kind of run).
+  async function startAnalyzeDocs() {
+    if (!(await ensureAuth())) return;
+    setBusy(true); setError(null);
+    try {
+      const res = await api.createBlankRun(topic.trim() || undefined, selectedProject || undefined);
+      reset();
+      setRunId(res.run_id);
+      setTopic(res.topic || "");
+      setStage("done");
+      setDone({ query: true, reformulate: true, search: true, extract: true, synthesize: true });
+      setTab("sources");
+      refreshSessions();
+      if (selectedProject) refreshProjects();
+    } catch (e) {
+      setError({ stage: "Analyze your own documents", msg: e.message, retry: startAnalyzeDocs });
     } finally {
       setBusy(false);
     }
@@ -422,10 +454,80 @@ export default function App() {
     try {
       const res = await api.designExperiments(runId, apiKey || undefined, model);
       setExperimentPlan(res.experiment_plan);
+      setExperimentCritique(null);
+      setExperimentIterations(0);
     } catch (e) {
       setError({ stage: "Experiment Designer", msg: e.message, retry: runDesignExperiments });
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Recursive self-improvement pass: critique the current plan and revise
+  // any weak hypothesis, up to a couple of rounds server-side. Safe to call
+  // with no existing plan — the backend designs one first in that case.
+  async function runRefineExperiments() {
+    setBusy(true); setError(null);
+    try {
+      const res = await api.refineExperiments(runId, apiKey || undefined, model);
+      setExperimentPlan(res.experiment_plan);
+      setExperimentCritique(res.experiment_critique);
+      setExperimentIterations(res.iterations);
+    } catch (e) {
+      setError({ stage: "Hypothesis Refinement", msg: e.message, retry: runRefineExperiments });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Direct edit — the user overrules/tweaks a hypothesis by hand. Instant,
+  // no LLM call, so no busy/spinner state.
+  async function updateHypothesis(index, edits) {
+    try {
+      const res = await api.updateHypothesis(runId, index, edits);
+      setExperimentPlan((plan) => {
+        if (!plan) return plan;
+        const hypotheses = [...(plan.hypotheses || [])];
+        hypotheses[index] = res.hypothesis;
+        return { ...plan, hypotheses };
+      });
+      setExperimentCritique((c) =>
+        c ? { ...c, critiques: (c.critiques || []).filter((x) => x.index !== index) } : c
+      );
+    } catch (e) {
+      setError({ stage: "Hypothesis Edit", msg: e.message });
+    }
+  }
+
+  // Argue with one hypothesis — the designer revises it or defends it with a
+  // specific counter-reason (never just concedes to be agreeable). Doesn't
+  // touch the hypothesis itself: "both agree" means the human decides
+  // whether to apply the proposed revision, via acceptRevision() below.
+  async function disputeHypothesis(index, argument) {
+    setBusy(true); setError(null);
+    try {
+      const res = await api.disputeHypothesis(runId, index, argument, apiKey || undefined, model);
+      setExperimentDebate((d) => ({ ...d, [index]: res.history }));
+      return res;
+    } catch (e) {
+      setError({ stage: "Hypothesis Dispute", msg: e.message });
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // The human agrees with a proposed revision from a dispute round — apply
+  // it via the same instant, no-LLM-call path as a manual edit.
+  function acceptRevision(index, proposed) {
+    return updateHypothesis(index, proposed);
+  }
+
+  async function exportExperiments(fmt) {
+    try {
+      await api.downloadExperimentsExport(runId, fmt);
+    } catch (e) {
+      setError({ stage: "Methods Export", msg: e.message });
     }
   }
 
@@ -779,7 +881,8 @@ export default function App() {
                 it "doesn't show" until you scroll past the form, or start a
                 run (which permanently moves stage off "query"). */}
             {stage === "query" && tab !== "usage" && (
-              <QueryInput topic={topic} setTopic={setTopic} busy={busy} onRun={runStart} />
+              <QueryInput topic={topic} setTopic={setTopic} busy={busy} onRun={runStart}
+                onAnalyzeDocs={startAnalyzeDocs} />
             )}
 
             {busy && (stage === "reformulate" || stage === "search") && (
@@ -932,7 +1035,23 @@ export default function App() {
                     />
                   )}
                   {tab === "eval" && <EvaluationView evalRes={evalRes} busy={busy} onEvaluate={runEvaluate} />}
-                  {tab === "methods" && <MethodsPanel plan={experimentPlan} busy={busy} onDesign={runDesignExperiments} papers={papers} />}
+                  {tab === "methods" && (
+                    <MethodsPanel
+                      plan={experimentPlan}
+                      critique={experimentCritique}
+                      iterations={experimentIterations}
+                      debate={experimentDebate}
+                      busy={busy}
+                      onDesign={runDesignExperiments}
+                      onRefine={runRefineExperiments}
+                      onUpdate={updateHypothesis}
+                      onDispute={disputeHypothesis}
+                      onAcceptRevision={acceptRevision}
+                      onExport={exportExperiments}
+                      papers={papers}
+                      extractions={extractions}
+                    />
+                  )}
                 </div>
 
                 <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>

@@ -1,7 +1,77 @@
-import React, { useState } from "react";
-import { Filter, Check, X, ChevronRight, RotateCw } from "./icons.jsx";
+import React, { useState, useEffect } from "react";
+import { Filter, Check, X, ChevronRight, RotateCw, ChevronUp, ChevronDown } from "./icons.jsx";
 import PaperChatPanel from "./PaperChatPanel.jsx";
+import PdfViewer from "./PdfViewer.jsx";
 import { api } from "../api/client.js";
+
+// Jump-to-top/bottom buttons for the paper list — the Filter view can run to
+// 40+ papers with no inner scroll container (the whole document scrolls), so
+// once the page has scrolled a bit these appear fixed in the corner to skip
+// re-scrolling by hand.
+function ScrollNav() {
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    function onScroll() {
+      setShow(window.scrollY > 400);
+    }
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+  if (!show) return null;
+  const btn = {
+    width: 36, height: 36, borderRadius: 10, border: "1px solid var(--line)",
+    background: "var(--panel)", color: "var(--txt)", display: "flex",
+    alignItems: "center", justifyContent: "center", cursor: "pointer",
+    boxShadow: "0 4px 14px rgba(0,0,0,.35)",
+  };
+  return (
+    <div style={{
+      position: "fixed", right: 22, bottom: 22, zIndex: 40,
+      display: "flex", flexDirection: "column", gap: 8,
+    }}>
+      <button
+        type="button" aria-label="Scroll to top" title="Scroll to top" style={btn}
+        onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+      >
+        <ChevronUp size={17} />
+      </button>
+      <button
+        type="button" aria-label="Scroll to bottom" title="Scroll to bottom" style={btn}
+        onClick={() => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "smooth" })}
+      >
+        <ChevronDown size={17} />
+      </button>
+    </div>
+  );
+}
+
+function ExportPapersButtons({ runId, included }) {
+  const [busy, setBusy] = useState(null);
+  const [err, setErr] = useState(null);
+  async function go(fmt) {
+    setBusy(fmt);
+    setErr(null);
+    try {
+      await api.downloadPaperList(runId, fmt, included);
+    } catch (e) {
+      setErr(e.message || "Export failed.");
+    } finally {
+      setBusy(null);
+    }
+  }
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+      <button className="btn ghost sm" disabled={!!busy} onClick={() => go("xlsx")}>
+        {busy === "xlsx" ? "…" : "Export Excel"}
+      </button>
+      <button className="btn ghost sm" disabled={!!busy} onClick={() => go("csv")}>
+        {busy === "csv" ? "…" : "Export CSV"}
+      </button>
+      {err && <span className="tiny" style={{ color: "#f08a8a" }}>{err}</span>}
+    </span>
+  );
+}
 
 const VERDICT = {
   keep:  { label: "Likely relevant", bg: "var(--green-soft)", fg: "var(--green)" },
@@ -33,6 +103,7 @@ function Kv({ k, v }) {
 export default function PaperFilter({ papers, approved, scope, busy, onToggle, onApprove, onRestart, runId, apiKey, model, notes={}, onNote }) {
   const approvedCount = Object.values(approved).filter(Boolean).length;
   const [chatPaper, setChatPaper] = useState(null);
+  const [readPaper, setReadPaper] = useState(null);
   const [assess, setAssess] = useState({}); // idx -> { loading | data | error }
 
   async function runAssess(p) {
@@ -76,6 +147,8 @@ export default function PaperFilter({ papers, approved, scope, busy, onToggle, o
                   {p.authors || "—"} · {p.year || "—"} · {p.venue || "preprint"}
                   {p.url ? " · " : ""}
                   {p.url && <a href={p.url} target="_blank" rel="noreferrer">link</a>}
+                  {" · "}
+                  <button className="pt-chat-btn" onClick={() => setReadPaper(p)}>read</button>
                   {" · "}
                   <button className="pt-chat-btn" onClick={() => setChatPaper(p)}>chat</button>
                   {" · "}
@@ -139,6 +212,8 @@ export default function PaperFilter({ papers, approved, scope, busy, onToggle, o
         <button className="btn ghost sm" disabled={busy} onClick={onRestart}>
           <RotateCw size={13} /> Restart
         </button>
+        <span style={{ flex: 1 }} />
+        <ExportPapersButtons runId={runId} included={approved} />
       </div>
 
       {chatPaper && (
@@ -151,6 +226,12 @@ export default function PaperFilter({ papers, approved, scope, busy, onToggle, o
           onClose={() => setChatPaper(null)}
         />
       )}
+
+      {readPaper && (
+        <PdfViewer runId={runId} paper={readPaper} onClose={() => setReadPaper(null)} />
+      )}
+
+      {papers.length > 4 && <ScrollNav />}
     </div>
   );
 }

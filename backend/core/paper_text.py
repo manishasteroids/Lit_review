@@ -121,6 +121,103 @@ def docx_bytes_to_text(data: bytes) -> str:
         return ""
 
 
+def pptx_bytes_to_text(data: bytes) -> str:
+    """Slide text + speaker notes, in slide order — used when a user uploads
+    a .pptx as a source (Sources > "Upload a file" / the standalone Studio
+    document-upload entry). python-pptx is already a dependency (used for
+    the review's own slide-deck export)."""
+    try:
+        from pptx import Presentation
+    except Exception:
+        return ""
+    try:
+        prs = Presentation(io.BytesIO(data))
+        parts = []
+        for i, slide in enumerate(prs.slides, 1):
+            slide_parts = []
+            for shape in slide.shapes:
+                if shape.has_text_frame and shape.text_frame.text.strip():
+                    slide_parts.append(shape.text_frame.text.strip())
+                elif shape.has_table:
+                    for row in shape.table.rows:
+                        for cell in row.cells:
+                            if cell.text.strip():
+                                slide_parts.append(cell.text.strip())
+            if slide.has_notes_slide:
+                notes = (slide.notes_slide.notes_text_frame.text or "").strip()
+                if notes:
+                    slide_parts.append(f"[notes] {notes}")
+            if slide_parts:
+                parts.append(f"[Slide {i}] " + " — ".join(slide_parts))
+        return "\n".join(parts).strip()
+    except Exception:
+        return ""
+
+
+def _read_local_upload(paper: dict) -> tuple[str, bytes] | None:
+    """Read a locally-uploaded source's raw bytes off disk, given the
+    `local_file` path set by api/routes.py's upload_paper(). Returns
+    (extension, bytes) or None if there's no local file / it's missing."""
+    import os
+
+    local_path = (paper.get("local_file") or "").strip()
+    if not local_path:
+        return None
+    full_path = os.path.join(settings.uploads_dir, local_path)
+    if not os.path.isfile(full_path):
+        return None
+    ext = os.path.splitext(full_path)[1].lower()
+    try:
+        with open(full_path, "rb") as f:
+            return ext, f.read()
+    except Exception:
+        return None
+
+
+def local_paper_full_text(paper: dict, max_chars: int = MAX_CHARS) -> str | None:
+    """Full text for a locally-uploaded paper (Sources > "Upload a file"),
+    re-extracted straight from the original file on disk — richer than the
+    short excerpt cached on the paper dict at upload time (abstract/_text
+    are capped small so the session JSON stays light). This is the
+    local-file counterpart to fetch_paper_text(url) above; uploads have no
+    URL to fetch, so chat grounding must go through here instead — using
+    fetch_paper_text(paper.get("url")) on an uploaded paper silently
+    returns nothing, which is why chat answers on uploads used to fall back
+    to the truncated abstract only."""
+    read = _read_local_upload(paper)
+    if not read:
+        return None
+    ext, data = read
+    if ext == ".pdf":
+        text = _pdf_to_text(data)
+    elif ext == ".pptx":
+        text = pptx_bytes_to_text(data)
+    elif ext == ".docx":
+        text = docx_bytes_to_text(data)
+    else:
+        return None
+    text = (text or "").strip()
+    if not text:
+        return None
+    return text[:max_chars] + "\n\n[...truncated...]" if len(text) > max_chars else text
+
+
+def local_paper_pdf_bytes(paper: dict) -> bytes | None:
+    """Raw PDF bytes for a locally-uploaded paper, straight from disk — the
+    local-file counterpart to fetch_paper_pdf(url) above. Lets chat attach
+    the real PDF (so the model can read figures/diagrams/tables visually)
+    for an uploaded source, the same way it already can for a URL-backed
+    one; without this, a diagram question on an uploaded paper silently got
+    no PDF attached at all since fetch_paper_pdf(None) always returns None."""
+    read = _read_local_upload(paper)
+    if not read:
+        return None
+    ext, data = read
+    if ext != ".pdf" or len(data) > MAX_PDF_BYTES:
+        return None
+    return data
+
+
 _DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>&]+", re.I)
 
 

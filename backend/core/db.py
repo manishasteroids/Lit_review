@@ -148,6 +148,8 @@ def init_db() -> None:
     init_paper_cache_table()
     from core.chat_history import init_chat_history_table
     init_chat_history_table()
+    from core.studio_history import init_studio_history_table
+    init_studio_history_table()
     from core.profile import init_profile_table
     init_profile_table()
     from core.news import init_news_table

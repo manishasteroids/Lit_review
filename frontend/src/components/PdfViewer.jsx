@@ -129,7 +129,12 @@ export default function PdfViewer({ runId, paper, onClose }) {
         container.style.height = `${viewport.height}px`;
         try {
           const textLayer = new TextLayerBuilder({ pdfPage });
-          textLayer.div.style.setProperty("--total-scale-factor", "1");
+          // Must match the actual render scale (the canvas below it is drawn
+          // at `scale`, e.g. 1.25x) — hardcoding this to 1 sizes the invisible
+          // selectable glyphs smaller than the real ones underneath, so a
+          // selection's computed rects drift further right the longer the
+          // line is (the overflowing "staircase" highlight bug).
+          textLayer.div.style.setProperty("--total-scale-factor", String(scale));
           container.appendChild(textLayer.div);
           await textLayer.render({ viewport });
         } catch (e) {
