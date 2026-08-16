@@ -11,13 +11,16 @@ let openLogin = null;
 /**
  * Call before any action that requires an account.
  * Returns true if the user is signed in, false if they dismiss.
+ * @param {{mode?: "signin"|"signup"}} [opts] which tab the modal should open
+ *   on — e.g. a "Sign up" button shouldn't dump someone onto the sign-in
+ *   form and make them find the "Create an account" toggle themselves.
  */
-export async function ensureAuth() {
+export async function ensureAuth(opts) {
   if (!authEnabled) return true;
   const { data } = await supabase.auth.getSession();
   if (data?.session) return true;
   if (!openLogin) return false;
-  return openLogin();
+  return openLogin(opts?.mode);
 }
  
 export async function signOut() {
@@ -51,8 +54,8 @@ export function AuthButtons({ extraItems = [] }) {
  
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      <button onClick={() => ensureAuth()} style={btnGhost}>Log in</button>
-      <button onClick={() => ensureAuth()} style={btnSolid}>Sign up</button>
+      <button onClick={() => ensureAuth({ mode: "signin" })} style={btnGhost}>Log in</button>
+      <button onClick={() => ensureAuth({ mode: "signup" })} style={btnSolid}>Sign up</button>
     </div>
   );
 }
@@ -185,13 +188,15 @@ const btnSolid = {
  
 export function AuthModalHost() {
   const [open, setOpen] = useState(false);
+  const [initialMode, setInitialMode] = useState("signin");
   const resolver = useRef(null);
- 
+
   useEffect(() => {
     if (!authEnabled) return;
-    openLogin = () =>
+    openLogin = (mode) =>
       new Promise((resolve) => {
         resolver.current = resolve;
+        setInitialMode(mode === "signup" ? "signup" : "signin");
         setOpen(true);
       });
     // Resolve as soon as a session appears (covers OAuth redirect too).
@@ -214,7 +219,7 @@ export function AuthModalHost() {
   }
  
   if (!open) return null;
-  return <LoginModal onDismiss={dismiss} />;
+  return <LoginModal onDismiss={dismiss} initialMode={initialMode} />;
 }
  
 /* ------------------------------------------------------------------ */
@@ -226,27 +231,62 @@ const inp = {
   color: "#111", fontSize: 15, padding: "12px 14px", outline: "none", width: "100%",
   fontFamily: "'Space Grotesk',sans-serif", boxSizing: "border-box",
 };
- 
-function LoginModal({ onDismiss }) {
-  const [mode, setMode] = useState("signin");
+
+const lbl = {
+  fontSize: 12.5, fontWeight: 600, color: "#6b6b7b", marginBottom: 5, display: "block",
+};
+
+// With six stacked inputs on signup, a placeholder alone stops being
+// enough to tell fields apart once the browser autofills email/password
+// (autofill replaces the placeholder with dots/blue highlight and there's
+// no other cue) — a visible label above every field removes the ambiguity
+// regardless of autofill state.
+function Field({ label, ...props }) {
+  return (
+    <label style={{ display: "block" }}>
+      <span style={lbl}>{label}</span>
+      <input {...props} style={inp} />
+    </label>
+  );
+}
+
+function LoginModal({ onDismiss, initialMode }) {
+  const [mode, setMode] = useState(initialMode || "signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  // Signup-only profile fields — collected once at account creation and
+  // stashed in Supabase's user_metadata (no separate profiles table needed;
+  // displayName() above already reads user_metadata.full_name).
+  const [fullName, setFullName] = useState("");
+  const [affiliation, setAffiliation] = useState("");
+  const [phone, setPhone] = useState("");
+  const [address, setAddress] = useState("");
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
- 
+
   useEffect(() => {
     const onKey = (e) => e.key === "Escape" && onDismiss();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onDismiss]);
- 
+
   async function submit(e) {
     e.preventDefault();
     setBusy(true); setMsg(null);
     try {
       const { error } = mode === "signin"
         ? await supabase.auth.signInWithPassword({ email, password })
-        : await supabase.auth.signUp({ email, password });
+        : await supabase.auth.signUp({
+            email, password,
+            options: {
+              data: {
+                full_name: fullName.trim() || undefined,
+                affiliation: affiliation.trim() || undefined,
+                phone: phone.trim() || undefined,
+                address: address.trim() || undefined,
+              },
+            },
+          });
       if (error) setMsg(error.message);
       else if (mode === "signup") setMsg("Account created — check your email to confirm, then sign in.");
     } catch (err) {
@@ -322,10 +362,27 @@ function LoginModal({ onDismiss }) {
         </div>
  
         <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <input type="email" required placeholder="Email address" value={email}
-            onChange={(e) => setEmail(e.target.value)} style={inp} autoFocus />
-          <input type="password" required placeholder="Password" value={password}
-            onChange={(e) => setPassword(e.target.value)} style={inp} />
+          {mode === "signup" && (
+            <>
+              <Field label="Full name" type="text" required placeholder="Ada Lovelace" value={fullName}
+                onChange={(e) => setFullName(e.target.value)} autoFocus />
+              <Field label="Affiliation" type="text" placeholder="University, lab or company" value={affiliation}
+                onChange={(e) => setAffiliation(e.target.value)} />
+            </>
+          )}
+          <Field label="Email address" type="email" required placeholder="you@example.com" value={email}
+            onChange={(e) => setEmail(e.target.value)} autoFocus={mode === "signin"} autoComplete="email" />
+          <Field label="Password" type="password" required placeholder="••••••••" value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete={mode === "signin" ? "current-password" : "new-password"} />
+          {mode === "signup" && (
+            <>
+              <Field label="Phone number (optional)" type="tel" placeholder="+1 555 000 1234" value={phone}
+                onChange={(e) => setPhone(e.target.value)} />
+              <Field label="Address (optional)" type="text" placeholder="City, country" value={address}
+                onChange={(e) => setAddress(e.target.value)} />
+            </>
+          )}
           <button disabled={busy} type="submit" style={{
             width: "100%", padding: "12px 14px", borderRadius: 10, border: "none",
             background: ACCENT, color: "#fff", fontSize: 15, fontWeight: 600,
@@ -340,7 +397,10 @@ function LoginModal({ onDismiss }) {
  
         <div style={{ fontSize: 14, color: "#6b6b7b", marginTop: 18 }}>
           {mode === "signin" ? "New here? " : "Already have an account? "}
-          <button onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setMsg(null); }}
+          <button onClick={() => {
+            setMode(mode === "signin" ? "signup" : "signin"); setMsg(null);
+            setFullName(""); setAffiliation(""); setPhone(""); setAddress("");
+          }}
             style={{ background: "none", border: "none", color: ACCENT, fontWeight: 600, cursor: "pointer", fontSize: 14, padding: 0 }}>
             {mode === "signin" ? "Create an account" : "Sign in"}
           </button>

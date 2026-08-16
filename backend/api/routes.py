@@ -51,6 +51,10 @@ def get_run(run_id: str, user_id: str):
         sections=d.get("sections") or {},
         stage=s.get("stage", "done"),
         mode=d.get("mode"),          # keep the search mode so later stages reuse its models
+        experiment_plan=d.get("experimentPlan"),
+        experiment_critique=d.get("experimentCritique"),
+        experiment_iterations=d.get("experimentIterations") or [],
+        experiment_debate=d.get("experimentDebate") or {},
     )
     RUNS[run_id] = run
     return run
@@ -75,8 +79,19 @@ class SynthesizeBody(BaseModel):
     model: str | None = None
     mode: str | None = None
     notes: dict | None = None
- 
- 
+
+
+class DisputeBody(BaseModel):
+    api_key: str | None = None
+    model: str | None = None
+    mode: str | None = None
+    argument: str
+
+
+class HypothesisEditBody(BaseModel):
+    edits: dict
+
+
 class ChatBody(BaseModel):
     paper_idx: int | None = None
     paper: dict | None = None
@@ -209,8 +224,48 @@ def create_run(body: CreateRunBody, user_id: str = Depends(require_user)):
         from core.projects import assign_session
         assign_session(run.run_id, user_id, body.project_id)
     return {"run_id": run.run_id, "reform": run.reform, "papers": run.papers, "stage": run.stage}
- 
- 
+
+
+class BlankRunBody(BaseModel):
+    topic: str | None = None
+    project_id: str | None = None
+
+
+@router.post("/runs/blank")
+def create_blank_run(body: BlankRunBody, user_id: str = Depends(require_user)):
+    """Start a Studio-only session with no search — just a place to upload
+    your own PDFs/DOCX/PPTX and analyze them (chat, report, deck) via Studio
+    without running the search -> filter -> write pipeline. Skips straight to
+    stage="done" (papers=[]) so Sources/Studio are immediately usable; the
+    normal Sources page + "Upload a file" flow (see upload_paper()) fills it
+    in, and if the user later wants a full written review, "Update analysis"
+    -> "Generate literature review" on the Sources page already works from
+    here too — nothing about this path is a dead end."""
+    import uuid as _uuid
+
+    run = RunState(
+        run_id=str(_uuid.uuid4()),
+        topic=(body.topic or "").strip() or "Untitled documents",
+        papers=[], approved_papers=[], stage="done",
+    )
+    RUNS[run.run_id] = run
+    save_session(
+        session_id=run.run_id,
+        topic=run.topic,
+        stage="done",
+        paper_count=0,
+        user_id=user_id,
+        created_at=datetime.now(timezone.utc).isoformat(),
+        data={"runId": run.run_id, "topic": run.topic, "reform": None,
+              "papers": [], "approved": {}, "extractions": [], "synth": None,
+              "sections": {}, "sideModules": None, "notes": {}, "mode": None},
+    )
+    if body.project_id:
+        from core.projects import assign_session
+        assign_session(run.run_id, user_id, body.project_id)
+    return {"run_id": run.run_id, "topic": run.topic, "stage": "done"}
+
+
 # ── Remaining pipeline stages ──────────────────────────────────────────────
  
 @router.post("/runs/{run_id}/filter")
@@ -240,10 +295,44 @@ def _persist_done(run, user_id, notes=None, side=None):
             "extractions": run.extractions, "synth": run.synthesis,
             "sections": run.sections, "sideModules": side, "notes": notes or {},
             "mode": run.mode,
+            "experimentPlan": run.experiment_plan, "experimentCritique": run.experiment_critique,
+            "experimentIterations": run.experiment_iterations, "experimentDebate": run.experiment_debate,
         },
     )
     return side
- 
+
+
+def _persist_experiments(run, user_id) -> None:
+    """Merge the experiment plan/critique/iteration/debate state into the
+    saved session, without touching anything else — `data` is one JSON blob
+    per session (see core/db.py: save_session), so this is a read-merge-write
+    rather than a plain overwrite. Called after every experiments-related
+    route so a hypothesis survives navigating away, a reload, or a backend
+    restart, the same way the rest of the run already does. Best-effort: a
+    save failure here shouldn't break the response the user is waiting on."""
+    try:
+        existing = get_session(run.run_id, user_id)
+        data = dict(existing["data"]) if existing else {
+            "runId": run.run_id, "topic": run.topic, "reform": run.reform,
+            "papers": run.papers,
+            "approved": {p["idx"]: True for p in run.approved_papers},
+            "extractions": run.extractions, "synth": run.synthesis,
+            "sections": run.sections, "mode": run.mode,
+        }
+        data["experimentPlan"] = run.experiment_plan
+        data["experimentCritique"] = run.experiment_critique
+        data["experimentIterations"] = run.experiment_iterations
+        data["experimentDebate"] = run.experiment_debate
+        save_session(
+            session_id=run.run_id, topic=run.topic,
+            stage=(existing.get("stage") if existing else run.stage) or run.stage,
+            paper_count=(existing.get("paper_count") if existing else len(run.approved_papers)) or 0,
+            user_id=user_id, data=data,
+            created_at=existing.get("created_at") if existing else None,
+        )
+    except Exception:  # noqa: BLE001 — never break the experiments response over a save hiccup
+        import traceback; traceback.print_exc()
+
  
 @router.post("/runs/{run_id}/synthesize")
 def synthesize(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
@@ -378,7 +467,7 @@ def paper_pdf(run_id: str, idx: int, user_id: str = Depends(require_user)):
         import os
         full_path = os.path.join(settings.uploads_dir, local_path)
         if not local_path.lower().endswith(".pdf"):
-            raise HTTPException(404, "This source was uploaded as a Word document — in-app PDF preview isn't available for it yet.")
+            raise HTTPException(404, "This source was uploaded as a Word or PowerPoint file — in-app PDF preview isn't available for it yet.")
         if not os.path.isfile(full_path):
             raise HTTPException(404, "The uploaded file for this source is missing.")
         with open(full_path, "rb") as f:
@@ -461,21 +550,22 @@ async def upload_paper(
     notes: str | None = Form(None),  # JSON-encoded {idx: note} — same shape as SynthesizeBody.notes
     user_id: str = Depends(require_user),
 ):
-    """Add a source from a locally-uploaded PDF or DOCX file — for papers
-    that aren't discoverable through the search/lookup path (unpublished
-    drafts, paywalled scans the user already has, internal reports). Text is
-    extracted locally, run through the same Reader & Extractor as every other
-    source, and the original file is kept on disk so the in-app PDF viewer
-    can show it back (PDFs only; DOCX has no in-app preview yet)."""
+    """Add a source from a locally-uploaded PDF, DOCX, or PPTX file — for
+    material that isn't discoverable through the search/lookup path
+    (unpublished drafts, paywalled scans the user already has, internal
+    reports, a colleague's slide deck). Text is extracted locally, run
+    through the same Reader & Extractor as every other source, and the
+    original file is kept on disk so the in-app PDF viewer can show it back
+    (PDFs only; DOCX/PPTX have no in-app preview yet)."""
     import os
     import re as _re
-    from core.paper_text import docx_bytes_to_text, pdf_bytes_to_text
+    from core.paper_text import docx_bytes_to_text, pdf_bytes_to_text, pptx_bytes_to_text
 
     run = get_run(run_id, user_id)
     name = file.filename or "upload"
     ext = os.path.splitext(name)[1].lower()
-    if ext not in (".pdf", ".docx"):
-        raise HTTPException(400, "Only PDF and DOCX files are supported.")
+    if ext not in (".pdf", ".docx", ".pptx"):
+        raise HTTPException(400, "Only PDF, DOCX, and PPTX files are supported.")
 
     data = await file.read()
     if not data:
@@ -484,7 +574,12 @@ async def upload_paper(
     if len(data) > max_bytes:
         raise HTTPException(400, "File is too large (25MB limit).")
 
-    text = pdf_bytes_to_text(data) if ext == ".pdf" else docx_bytes_to_text(data)
+    if ext == ".pdf":
+        text = pdf_bytes_to_text(data)
+    elif ext == ".pptx":
+        text = pptx_bytes_to_text(data)
+    else:
+        text = docx_bytes_to_text(data)
     if not text or not text.strip():
         raise HTTPException(400, "Couldn't extract any text from that file — it may be a scanned image without a text layer.")
 
@@ -602,9 +697,64 @@ def design_experiments(run_id: str, body: SynthesizeBody, user_id: str = Depends
         result = pipeline.design_experiments(run)
     except Exception as e:
         raise HTTPException(502, f"Experiment designer failed: {e}")
+    _persist_experiments(run, user_id)
     return {"run_id": run.run_id, "experiment_plan": result}
- 
- 
+
+
+@router.post("/runs/{run_id}/experiments/refine")
+def refine_experiments(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
+    """Recursive self-improvement pass: critique the current experiment plan
+    and revise any hypothesis that scores below the bar, up to a couple of
+    rounds. Designs a plan first if this run doesn't have one yet."""
+    run = get_run(run_id, user_id)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    try:
+        result = pipeline.refine_experiments(run)
+    except Exception as e:
+        raise HTTPException(502, f"Hypothesis refinement failed: {e}")
+    _persist_experiments(run, user_id)
+    return {
+        "run_id": run.run_id,
+        "experiment_plan": result["plan"],
+        "experiment_critique": result["critique"],
+        "iterations": result["iterations"],
+    }
+
+
+@router.patch("/runs/{run_id}/experiments/{index}")
+def update_hypothesis(run_id: str, index: int, body: HypothesisEditBody, user_id: str = Depends(require_user)):
+    """Direct human edit to one hypothesis — no LLM call. `edits` is the set
+    of fields to overwrite, e.g. {"hypothesis": "...", "risks": "..."}."""
+    run = get_run(run_id, user_id)
+    pipeline = SiftPipeline()
+    try:
+        hyp = pipeline.update_hypothesis(run, index, body.edits)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    _persist_experiments(run, user_id)
+    return {"run_id": run.run_id, "hypothesis": hyp}
+
+
+@router.post("/runs/{run_id}/experiments/{index}/dispute")
+def dispute_hypothesis(run_id: str, index: int, body: DisputeBody, user_id: str = Depends(require_user)):
+    """A human argues with one hypothesis. The designer either revises it to
+    address the objection or defends it with a specific counter-reason —
+    see agents/experiment_designer.py: respond_to_challenge."""
+    run = get_run(run_id, user_id)
+    argument = (body.argument or "").strip()
+    if not argument:
+        raise HTTPException(400, "Provide your objection in `argument`.")
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    try:
+        result = pipeline.dispute_hypothesis(run, index, argument)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Dispute failed: {e}")
+    _persist_experiments(run, user_id)
+    return {"run_id": run.run_id, **result}
+
+
 @router.post("/runs/{run_id}/assess")
 def assess_paper(run_id: str, body: AssessBody, user_id: str = Depends(require_user)):
     """Quick triage of a single paper against the review scope: extract key
@@ -785,8 +935,18 @@ def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require
     q = body.question or ""
     broad = (len(q.strip()) < 40) or any(w in q.lower() for w in _BROAD)
     want_pdf = bool(image_blocks) or _needs_pdf(q)
-    full_text = fetch_paper_text(paper.get("url")) or ""
-    pdf_bytes = fetch_paper_pdf(paper.get("url")) if want_pdf else None
+    # Locally-uploaded sources (Sources > "Upload a file") have no URL to
+    # fetch — fetch_paper_text/fetch_paper_pdf would silently return nothing
+    # for them, collapsing grounding down to the abstract only (and never
+    # attaching a PDF even for a figure/diagram question). Read straight off
+    # the uploaded file on disk instead.
+    if paper.get("local_file"):
+        from core.paper_text import local_paper_full_text, local_paper_pdf_bytes
+        full_text = local_paper_full_text(paper) or ""
+        pdf_bytes = local_paper_pdf_bytes(paper) if want_pdf else None
+    else:
+        full_text = fetch_paper_text(paper.get("url")) or ""
+        pdf_bytes = fetch_paper_pdf(paper.get("url")) if want_pdf else None
 
     try:
         blocks, parts = [], []
@@ -852,6 +1012,10 @@ def get_run_state(run_id: str, user_id: str = Depends(require_user)):
         "extractions": run.extractions, "synthesis": run.synthesis,
         "sections": run.sections, "eval_result": run.eval_result, "stage": run.stage,
         "side_modules": pipeline.side_modules(run) if run.synthesis else None,
+        "experiment_plan": run.experiment_plan,
+        "experiment_critique": run.experiment_critique,
+        "experiment_iterations": run.experiment_iterations,
+        "experiment_debate": run.experiment_debate,
     }
  
  
@@ -870,6 +1034,10 @@ def session_usage(session_id: str, user_id: str = Depends(require_user)):
 
 class ChatSaveBody(BaseModel):
     paper_key: str
+    messages: list[dict] = []
+
+
+class StudioHistorySaveBody(BaseModel):
     messages: list[dict] = []
 
 
@@ -900,6 +1068,8 @@ def studio_chat(run_id: str, body: StudioChatBody, user_id: str = Depends(requir
     ext_by_idx = {e.get("idx"): e for e in (run.extractions or [])}
     cite = {p["idx"]: i + 1 for i, p in enumerate(papers)}
 
+    from core.paper_text import local_paper_full_text
+
     blocks = []
     for p in papers:
         e = ext_by_idx.get(p.get("idx"), {})
@@ -908,9 +1078,22 @@ def studio_chat(run_id: str, body: StudioChatBody, user_id: str = Depends(requir
             v = e.get(k)
             if v and v != "n/a":
                 lines.append(f"  {k}: {v}")
-        abs_ = (p.get("abstract") or "")[:900]
-        if abs_:
-            lines.append(f"  abstract: {abs_}")
+        # Uploaded sources (Sources > "Upload a file") have no URL, so the
+        # abstract cached at upload time is already a short excerpt of
+        # whatever was extracted — stacking Studio's usual 900-char abstract
+        # cap on top of that left almost nothing for the model to work with.
+        # Since these are documents the user deliberately added (not one of
+        # many search results), pull real text straight from the uploaded
+        # file instead of the compressed abstract. Capped well below the
+        # single-paper chat's 60k-char budget since Studio can have several
+        # sources selected at once.
+        local_text = local_paper_full_text(p, max_chars=12000) if p.get("local_file") else None
+        if local_text:
+            lines.append(f"  full text (uploaded document):\n{local_text}")
+        else:
+            abs_ = (p.get("abstract") or "")[:900]
+            if abs_:
+                lines.append(f"  abstract: {abs_}")
         blocks.append("\n".join(lines))
     corpus = "\n\n".join(blocks)
 
@@ -931,22 +1114,53 @@ def studio_chat(run_id: str, body: StudioChatBody, user_id: str = Depends(requir
         f"inline as [n] using the numbers given. There are {len(papers)} sources. "
         "Compare and contrast across papers where useful; say plainly when the "
         "sources don't cover something rather than guessing." + CHAT_FORMAT +
-        "\n\nSOURCES:\n" + corpus
+        "\n\nSOURCES:\n" + corpus +
+        "\n\n" + FOLLOWUPS_INSTRUCTION
     )
     try:
-        answer = llm.call(user_text=convo, system=system, max_tokens=1400)
+        raw = llm.call(user_text=convo, system=system, max_tokens=1400)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"Studio chat failed: {e}")
+
+    answer, followups = _split_followups(raw)
+    if not followups:
+        # Model didn't emit the block (or emitted something unparseable) —
+        # fall back to the old keyword heuristic rather than showing nothing.
+        followups = _followups_fallback(body.question, answer, len(papers))
 
     return {
         "answer": answer,
         "sources": [{"n": cite[p["idx"]], "idx": p["idx"], "title": p.get("title")} for p in papers],
-        "followups": _followups(body.question, answer, len(papers)),
+        "followups": followups,
     }
 
 
-def _followups(question: str, answer: str, n_sources: int) -> list[str]:
-    """Suggested next questions — derived locally, so they cost nothing."""
+# Asking the model to end its own answer with a short list of next questions
+# costs nothing extra — it's the same call that produces the answer, just a
+# few more output tokens — and gives suggestions that are actually about
+# what was just discussed, instead of a fixed set of 4 that were almost
+# always the same regardless of the conversation (see _followups_fallback).
+FOLLOWUPS_INSTRUCTION = (
+    "After your answer, on its own line write exactly ///FOLLOWUPS/// and then "
+    "list exactly 3 short follow-up questions this user would plausibly ask next, "
+    "one per line, no numbering or bullets. Base them specifically on what was just "
+    "discussed and the sources above — not generic questions that would fit any chat."
+)
+
+
+def _split_followups(raw: str) -> tuple[str, list[str]]:
+    marker = "///FOLLOWUPS///"
+    if marker not in raw:
+        return raw, []
+    main, _, tail = raw.partition(marker)
+    qs = [ln.strip(" \t-•*0123456789.)") for ln in tail.strip().splitlines()]
+    qs = [q for q in qs if q]
+    return main.rstrip(), qs[:4]
+
+
+def _followups_fallback(question: str, answer: str, n_sources: int) -> list[str]:
+    """Kept as a safety net for when the model doesn't emit the ///FOLLOWUPS///
+    block (older/smaller models, or a malformed response)."""
     a = (answer or "").lower()
     q = (question or "").lower()
     out = []
@@ -962,6 +1176,29 @@ def _followups(question: str, answer: str, n_sources: int) -> list[str]:
         out.append("Summarise the reported numbers in a table.")
     out.append("Draw a diagram of how these findings connect.")
     return out[:4]
+
+
+@router.get("/runs/{run_id}/studio/history")
+def studio_history_get(run_id: str, user_id: str = Depends(require_user)):
+    """Load saved Studio chat for this run, for the signed-in user — so
+    reopening Studio (after a refresh, or coming back tomorrow) resumes the
+    conversation instead of starting blank.
+
+    Must be registered BEFORE the /studio/{artifact} route below — Starlette
+    matches routes in registration order, and {artifact} is a wildcard that
+    would otherwise swallow "history" as an artifact name (and 422/400,
+    since it isn't report/deck/briefing and the body shape doesn't match)."""
+    from core.studio_history import get_studio_chat
+    return {"messages": get_studio_chat(user_id, run_id)}
+
+
+@router.post("/runs/{run_id}/studio/history")
+def studio_history_save(run_id: str, body: StudioHistorySaveBody, user_id: str = Depends(require_user)):
+    """Persist the Studio chat message list for this run. Must also stay
+    ahead of /studio/{artifact} — see note above."""
+    from core.studio_history import save_studio_chat
+    save_studio_chat(user_id, run_id, body.messages)
+    return {"ok": True}
 
 
 @router.post("/runs/{run_id}/studio/{artifact}")
@@ -1160,6 +1397,49 @@ def export_review(run_id: str, fmt: str, template: str = "ieee", illustrate: boo
     )
 
 
+class PaperListExportBody(BaseModel):
+    fmt: str = "xlsx"                      # "csv" | "xlsx"
+    included: dict[str, bool] | None = None  # idx (string keys, JSON) -> checked in the UI right now;
+                                               # overrides server-known approval so this reflects the
+                                               # Filter stage's live checkboxes even before they're submitted
+
+
+@router.post("/runs/{run_id}/papers/export")
+def export_paper_list(run_id: str, body: PaperListExportBody, user_id: str = Depends(require_user)):
+    """Export the papers table — usable at the Filter stage (before
+    extraction has run, so those columns are just blank) or the Sources
+    stage (after). Doesn't touch the generated-review export path in
+    core/exporters.py; this is the raw data, not the write-up."""
+    from fastapi.responses import Response
+    from core.paper_export import papers_to_csv, papers_to_xlsx
+
+    run = get_run(run_id, user_id)
+    extractions_by_idx = {e.get("idx"): e for e in (run.extractions or [])}
+
+    if body.included is not None:
+        included_map = {int(k): v for k, v in body.included.items()}
+    else:
+        approved_idx = {p.get("idx") for p in run.approved_papers}
+        included_map = {p.get("idx"): (p.get("idx") in approved_idx) for p in run.papers}
+
+    fmt = (body.fmt or "xlsx").lower()
+    stem = _safe_filename(run.topic or "papers")
+    if fmt == "csv":
+        data = papers_to_csv(run.papers, extractions_by_idx, included_map)
+        media = "text/csv"
+    else:
+        try:
+            data = papers_to_xlsx(run.papers, extractions_by_idx, included_map)
+        except ImportError as e:
+            raise HTTPException(500, f"Export dependency missing: {e}. Run: pip install -r requirements.txt")
+        media = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        fmt = "xlsx"
+    return Response(
+        content=data, media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{stem}_papers.{fmt}"'},
+    )
+
+
 def _ordered_for_export(run) -> list[dict]:
     """Papers in citation order, so [n] in the text matches the reference list."""
     return SiftPipeline()._ordered_papers(run)
@@ -1169,6 +1449,48 @@ def _safe_filename(text: str) -> str:
     out = re.sub(r"[^\w\s-]", "", (text or "review")).strip()
     out = re.sub(r"\s+", "_", out)
     return (out[:60] or "literature_review")
+
+
+@router.get("/runs/{run_id}/experiments/export/{fmt}")
+def export_experiments(run_id: str, fmt: str, user_id: str = Depends(require_user)):
+    """Download the hypothesis + experiment plan (Methods tab) as .docx or
+    .pdf. Same no-LLM-cost approach as /export/{fmt}: built locally from
+    content the pipeline already produced — the plan, the critic's scores if
+    a Refine pass has run, and the source papers/extractions for the
+    evidence-trail table."""
+    from fastapi.responses import Response
+    from core import exporters
+
+    run = get_run(run_id, user_id)
+    if not run.experiment_plan or not run.experiment_plan.get("hypotheses"):
+        raise HTTPException(400, "Design experiments first.")
+
+    papers = _ordered_for_export(run)
+    stem = _safe_filename((run.topic or "experiment_plan")) + "_experiments"
+
+    try:
+        if fmt == "docx":
+            data = exporters.build_experiments_docx(
+                run.topic, run.experiment_plan, papers, run.extractions, run.experiment_critique)
+            media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        elif fmt == "pdf":
+            data = exporters.build_experiments_pdf(
+                run.topic, run.experiment_plan, papers, run.extractions, run.experiment_critique)
+            media = "application/pdf"
+        else:
+            raise HTTPException(400, "Unsupported format. Use docx or pdf.")
+    except ImportError as e:
+        raise HTTPException(
+            500, f"Export dependency missing: {e}. Run: pip install -r requirements.txt")
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"Export failed: {e}")
+
+    return Response(
+        content=data, media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{stem}.{fmt}"'},
+    )
 
 
 @router.get("/news")

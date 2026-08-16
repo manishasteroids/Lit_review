@@ -27,6 +27,14 @@ const REQUEST_TIMEOUT_MS = 75_000;
 const WRITE_TIMEOUT_MS = 360_000;
 const WRITE_TIMEOUT_MS_DEEP = 600_000;
 
+// Same problem as the Writer, one flight up: refine_experiments() chains
+// design (1 call) -> critique (1 call) -> refine EACH weak hypothesis (up to
+// 2 calls) -> critique again -> refine again, up to 2 rounds — worst case 7
+// sequential Claude calls in one request. The default 75s timeout trips on
+// that well before anything is actually wrong (see "Hypothesis Refinement
+// failed: Timed out" — that was this, not a real backend hang).
+const REFINE_TIMEOUT_MS = 300_000;
+
 // Authenticated GET with the same 401-refresh-retry + real error surfacing as
 // request() below — several GET endpoints (usage trend, etc.) used to bypass
 // this with a raw fetch(...).then(r => r.json()), so an expired token (or any
@@ -215,6 +223,12 @@ function streamRun(topic, apiKey, model, mode, onEvent, projectId) {
 export const api = {
   createRunStream: streamRun,
 
+  // Studio-only entry: a run with no search — just a place to upload your
+  // own PDFs/DOCX/PPTX and use Studio (chat/report/deck) directly, without
+  // the reformulate -> search -> filter -> write pipeline.
+  createBlankRun: (topic, projectId) =>
+    request("/api/runs/blank", { topic: topic || undefined, project_id: projectId || undefined }),
+
   filterPapers: (runId, approvedIndices) =>
     request(`/api/runs/${runId}/filter`, { approved_indices: approvedIndices }),
 
@@ -251,6 +265,50 @@ export const api = {
 
   designExperiments: (runId, apiKey, model) =>
     request(`/api/runs/${runId}/experiments`, { api_key: apiKey, model }),
+
+  refineExperiments: (runId, apiKey, model) =>
+    request(`/api/runs/${runId}/experiments/refine`, { api_key: apiKey, model },
+      REFINE_TIMEOUT_MS),
+
+  // Direct human edit to one hypothesis — instant, no LLM call.
+  updateHypothesis: async (runId, index, edits) =>
+    fetch(BASE + `/api/runs/${runId}/experiments/${index}`, {
+      method: "PATCH",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ edits }),
+    }).then((r) => r.json()),
+
+  // Argue with a hypothesis — the designer either revises it or defends it
+  // with a specific counter-reason. One LLM call, but give it real headroom
+  // for the same reason as Refine (rate-limit retries can add tens of
+  // seconds on top of ordinary latency).
+  disputeHypothesis: (runId, index, argument, apiKey, model) =>
+    request(`/api/runs/${runId}/experiments/${index}/dispute`,
+      { argument, api_key: apiKey, model }, 120_000),
+
+  // Download the hypothesis + experiment plan as .docx or .pdf — same
+  // generated-from-existing-content, no-LLM-cost approach as downloadExport.
+  downloadExperimentsExport: async (runId, fmt) => {
+    const res = await fetch(`${BASE}/api/runs/${runId}/experiments/export/${fmt}`, {
+      headers: await authHeaders(),
+    });
+    if (!res.ok) {
+      let detail = `Export failed (${res.status})`;
+      try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="?([^"]+)"?/.exec(cd);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = m ? m[1] : `experiments.${fmt}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  },
 
   // Sources-page editing
   resolvePaper: (runId, identifier) =>
@@ -308,6 +366,17 @@ export const api = {
       question: "", paper_idxs: paperIdxs || [], chat_mode: chatMode, api_key: apiKey,
     }),
 
+  // Studio chat history (per run, scoped to the user) — no LLM calls
+  getStudioHistory: async (runId) =>
+    fetch(BASE + `/api/runs/${runId}/studio/history`, { headers: await authHeaders() })
+      .then((r) => (r.ok ? r.json() : { messages: [] })).catch(() => ({ messages: [] })),
+  saveStudioHistory: async (runId, messages) =>
+    fetch(BASE + `/api/runs/${runId}/studio/history`, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ messages: messages || [] }),
+    }).then((r) => (r.ok ? r.json() : { ok: false })).catch(() => ({ ok: false })),
+
   // Download a generated Studio artifact — no extra model cost
   studioExport: async (runId, fmt, content, title, paperIdxs) => {
     const res = await fetch(`${BASE}/api/runs/${runId}/studio/export/${fmt}`, {
@@ -356,6 +425,35 @@ export const api = {
     const a = document.createElement("a");
     a.href = url;
     a.download = m ? m[1] : `review.${fmt}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  },
+
+  // Download the papers TABLE (not the written review) as CSV/XLSX — works
+  // at the Filter stage (extraction columns just come back blank) or the
+  // Sources stage. `included` (idx -> bool) is optional; pass the Filter
+  // page's live checkbox state so the export reflects what's on screen even
+  // before "Review N papers" has been submitted to the backend.
+  downloadPaperList: async (runId, fmt, included) => {
+    const res = await fetch(`${BASE}/api/runs/${runId}/papers/export`, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ fmt, included: included || null }),
+    });
+    if (!res.ok) {
+      let detail = `Export failed (${res.status})`;
+      try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="?([^"]+)"?/.exec(cd);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = m ? m[1] : `papers.${fmt}`;
     document.body.appendChild(a);
     a.click();
     a.remove();

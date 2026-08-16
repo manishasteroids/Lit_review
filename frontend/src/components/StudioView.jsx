@@ -52,6 +52,9 @@ export default function StudioView({ runId, papers = [], extractions = [], apiKe
   const [err, setErr] = useState(null);
   const logRef = useRef(null);
   const artRef = useRef(null);
+  // Guards against saving an empty/in-flight message list over real saved
+  // history — flips true only once the initial load for this run resolves.
+  const loadedRef = useRef(false);
 
   const extByIdx = {};
   extractions.forEach((e) => (extByIdx[e.idx] = e));
@@ -62,6 +65,19 @@ export default function StudioView({ runId, papers = [], extractions = [], apiKe
     renderMermaid(logRef.current);
   }, [messages, sending]);
   useEffect(() => { renderMermaid(artRef.current); }, [artifact]);
+
+  // Resume a saved Studio conversation for this run instead of starting
+  // blank every time the panel opens or the page reloads.
+  useEffect(() => {
+    let alive = true;
+    loadedRef.current = false;
+    api.getStudioHistory(runId).then((r) => {
+      if (!alive) return;
+      setMessages(r.messages || []);
+      loadedRef.current = true;
+    }).catch(() => { loadedRef.current = true; });
+    return () => { alive = false; };
+  }, [runId]);
 
   const toggle = (idx) => setSelected((s) => {
     const n = new Set(s); n.has(idx) ? n.delete(idx) : n.add(idx); return n;
@@ -76,13 +92,19 @@ export default function StudioView({ runId, papers = [], extractions = [], apiKe
     const history = messages;
     const next = [...history, { role: "user", content: q }];
     setMessages(next); setDraft(""); setSending(true); setFollowups([]);
+    let final = next;
     try {
       const r = await api.studioChat(runId, q, idxs, history, mode, apiKey || undefined);
-      setMessages([...next, { role: "assistant", content: r.answer }]);
+      final = [...next, { role: "assistant", content: r.answer }];
+      setMessages(final);
       setFollowups(r.followups || []);
     } catch (e) {
-      setMessages([...next, { role: "assistant", content: "⚠ " + e.message }]);
-    } finally { setSending(false); }
+      final = [...next, { role: "assistant", content: "⚠ " + e.message }];
+      setMessages(final);
+    } finally {
+      setSending(false);
+      if (loadedRef.current) api.saveStudioHistory(runId, final).catch(() => {});
+    }
   }
 
   async function generate(kind, label) {

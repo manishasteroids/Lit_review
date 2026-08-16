@@ -7,6 +7,8 @@ Writes the four sections of the review one at a time so each can stream to
 the frontend as it completes, citing sources as [n] in IEEE style using the
 ranking order the Critic & Synthesizer produced.
 """
+from concurrent.futures import ThreadPoolExecutor
+
 from agents.base import Agent
 
 SECTION_SPECS = [
@@ -171,8 +173,7 @@ class WriterAgent(Agent):
         specs = DEEP_SECTION_SPECS if deep else SECTION_SPECS
         system = DEEP_SYSTEM if deep else SYSTEM
 
-        sections: dict[str, str] = {}
-        for key, prompt in specs:
+        def call_section(key: str, prompt: str) -> str:
             # The title is one short line — don't spend a big budget on it.
             # Deep's other sections are written to run meaningfully longer
             # (see DEEP_SECTION_SPECS), so they get a bigger token budget too
@@ -186,7 +187,29 @@ class WriterAgent(Agent):
                 out = self.llm.call(
                     user_text=base + "\n" + prompt, system=system, max_tokens=budget
                 )
-            if key == "title":
-                out = _clean_title(out)
-            sections[key] = out
+            return _clean_title(out) if key == "title" else out
+
+        sections: dict[str, str] = {}
+        if not specs:
+            return sections
+
+        # The 6 sections used to run one at a time — in Deep mode that's 5
+        # sequential Opus calls at up to 3000 tokens each, which is most of
+        # why Deep reviews feel slow to generate. They're independent given
+        # the shared corpus, so: write the title first (cheap, and with
+        # caching on, this is also what WRITES the prompt cache), then fire
+        # the remaining sections at once so they all read from an already-
+        # warm cache instead of each re-paying for it — same total tokens,
+        # wall-clock time now bounded by the slowest single section instead
+        # of the sum of all of them.
+        title_key, title_prompt = specs[0]
+        sections[title_key] = call_section(title_key, title_prompt)
+
+        rest = specs[1:]
+        if rest:
+            with ThreadPoolExecutor(max_workers=len(rest)) as pool:
+                futures = {key: pool.submit(call_section, key, prompt) for key, prompt in rest}
+                for key, fut in futures.items():
+                    sections[key] = fut.result()
+
         return sections

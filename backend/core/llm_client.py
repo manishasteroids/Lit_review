@@ -259,4 +259,46 @@ class LLMClient:
         complete value."""
         t = re.sub(r"```json", "", text, flags=re.I).replace("```", "").strip()
         start = next((i for i, c in enumerate(t) if c in "[{"), 0)
-        return json.JSONDecoder().raw_decode(t[start:])[0]
+        body = t[start:]
+        try:
+            return json.JSONDecoder().raw_decode(body)[0]
+        except json.JSONDecodeError:
+            # Common cause: the response hit max_tokens mid-value (an
+            # "Unterminated string" or missing closing bracket right at the
+            # end of the text) — the JSON is otherwise complete/valid, it
+            # just got cut off. Try to salvage it instead of discarding an
+            # otherwise-good response; if the text is broken for some other
+            # reason this repair won't produce valid JSON either and the
+            # original error propagates from the retry below.
+            return json.JSONDecoder().raw_decode(LLMClient._repair_truncated_json(body))[0]
+
+    @staticmethod
+    def _repair_truncated_json(t: str) -> str:
+        """Best-effort repair for JSON cut off mid-value: close an
+        unterminated string, then close any still-open [] / {} in the right
+        order. Not a general JSON repair tool — just enough to handle the
+        'ran out of output tokens partway through' case."""
+        stack: list[str] = []
+        in_string = False
+        escape = False
+        for ch in t:
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+            else:
+                if ch == '"':
+                    in_string = True
+                elif ch in "{[":
+                    stack.append(ch)
+                elif ch in "}]" and stack:
+                    stack.pop()
+        repaired = t
+        if in_string:
+            repaired += '"'
+        for opener in reversed(stack):
+            repaired += "}" if opener == "{" else "]"
+        return repaired

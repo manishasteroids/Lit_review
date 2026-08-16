@@ -103,7 +103,7 @@ export function ModeBar({ modes, mode, setMode }) {
   );
 }
 
-export default function QueryInput({ topic, setTopic, busy, onRun }) {
+export default function QueryInput({ topic, setTopic, busy, onRun, onAnalyzeDocs }) {
   return (
     <div className="card">
       <div className="card-h">
@@ -129,6 +129,17 @@ export default function QueryInput({ topic, setTopic, busy, onRun }) {
         </button>
         <span className="muted tiny">→ reformulate · search web · filter · extract · synthesize · write</span>
       </div>
+
+      {onAnalyzeDocs && (
+        <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--line)" }}>
+          <button className="btn ghost sm" disabled={busy} onClick={onAnalyzeDocs}>
+            Or analyze your own documents →
+          </button>
+          <div className="muted tiny" style={{ marginTop: 6 }}>
+            Skip the search — upload PDFs, Word docs, or slide decks and go straight to Studio to chat, summarize, or build a report/deck from them.
+          </div>
+        </div>
+      )}
     </div>
   );
 }

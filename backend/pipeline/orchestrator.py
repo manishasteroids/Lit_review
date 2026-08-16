@@ -27,6 +27,7 @@ from pipeline.data_analysis import comparison_table, year_distribution
 from pipeline.knowledge_graph import build_knowledge_graph
 
 from agents.experiment_designer import ExperimentDesignerAgent
+from agents.hypothesis_critic import HypothesisCriticAgent
  
  
 @dataclass
@@ -41,6 +42,9 @@ class RunState:
     sections: dict = field(default_factory=dict)
     eval_result: Optional[dict] = None
     experiment_plan: Optional[dict] = None
+    experiment_critique: Optional[dict] = None
+    experiment_iterations: list[dict] = field(default_factory=list)  # refinement history, oldest first
+    experiment_debate: dict = field(default_factory=dict)  # hypothesis index (str) -> list of {argument, stance, response}
     stage: str = "query"
     mode: Optional[str] = None      # search mode, so later stages reuse its models
     extract_stats: Optional[dict] = None   # full-text coverage for Deep runs
@@ -92,6 +96,7 @@ class SiftPipeline:
         self.writer = WriterAgent(self.main)
         self.evaluator = EvaluatorAgent(self.mid)
         self.experiment_designer = ExperimentDesignerAgent(self.mid)
+        self.hypothesis_critic = HypothesisCriticAgent(self.mid)
 
     def _attribute(self, run_id: str) -> None:
         """Tag every per-purpose client with the session id for the usage ledger."""
@@ -252,5 +257,124 @@ class SiftPipeline:
         run.experiment_plan = self.experiment_designer.run(
             run.topic, run.synthesis or {}, run.extractions
         )
+        # A fresh plan invalidates any prior critique/refinement history.
+        run.experiment_critique = None
+        run.experiment_iterations = []
         return run.experiment_plan
+
+    def critique_experiments(self, run: RunState) -> dict:
+        """Score the current plan without changing it — used standalone by
+        the API, and as the first step of refine_experiments()."""
+        self._attribute(run.run_id)
+        self.mid.stage = "experiments_critique"
+        run.experiment_critique = self.hypothesis_critic.run(
+            run.topic, run.experiment_plan or {}, run.extractions
+        )
+        return run.experiment_critique
+
+    def refine_experiments(self, run: RunState, max_iters: int = 2,
+                            threshold: int = 75) -> dict:
+        """Recursive self-improvement loop: critique -> revise every
+        hypothesis scoring below `threshold` -> re-critique -> repeat, up to
+        `max_iters` rounds. Each round's plan+critique snapshot is appended
+        to run.experiment_iterations so the UI/API can show the history
+        instead of only the final answer. Generates a plan first if this run
+        doesn't have one yet.
+
+        Stops early once every hypothesis clears the threshold — this is
+        deliberately a plateau/budget stop, not "run max_iters no matter
+        what", so a strong first draft doesn't get needlessly reworked."""
+        self._attribute(run.run_id)
+        if not run.experiment_plan or not run.experiment_plan.get("hypotheses"):
+            self.design_experiments(run)
+
+        for i in range(max_iters):
+            self.mid.stage = "experiments_critique"
+            critique = self.hypothesis_critic.run(
+                run.topic, run.experiment_plan or {}, run.extractions
+            )
+            run.experiment_critique = critique
+            run.experiment_iterations.append({
+                "iteration": i + 1,
+                "plan": run.experiment_plan,
+                "critique": critique,
+            })
+
+            by_index = {c.get("index"): c for c in critique.get("critiques", [])}
+            weak = {idx: c for idx, c in by_index.items()
+                    if isinstance(idx, int) and (c.get("overall") or 0) < threshold}
+            if not weak:
+                break  # every hypothesis already clears the bar — done early
+
+            self.mid.stage = "experiments_refine"
+            hyps = run.experiment_plan.get("hypotheses", [])
+            for idx, c in weak.items():
+                if 0 <= idx < len(hyps):
+                    hyps[idx] = self.experiment_designer.refine(
+                        run.topic, hyps[idx], c, run.extractions
+                    )
+
+        return {
+            "plan": run.experiment_plan,
+            "critique": run.experiment_critique,
+            "iterations": len(run.experiment_iterations),
+        }
+
+    # ---- human-in-the-loop: direct edits + argue-with-the-agent -----------
+    def update_hypothesis(self, run: RunState, index: int, edits: dict) -> dict:
+        """Apply a user's direct edit to one hypothesis — no LLM call, so it's
+        instant and free. `edits` is merged shallowly into the existing
+        hypothesis dict (fields the UI didn't send are left as-is). The user
+        is always allowed to simply overrule the agents."""
+        hyps = (run.experiment_plan or {}).get("hypotheses", [])
+        if not (0 <= index < len(hyps)):
+            raise ValueError(f"No hypothesis at index {index}")
+        hyps[index] = {**hyps[index], **edits}
+        # A human edit makes the AI critic's old scores for this hypothesis
+        # stale — drop them so the UI doesn't show a score for text that no
+        # longer exists. It's recomputed next time Refine runs.
+        if run.experiment_critique:
+            run.experiment_critique = {
+                **run.experiment_critique,
+                "critiques": [c for c in run.experiment_critique.get("critiques", [])
+                              if c.get("index") != index],
+            }
+        return hyps[index]
+
+    def dispute_hypothesis(self, run: RunState, index: int, argument: str) -> dict:
+        """A human argues with one hypothesis instead of accepting the AI
+        critic's score. Distinct from refine_experiments(): that loop reacts
+        to the Critic agent's rubric and applies its own revisions
+        automatically; this reacts to a specific human objection and
+        deliberately does NOT overwrite the hypothesis — "both agree" means
+        the human decides whether to apply what the agent proposes, via a
+        separate update_hypothesis() call (same one direct edits use). The
+        designer is instructed to either genuinely revise or genuinely
+        defend — not just concede for politeness."""
+        self._attribute(run.run_id)
+        hyps = (run.experiment_plan or {}).get("hypotheses", [])
+        if not (0 <= index < len(hyps)):
+            raise ValueError(f"No hypothesis at index {index}")
+
+        self.mid.stage = "experiments_dispute"
+        result = self.experiment_designer.respond_to_challenge(
+            run.topic, hyps[index], argument, run.extractions
+        )
+        proposed = result["hypothesis"] if result["stance"] == "revised" else None
+
+        key = str(index)
+        entry = {
+            "argument": argument,
+            "stance": result["stance"],
+            "response": result["response"],
+            "proposed": proposed,
+        }
+        run.experiment_debate.setdefault(key, []).append(entry)
+        return {
+            "hypothesis": hyps[index],  # unchanged — nothing is applied automatically
+            "stance": result["stance"],
+            "response": result["response"],
+            "proposed": proposed,
+            "history": run.experiment_debate[key],
+        }
  

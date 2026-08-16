@@ -285,10 +285,43 @@ a{color:var(--indigo);}
 .studio-dl{display:flex;gap:6px;padding:0 13px 10px;}
 .studio-art-body{flex:1;overflow-y:auto;padding:0 13px 14px;font-size:12.5px;}
 
-/* Mermaid diagrams rendered from ```mermaid blocks in chat answers */
+/* Mermaid diagrams rendered from ```mermaid blocks in chat answers.
+   Clickable — see diagramZoom.js for the full-screen lightbox. */
 .chat-diagram{background:#fff;border:1px solid var(--line);border-radius:10px;
-  padding:12px;margin:10px 0;overflow-x:auto;text-align:center;}
+  padding:12px;margin:10px 0;overflow-x:auto;text-align:center;cursor:zoom-in;
+  transition:border-color .15s ease, box-shadow .15s ease;position:relative;}
+.chat-diagram:hover{border-color:#7c6ef0;box-shadow:0 4px 16px rgba(91,79,240,.14);}
+.chat-diagram::after{content:"⤢ click to enlarge";position:absolute;top:6px;right:10px;
+  font-size:10px;color:#9a9aab;opacity:0;transition:opacity .15s ease;pointer-events:none;}
+.chat-diagram:hover::after{opacity:1;}
 .chat-diagram svg{max-width:100%;height:auto;}
+
+/* Diagram zoom lightbox (diagramZoom.js) — a fixed-size viewport clips a
+   pannable/scalable box so zoom + drag-to-pan work without fighting native
+   scroll; the box itself is transformed (translate + scale) from JS. */
+.dz-overlay{position:fixed;inset:0;background:rgba(17,17,27,.72);z-index:10000;
+  display:none;align-items:center;justify-content:center;padding:40px;
+  backdrop-filter:blur(2px);}
+.dz-overlay.on{display:flex;}
+.dz-viewport{width:min(1100px,92vw);height:min(760px,84vh);overflow:hidden;
+  border-radius:14px;background:#fff;box-shadow:0 24px 70px rgba(0,0,0,.35);
+  display:flex;align-items:center;justify-content:center;cursor:grab;}
+.dz-viewport.dragging{cursor:grabbing;}
+.dz-box{padding:28px;transform-origin:center center;transition:transform .05s linear;}
+.dz-box svg{max-width:none;width:auto;height:auto;min-width:500px;display:block;}
+.dz-toolbar{position:absolute;top:22px;left:50%;transform:translateX(-50%);
+  display:flex;align-items:center;gap:2px;background:rgba(255,255,255,.1);
+  border:1px solid rgba(255,255,255,.18);border-radius:10px;padding:4px;backdrop-filter:blur(6px);}
+.dz-btn{width:32px;height:32px;border-radius:7px;border:none;background:transparent;
+  color:#fff;font-size:17px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.dz-btn:hover{background:rgba(255,255,255,.16);}
+.dz-btn[data-act="reset"]{width:auto;font-size:12px;font-weight:600;padding:0 10px;}
+.dz-pct{color:#fff;font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace;
+  width:44px;text-align:center;}
+.dz-close{position:absolute;top:22px;right:28px;width:40px;height:40px;border-radius:50%;
+  border:none;background:rgba(255,255,255,.12);color:#fff;font-size:24px;line-height:1;
+  cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.dz-close:hover{background:rgba(255,255,255,.22);}
 .chat-md table{border-collapse:collapse;margin:6px 0;font-size:12.5px;}
 .chat-md th,.chat-md td{border:1px solid var(--line);padding:4px 8px;text-align:left;}
 .chat-input{display:flex;gap:8px;padding:12px 14px;border-top:1px solid var(--line);}

@@ -2,6 +2,34 @@ import React, { useState, useMemo } from "react";
 import PaperChatPanel from "./PaperChatPanel.jsx";
 import PdfViewer from "./PdfViewer.jsx";
 import { useConfirm } from "./ConfirmModal.jsx";
+import { api } from "../api/client.js";
+
+function ExportPapersButtons({ runId, included }) {
+  const [busy, setBusy] = useState(null);
+  const [err, setErr] = useState(null);
+  async function go(fmt) {
+    setBusy(fmt);
+    setErr(null);
+    try {
+      await api.downloadPaperList(runId, fmt, included);
+    } catch (e) {
+      setErr(e.message || "Export failed.");
+    } finally {
+      setBusy(null);
+    }
+  }
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+      <button className="btn ghost sm" disabled={!!busy} onClick={() => go("xlsx")}>
+        {busy === "xlsx" ? "…" : "Export Excel"}
+      </button>
+      <button className="btn ghost sm" disabled={!!busy} onClick={() => go("csv")}>
+        {busy === "csv" ? "…" : "Export CSV"}
+      </button>
+      {err && <span className="tiny" style={{ color: "#f08a8a" }}>{err}</span>}
+    </span>
+  );
+}
  
 const COLUMNS = [
   { key: "paper", label: "Paper", always: true, width: 300 },
@@ -131,6 +159,7 @@ export default function SourcesView({
           <button className="btn ghost sm" disabled={busy || !analysisStale} onClick={onReanalyze}>
             {busy ? "Updating…" : "Update analysis"}
           </button>
+          <ExportPapersButtons runId={runId} included={included} />
           <span style={{ flex: 1 }} />
           <button className="btn sm" disabled={!canGenerate} onClick={generate}
             title={analysisStale ? "Update the analysis first" : ""}>
@@ -434,11 +463,11 @@ function AddPaperModal({ runId, busy, onClose, onAdd, onUpload }) {
         <div style={{ marginTop: 18, paddingTop: 16, borderTop: "1px solid var(--line)" }}>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 3 }}>Or upload a file</div>
           <div className="muted tiny" style={{ marginBottom: 10 }}>
-            For papers not indexed anywhere — unpublished drafts, a scan you already have, an internal report. PDF or Word, up to 25MB.
+            For material not indexed anywhere — unpublished drafts, a scan you already have, an internal report, a colleague's slide deck. PDF, Word, or PowerPoint, up to 25MB.
           </div>
           <label className={"btn ghost sm" + (busy ? " disabled" : "")} style={{ display: "inline-block", cursor: busy ? "default" : "pointer" }}>
-            {fileName ? `Uploading ${fileName}…` : "Choose PDF or DOCX…"}
-            <input type="file" accept=".pdf,.docx" onChange={handleFile}
+            {fileName ? `Uploading ${fileName}…` : "Choose PDF, DOCX, or PPTX…"}
+            <input type="file" accept=".pdf,.docx,.pptx" onChange={handleFile}
               disabled={busy} style={{ display: "none" }} />
           </label>
           {uploadErr && <div style={{ color: "#c0392b", fontSize: 13, marginTop: 8 }}>{uploadErr}</div>}
