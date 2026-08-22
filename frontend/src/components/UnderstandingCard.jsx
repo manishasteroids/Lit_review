@@ -17,12 +17,40 @@ export default function UnderstandingCard({ topic, reform, progressMsgs = [], st
 
   const short = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + "…" : s || "");
 
+  // Wrap onto up to `maxLines` lines of ~`perLine` chars each (word-aware),
+  // truncating with an ellipsis if it still doesn't fit. Used for the centre
+  // node, whose label (the full research question) is often too long for a
+  // single line — previously it just overflowed the fixed-width box, which
+  // in some browsers/fonts rendered as effectively invisible.
+  function wrap(s, perLine, maxLines) {
+    const words = (s || "").trim().split(/\s+/);
+    const lines = [];
+    let cur = "";
+    for (const w of words) {
+      const next = cur ? `${cur} ${w}` : w;
+      if (next.length > perLine && cur) { lines.push(cur); cur = w; }
+      else cur = next;
+      if (lines.length === maxLines) break;
+    }
+    if (lines.length < maxLines && cur) lines.push(cur);
+    if (lines.length === maxLines) {
+      const last = lines[maxLines - 1];
+      if (words.join(" ").length > lines.join(" ").length) {
+        lines[maxLines - 1] = last.length > perLine - 1 ? last.slice(0, perLine - 1) + "…" : last + "…";
+      }
+    }
+    return lines.length ? lines : [""];
+  }
+
+  const topicLines = wrap(topic, 24, 3);
+
   // Concept-map geometry: topic in the centre, terms on a ring around it.
   const W = 600, H = 320, cx = W / 2, cy = H / 2, R = 140;
   const nodes = terms.map((t, i) => {
     const a = (i / Math.max(terms.length, 1)) * 2 * Math.PI - Math.PI / 2;
     return { t, x: cx + R * Math.cos(a), y: cy + R * Math.sin(a) };
   });
+  const centerH = 34 + (topicLines.length - 1) * 16;
 
   return (
     <div className="card">
@@ -54,9 +82,14 @@ export default function UnderstandingCard({ topic, reform, progressMsgs = [], st
             </g>
           ))}
           <g>
-            <rect x={cx - 92} y={cy - 21} width={184} height={42} rx={11} fill="var(--indigo)" />
-            <text x={cx} y={cy + 4} textAnchor="middle" fontSize="12" fontWeight="600"
-              fill="#fff">{short(topic, 28)}</text>
+            <rect x={cx - 98} y={cy - centerH / 2} width={196} height={centerH} rx={11} fill="var(--indigo)" />
+            <text x={cx} y={cy - (topicLines.length - 1) * 8 + 4} textAnchor="middle" fontSize="12"
+              fontWeight="600" fontFamily="'Space Grotesk',-apple-system,BlinkMacSystemFont,sans-serif"
+              fill="#ffffff">
+              {topicLines.map((line, i) => (
+                <tspan key={i} x={cx} dy={i === 0 ? 0 : 16}>{line}</tspan>
+              ))}
+            </text>
           </g>
         </svg>
       )}

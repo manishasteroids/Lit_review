@@ -2,11 +2,14 @@ import React, { useState, useMemo } from "react";
 import PaperChatPanel from "./PaperChatPanel.jsx";
 import PdfViewer from "./PdfViewer.jsx";
 import { useConfirm } from "./ConfirmModal.jsx";
+import MathText from "./MathText.jsx";
 import { api } from "../api/client.js";
+import { Plus, Trash2, RotateCw, Download } from "./icons.jsx";
 
-function ExportPapersButtons({ runId, included }) {
+function ExportPapersButtons({ runId, included, count = 0 }) {
   const [busy, setBusy] = useState(null);
   const [err, setErr] = useState(null);
+  const empty = count === 0;
   async function go(fmt) {
     setBusy(fmt);
     setErr(null);
@@ -20,11 +23,13 @@ function ExportPapersButtons({ runId, included }) {
   }
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-      <button className="btn ghost sm" disabled={!!busy} onClick={() => go("xlsx")}>
-        {busy === "xlsx" ? "…" : "Export Excel"}
+      <button className="btn ghost sm" disabled={!!busy || empty} onClick={() => go("xlsx")}
+        title={empty ? "No sources to export yet" : ""}>
+        <Download size={13} /> {busy === "xlsx" ? "…" : "Export Excel"}
       </button>
-      <button className="btn ghost sm" disabled={!!busy} onClick={() => go("csv")}>
-        {busy === "csv" ? "…" : "Export CSV"}
+      <button className="btn ghost sm" disabled={!!busy || empty} onClick={() => go("csv")}
+        title={empty ? "No sources to export yet" : ""}>
+        <Download size={13} /> {busy === "csv" ? "…" : "Export CSV"}
       </button>
       {err && <span className="tiny" style={{ color: "#f08a8a" }}>{err}</span>}
     </span>
@@ -152,14 +157,16 @@ export default function SourcesView({
           paddingBottom: 12, marginBottom: 12, borderBottom: "1px solid var(--line)",
         }}>
           <span style={{ ...badge("var(--indigo-soft)", ACCENT) }}>{includedCount} sources included</span>
-          <button className="btn ghost sm" disabled={busy || adding} onClick={() => setShowAdd(true)}>+ Add paper</button>
+          <button className="btn ghost sm" disabled={busy || adding} onClick={() => setShowAdd(true)}>
+            <Plus size={13} /> Add paper
+          </button>
           <button className="btn ghost sm" disabled={busy || selected.size === 0} onClick={removeSelected}>
-            Remove selected{selected.size ? ` (${selected.size})` : ""}
+            <Trash2 size={13} /> Remove selected{selected.size ? ` (${selected.size})` : ""}
           </button>
           <button className="btn ghost sm" disabled={busy || !analysisStale} onClick={onReanalyze}>
-            {busy ? "Updating…" : "Update analysis"}
+            <RotateCw size={13} className={busy ? "spin" : ""} /> {busy ? "Updating…" : "Update analysis"}
           </button>
-          <ExportPapersButtons runId={runId} included={included} />
+          <ExportPapersButtons runId={runId} included={included} count={includedCount} />
           <span style={{ flex: 1 }} />
           <button className="btn sm" disabled={!canGenerate} onClick={generate}
             title={analysisStale ? "Update the analysis first" : ""}>
@@ -282,10 +289,13 @@ export default function SourcesView({
                     }
                     // abstract (and excerpt) render as wide text; abstract is
                     // read from the paper, other columns from the extraction.
+                    // Abstracts (and text derived from them) often carry inline
+                    // LaTeX straight from the source (e.g. "$18.44 \text{dB}$")
+                    // — MathText typesets that instead of showing raw markup.
                     const value = c.fromPaper ? p[c.key] : e[c.key];
                     return (
                       <td key={c.key} className={c.key === "abstract" || c.key === "excerpt" ? "pt-excerpt" : ""}>
-                        {value || <span className="pt-na">n/a</span>}
+                        {value ? <MathText text={value} /> : <span className="pt-na">n/a</span>}
                       </td>
                     );
                   })}
@@ -503,17 +513,17 @@ function PaperDetail({ paper, ext, onClose, onRemove, onChat, onRead }) {
       {paper.abstract && (
         <div style={{ marginBottom: 14 }}>
           <div className="eyebrow" style={{ marginBottom: 4 }}>Abstract</div>
-          <div style={{ fontSize: 13.5, lineHeight: 1.55 }}>{paper.abstract}</div>
+          <div style={{ fontSize: 13.5, lineHeight: 1.55 }}><MathText text={paper.abstract} /></div>
         </div>
       )}
- 
+
       {fields.length > 0 && (
         <div style={{ marginBottom: 14 }}>
           <div className="eyebrow" style={{ marginBottom: 6 }}>Extracted fields</div>
           {fields.map(([k, v]) => (
             <div key={k} style={{ display: "flex", gap: 10, fontSize: 13, marginBottom: 5 }}>
               <span style={{ minWidth: 96, color: "var(--muted)" }}>{k}</span>
-              <span>{v}</span>
+              <span><MathText text={v} /></span>
             </div>
           ))}
         </div>

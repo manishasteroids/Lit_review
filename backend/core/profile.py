@@ -9,9 +9,14 @@ local mode today and per-user once Supabase auth is configured.
 from datetime import datetime, timezone
 from typing import Optional
 
-from core.db import _conn, _PH
+from core.db import _add_column, _conn, _PH
 
-FIELDS = ("display_name", "orcid", "scholar_url", "affiliation")
+# `timezone_pref` (not `timezone`, to avoid shadowing the stdlib import above)
+# is an IANA zone name (e.g. "America/Los_Angeles"), used to render absolute
+# timestamps (History list, etc.) in the researcher's own timezone rather
+# than whatever the browser happens to guess. Empty string = "use the
+# browser's local timezone", the same default as before this field existed.
+FIELDS = ("display_name", "orcid", "scholar_url", "affiliation", "timezone_pref")
 
 
 def init_profile_table() -> None:
@@ -28,6 +33,8 @@ def init_profile_table() -> None:
             )
             """
         )
+        # Backfill for databases created before timezone_pref existed.
+        _add_column(conn, "user_profile", "timezone_pref", "TEXT")
 
 
 def get_profile(user_id: str) -> dict:

@@ -85,6 +85,11 @@ const SOURCE = {
   arxiv:            { label: "arXiv",            fg: "var(--muted)", bg: "var(--panel2)", title: "Verified record from arXiv" },
   model:            { label: "⚠ unverified",     fg: "#b3261e",      bg: "rgba(240,138,138,.16)", title: "Model-generated (databases unreachable) — verify before citing" },
   pubmed:           { label: "PubMed",           fg: "var(--muted)", bg: "var(--panel2)", title: "Verified record from PubMed" },
+  openalex:         { label: "OpenAlex",         fg: "var(--muted)", bg: "var(--panel2)", title: "Verified record from OpenAlex" },
+  crossref:         { label: "CrossRef",         fg: "var(--muted)", bg: "var(--panel2)", title: "Verified record from CrossRef" },
+  clinicaltrials:   { label: "ClinicalTrials.gov", fg: "var(--muted)", bg: "var(--panel2)", title: "Trial registration from ClinicalTrials.gov" },
+  ieee:             { label: "IEEE Xplore",      fg: "var(--muted)", bg: "var(--panel2)", title: "Verified record from IEEE Xplore" },
+  patents:          { label: "Patents",          fg: "var(--muted)", bg: "var(--panel2)", title: "Patent record from Google Patents" },
 };
 
 function Kv({ k, v }) {

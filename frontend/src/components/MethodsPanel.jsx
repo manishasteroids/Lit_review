@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
 
 /**
  * Methods / Experiment Designer panel (controlled).
@@ -23,7 +23,7 @@ import React, { useState } from "react";
  *        papers=[{idx,title}], extractions=[{idx,finding,...}]
  */
 export default function MethodsPanel({
-  plan, critique, iterations = 0, debate = {}, busy,
+  plan, critique, iterations = 0, debate = {}, kgBridges = [], busy,
   onDesign, onRefine, onUpdate, onDispute, onAcceptRevision, onExport,
   papers = [], extractions = [],
 }) {
@@ -35,7 +35,16 @@ export default function MethodsPanel({
   return (
     <div style={{ maxWidth: 900 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
-        <h3 style={{ margin: 0 }}>Methods &amp; Experiments</h3>
+        <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: 6 }}>
+          Methods &amp; Experiments
+          <HelpTip label="What this panel does">
+            Turns the synthesis and detected gaps into testable experiment plans, in
+            the language of the paper's domain — grounded in your cited sources.
+            Nothing here is final: edit any field, or challenge a hypothesis
+            directly and the agent will revise it or defend it. Saved automatically —
+            it'll still be here if you leave and come back.
+          </HelpTip>
+        </h3>
         <button onClick={onDesign} disabled={busy} type="button">
           {busy ? "Working…" : plan ? "Regenerate" : "Design experiments"}
         </button>
@@ -55,28 +64,21 @@ export default function MethodsPanel({
           </span>
         )}
       </div>
-      <p style={{ ...muted, marginTop: 0 }}>
-        Turns the synthesis and detected gaps into testable experiment plans, in
-        the language of the paper's domain — grounded in your cited sources.
-        Nothing here is final: edit any field, or challenge a hypothesis
-        directly and the agent will revise it or defend it. Saved automatically —
-        it'll still be here if you leave and come back.
-      </p>
-      <ProcessDiagram />
-
       {plan?.domain && (
         <div style={{ fontSize: 13, margin: "8px 0 4px" }}>
           <span style={muted}>Domain detected:</span> <b>{plan.domain}</b>
         </div>
       )}
       {plan?.note && (
-        <div style={{ ...muted, fontSize: 13, margin: "4px 0 8px" }}>{plan.note}</div>
+        <CitedText text={plan.note} papers={papers} style={{ ...muted, fontSize: 13, margin: "4px 0 8px", display: "block" }} />
       )}
       {critique?.note && (
         <div style={{ ...muted, fontSize: 13, margin: "4px 0 8px", fontStyle: "italic" }}>
-          Critic: {critique.note}
+          Critic: <CitedText text={critique.note} papers={papers} />
         </div>
       )}
+      {plan && kgBridges.length > 0 && <KgBridgePanel bridges={kgBridges} papers={papers} />}
+
       {(plan?.hypotheses || []).some((_, i) => critiqueByIndex[i]) && <ScoreLegend />}
 
       {(plan?.hypotheses || []).map((h, i) => (
@@ -102,35 +104,167 @@ export default function MethodsPanel({
   );
 }
 
-// ---- process diagram: what "Design" vs "Refine" actually do ---------------
-// A one-time explainer, not repeated per hypothesis — see the panel's
-// architecture notes: Design generates from scratch, Refine loops
-// critique -> revise until scores clear the bar or the round budget runs out.
-function ProcessDiagram() {
-  const muted = { color: "var(--muted, #667)" };
-  const step = (label, sub) => (
-    <div style={{ textAlign: "center", flex: 1, minWidth: 0 }}>
-      <div style={{
-        border: "1px solid var(--border,#e5e7eb)", borderRadius: 10, padding: "8px 6px",
-        background: "var(--chip,#f1f0fb)", fontSize: 12, fontWeight: 600,
-      }}>
-        {label}
-      </div>
-      {sub && <div style={{ ...muted, fontSize: 11, marginTop: 3 }}>{sub}</div>}
-    </div>
-  );
+// ---- help tip: what used to be an always-visible intro paragraph, now a --
+// "?" icon next to the title — hover (mouse) or click/tap (touch) to reveal.
+// Click also pins it open so it doesn't vanish while reading; clicking
+// anywhere else, or pressing Escape, closes it.
+function HelpTip({ label, children }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDocClick(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    function onKeyDown(e) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
   return (
-    <div style={{ margin: "2px 0 16px", maxWidth: 480 }}>
+    <span className="help-tip" ref={ref}>
+      <button
+        type="button"
+        className="help-tip-btn"
+        aria-label={label || "More info"}
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        ?
+      </button>
+      <span className={"help-tip-pop" + (open ? " open" : "")} role="tooltip">
+        {children}
+      </span>
+    </span>
+  );
+}
+
+// ---- citation links: "[1,3,9]" / "paper 38" -> clickable paper links -----
+// The designer/critic write free-text prose with inline citations like
+// "papers [1,13,27,49] identify..." or "(paper 38)". Both forms reference a
+// paper's `idx` — the same numbering used everywhere else in this panel
+// (Evidence trail, Candidate approaches) — so both are turned into links
+// that open that paper's URL in a new tab. A number with no matching paper,
+// or a matching paper with no URL, degrades to plain text (or a title-only
+// hover) rather than a dead link.
+function CiteLink({ idx, papers, label }) {
+  const p = papers.find((pp) => pp.idx === idx);
+  if (!p) return <>{label}</>;
+  if (!p.url) return <span title={p.title}>{label}</span>;
+  return (
+    <a
+      href={p.url}
+      target="_blank"
+      rel="noreferrer"
+      title={p.title}
+      style={{ color: "var(--accent,#6c5ce7)" }}
+    >
+      {label}
+    </a>
+  );
+}
+
+const CITATION_RE = /\[(\d+(?:\s*,\s*\d+)*)\]|\b([Pp]aper)\s+(\d+)\b/g;
+
+function CitedText({ text, papers = [], style }) {
+  if (!text) return null;
+  const nodes = [];
+  let last = 0, m, key = 0;
+  CITATION_RE.lastIndex = 0;
+  while ((m = CITATION_RE.exec(text))) {
+    if (m.index > last) nodes.push(text.slice(last, m.index));
+    if (m[1] != null) {
+      nodes.push("[");
+      m[1].split(",").forEach((n, j) => {
+        const num = n.trim();
+        if (j > 0) nodes.push(",");
+        nodes.push(<CiteLink key={`c${key++}`} idx={Number(num)} papers={papers} label={num} />);
+      });
+      nodes.push("]");
+    } else {
+      nodes.push(`${m[2]} `);
+      nodes.push(<CiteLink key={`c${key++}`} idx={Number(m[3])} papers={papers} label={m[3]} />);
+    }
+    last = CITATION_RE.lastIndex;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return <span style={style}>{nodes}</span>;
+}
+
+// ---- knowledge-graph bridge candidates: the "why" behind grounded novelty --
+// See backend pipeline/knowledge_graph.find_bridge_candidates: concept pairs
+// that never co-occur in any paper in THIS corpus, but each connects to a
+// shared concept through different papers — a structural gap the literature
+// itself never states, distinct from a gap the synthesizer wrote in prose.
+// Shown collapsed by default (it's the "how did it think of this" layer, not
+// the headline), and only when the designer actually had bridges to work
+// with — an empty corpus produces none, and that's not worth a callout.
+function KgBridgePanel({ bridges, papers }) {
+  const [open, setOpen] = useState(false);
+  const muted = { color: "var(--muted, #667)" };
+
+  return (
+    <div style={{
+      margin: "0 0 14px", padding: "10px 12px", borderRadius: 10,
+      border: "1px solid var(--border,#e5e7eb)", background: "var(--chip,#f1f0fb)",
+    }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        {step("Design", "propose hypotheses")}
-        <span aria-hidden="true" style={{ ...muted, fontSize: 16, flexShrink: 0 }}>→</span>
-        {step("Critique", "score 4 axes")}
-        <span aria-hidden="true" style={{ ...muted, fontSize: 16, flexShrink: 0 }}>→</span>
-        {step("Revise", "fix the weak ones")}
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          style={{
+            background: "none", border: "none", cursor: "pointer", padding: 0,
+            fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6,
+          }}
+        >
+          <span aria-hidden="true">🔗</span>
+          Knowledge-graph angle: {bridges.length} unconnected concept pair{bridges.length === 1 ? "" : "s"} found
+          <span aria-hidden="true" style={{ fontSize: 11 }}>{open ? "▲" : "▼"}</span>
+        </button>
+        <HelpTip label="What this is">
+          These concept pairs never appear together in any single paper among your
+          sources, but each one separately connects to a shared concept through
+          different papers — a gap in the literature's actual structure, not just a
+          sentence the synthesizer wrote. When a pair genuinely fits the topic, the
+          designer builds a hypothesis around it and names the bridging concept in
+          that hypothesis's rationale, instead of relying only on a text-derived gap.
+        </HelpTip>
       </div>
-      <div style={{ textAlign: "center", ...muted, fontSize: 11, marginTop: 4 }}>
-        ↻ Refine repeats this loop until scores clear the bar, or the round budget runs out
-      </div>
+      {open && (
+        <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+          {bridges.map((b, i) => (
+            <div key={i} style={{ fontSize: 13 }}>
+              <b>{b.a}</b>{" "}
+              <span style={muted}>
+                [{b.a_papers.map((p, j) => (
+                  <React.Fragment key={p}>
+                    {j > 0 && ","}
+                    <CiteLink idx={p} papers={papers} label={p} />
+                  </React.Fragment>
+                ))}]
+              </span>
+              {" ↔ "}
+              <b>{b.c}</b>{" "}
+              <span style={muted}>
+                [{b.c_papers.map((p, j) => (
+                  <React.Fragment key={p}>
+                    {j > 0 && ","}
+                    <CiteLink idx={p} papers={papers} label={p} />
+                  </React.Fragment>
+                ))}]
+              </span>
+              <div style={muted}>bridged via {b.bridges.join(", ")}</div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -167,7 +301,7 @@ function ScoreLegend() {
   );
 }
 
-function ScoreBars({ critique }) {
+function ScoreBars({ critique, papers = [] }) {
   const muted = { color: "var(--muted, #667)" };
   if (!critique) return null;
   const rows = [
@@ -203,10 +337,19 @@ function ScoreBars({ critique }) {
         </div>
       )}
       {(critique.issues || []).length > 0 && (
-        <div style={{ ...muted, fontSize: 13, marginTop: 6 }}>{critique.issues.join(" · ")}</div>
+        <div style={{ ...muted, fontSize: 13, marginTop: 6 }}>
+          {critique.issues.map((issue, j) => (
+            <React.Fragment key={j}>
+              {j > 0 && " · "}
+              <CitedText text={issue} papers={papers} />
+            </React.Fragment>
+          ))}
+        </div>
       )}
       {critique.revise && (
-        <div style={{ fontSize: 13, marginTop: 2, fontStyle: "italic" }}>Next revision: {critique.revise}</div>
+        <div style={{ fontSize: 13, marginTop: 2, fontStyle: "italic" }}>
+          Next revision: <CitedText text={critique.revise} papers={papers} />
+        </div>
       )}
     </div>
   );
@@ -243,7 +386,9 @@ function EvidenceTrail({ h, papers, extractions }) {
           <tbody>
             {items.map((it, j) => (
               <tr key={j}>
-                <td style={td}>{it.name} <span style={muted}>[{it.from_idx}]</span></td>
+                <td style={td}>
+                  {it.name} [<CiteLink idx={it.from_idx} papers={papers} label={it.from_idx} />]
+                </td>
                 <td style={{ ...td, maxWidth: 240 }}>{titleFor(it.from_idx) || "—"}</td>
                 <td style={{ ...td, ...muted }}>{findingFor(it.from_idx) || "—"}</td>
               </tr>
@@ -310,14 +455,17 @@ function HypothesisCard({ h, i, papers, extractions, critique, debate, busy, onU
   const muted = { color: "var(--muted, #667)" };
 
   const titleFor = (idx) => (idx == null ? null : (papers.find((p) => p.idx === idx)?.title || `[${idx}]`));
-  const cite = (idx, evidenced) =>
-    idx == null ? (
-      <span style={{ ...muted, fontStyle: "italic" }}>proposed</span>
-    ) : (
-      <span title={titleFor(idx)} style={{ color: evidenced === false ? "var(--muted,#667)" : "var(--accent,#6c5ce7)" }}>
+  const cite = (idx, evidenced) => {
+    if (idx == null) return <span style={{ ...muted, fontStyle: "italic" }}>proposed</span>;
+    const p = papers.find((pp) => pp.idx === idx);
+    const color = evidenced === false ? "var(--muted,#667)" : "var(--accent,#6c5ce7)";
+    if (!p?.url) return <span title={titleFor(idx)} style={{ color }}>[{idx}]</span>;
+    return (
+      <a href={p.url} target="_blank" rel="noreferrer" title={p.title} style={{ color }}>
         [{idx}]
-      </span>
+      </a>
     );
+  };
 
   const pill = {
     display: "inline-block", fontSize: 13, padding: "3px 10px", marginRight: 6,
@@ -360,7 +508,9 @@ function HypothesisCard({ h, i, papers, extractions, critique, debate, busy, onU
             onChange={(e) => setDraft({ ...draft, hypothesis: e.target.value })}
           />
         ) : (
-          <div style={{ fontWeight: 700, marginBottom: 2 }}>H{i + 1}. {h.hypothesis}</div>
+          <div style={{ fontWeight: 700, marginBottom: 2 }}>
+            H{i + 1}. <CitedText text={h.hypothesis} papers={papers} />
+          </div>
         )}
         {onUpdate && !editing && (
           <button type="button" onClick={startEdit} style={{ fontSize: 12, flexShrink: 0 }}>Edit</button>
@@ -409,8 +559,10 @@ function HypothesisCard({ h, i, papers, extractions, critique, debate, busy, onU
         </>
       ) : (
         <>
-          {h.rationale && <div style={{ ...muted, fontSize: 13, marginBottom: 4 }}>{h.rationale}</div>}
-          <ScoreBars critique={critique} />
+          {h.rationale && (
+            <CitedText text={h.rationale} papers={papers} style={{ ...muted, fontSize: 13, marginBottom: 4, display: "block" }} />
+          )}
+          <ScoreBars critique={critique} papers={papers} />
 
           {(h.approaches || []).length > 0 && (
             <div style={{ marginBottom: 12 }}>
@@ -463,10 +615,21 @@ function HypothesisCard({ h, i, papers, extractions, critique, debate, busy, onU
                 </Field>
               )}
               {(h.failure_modes || []).length > 0 && (
-                <Field label="What could invalidate it">{h.failure_modes.join("; ")}</Field>
+                <Field label="What could invalidate it">
+                  {h.failure_modes.map((fm, j) => (
+                    <React.Fragment key={j}>
+                      {j > 0 && "; "}
+                      <CitedText text={fm} papers={papers} />
+                    </React.Fragment>
+                  ))}
+                </Field>
               )}
-              {h.validation && <Field label="Validation">{h.validation}</Field>}
-              {h.risks && <Field label="Risks / ethics">{h.risks}</Field>}
+              {h.validation && (
+                <Field label="Validation"><CitedText text={h.validation} papers={papers} /></Field>
+              )}
+              {h.risks && (
+                <Field label="Risks / ethics"><CitedText text={h.risks} papers={papers} /></Field>
+              )}
             </div>
           )}
 
@@ -477,7 +640,7 @@ function HypothesisCard({ h, i, papers, extractions, critique, debate, busy, onU
                 const applied = d.proposed && d.proposed.hypothesis === h.hypothesis;
                 return (
                   <div key={j} style={{ fontSize: 13, marginBottom: 8 }}>
-                    <div style={muted}>You: {d.argument}</div>
+                    <div style={muted}>You: <CitedText text={d.argument} papers={papers} /></div>
                     <div>
                       <span style={{
                         display: "inline-block", fontSize: 11, padding: "1px 6px", borderRadius: 999,
@@ -486,11 +649,11 @@ function HypothesisCard({ h, i, papers, extractions, critique, debate, busy, onU
                       }}>
                         {d.stance === "revised" ? "revised" : "defended"}
                       </span>
-                      {d.response}
+                      <CitedText text={d.response} papers={papers} />
                     </div>
                     {d.proposed && !applied && (
                       <div style={{ marginTop: 4, padding: 8, background: "var(--chip,#f1f0fb)", borderRadius: 8 }}>
-                        <div style={muted}>Proposed: {d.proposed.hypothesis}</div>
+                        <div style={muted}>Proposed: <CitedText text={d.proposed.hypothesis} papers={papers} /></div>
                         <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
                           <button type="button" onClick={() => onAcceptRevision?.(d.proposed)} disabled={busy}>
                             Agree — apply this

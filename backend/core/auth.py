@@ -48,7 +48,9 @@ def _jwks_client():
     return jwt.PyJWKClient(f"{url}/auth/v1/.well-known/jwks.json")
 
 
-def _decode(authorization: str | None) -> str | None:
+def _decode(authorization: str | None) -> dict | None:
+    """Returns the verified JWT payload (or None), not just the user id — the
+    payload's `email` claim is what lets project sharing resolve invites."""
     if not authorization or not authorization.startswith("Bearer "):
         return None
     if not _auth_configured():
@@ -84,21 +86,43 @@ def _decode(authorization: str | None) -> str | None:
         # backend terminal shows exactly what verification actually rejected.
         log.warning("JWT verify failed (alg=%s): %s: %s", alg, type(e).__name__, e)
         raise HTTPException(401, "Invalid or expired session. Please sign in again.")
-    return payload.get("sub")
+    return payload
+
+
+def _remember(payload: dict | None) -> None:
+    """Opportunistically record (user_id -> email) from a verified token, so
+    project sharing can resolve "invite this email" to a user id without
+    needing a Supabase service-role key. Best-effort: a user just needs to
+    have signed into Sift once for this to have a row. See core/known_users.py."""
+    if not payload:
+        return
+    uid = payload.get("sub")
+    email = payload.get("email")
+    if not uid or not email:
+        return
+    try:
+        from core.known_users import remember_user
+        remember_user(uid, email)
+    except Exception:  # noqa: BLE001 — never let this break auth
+        pass
 
 
 def current_user_id(authorization: str | None = Header(default=None)) -> str:
     """Require a valid signed-in user; raise 401 otherwise."""
-    uid = _decode(authorization)
+    payload = _decode(authorization)
+    uid = (payload or {}).get("sub")
     if not uid:
         raise HTTPException(401, "Not authenticated.")
+    _remember(payload)
     return uid
 
 
 def optional_user_id(authorization: str | None = Header(default=None)) -> str | None:
     """Return the user id if present/valid, else None (no error)."""
     try:
-        return _decode(authorization)
+        payload = _decode(authorization)
+        _remember(payload)
+        return (payload or {}).get("sub")
     except HTTPException:
         return None
 

@@ -163,7 +163,30 @@ class LLMClient:
             cache_write=cache_write, cache_read=cache_read, web_searches=web_searches,
         )
 
-        return "\n".join(b.text for b in resp.content if b.type == "text").strip()
+        out = "\n".join(b.text for b in resp.content if b.type == "text").strip()
+        if not out:
+            # Anthropic returned zero text content (e.g. a refusal, or a
+            # response made up entirely of non-text blocks) — this used to
+            # propagate as an empty string all the way to json.loads(""),
+            # which fails with the cryptic "Expecting value: line 1 column 1
+            # (char 0)" deep inside parse_json with no indication the real
+            # problem was upstream. Surface it clearly here instead, and
+            # fall back to Gemini the same way a hard API error would.
+            stop_reason = getattr(resp, "stop_reason", None)
+            log.warning(
+                "Anthropic call returned empty text (stage=%s model=%s stop_reason=%s)",
+                self.stage, self.model, stop_reason,
+            )
+            if settings.gemini_api_key:
+                fallback_model = settings.gemini_model or "gemini-2.5-flash"
+                gem_text = f"{cache_prefix}\n{user_text or ''}" if cache_prefix else user_text
+                log.warning("Falling back to Gemini (%s) after empty Anthropic response", fallback_model)
+                return self._call_gemini(gem_text, system, max_tokens, content, model=fallback_model)
+            raise ValueError(
+                f"Anthropic returned an empty response (stop_reason={stop_reason}) "
+                "and no GEMINI_API_KEY is set to fall back to."
+            )
+        return out
 
     def _call_gemini(self, user_text, system, max_tokens, content, model: str) -> str:
         """Route the same request to Google Gemini, converting Anthropic-style
@@ -243,7 +266,21 @@ class LLMClient:
             cache_read=cache_read,
         )
 
-        return (resp.text or "").strip()
+        out = (resp.text or "").strip()
+        if not out:
+            # Same empty-response problem as the Anthropic path above, but
+            # here it's usually a safety block or an empty/missing candidate
+            # rather than a refusal — surface the reason instead of quietly
+            # returning "" and letting parse_json() fail with an opaque
+            # "Expecting value: line 1 column 1 (char 0)" downstream.
+            candidates = getattr(resp, "candidates", None) or []
+            finish_reason = getattr(candidates[0], "finish_reason", None) if candidates else None
+            log.warning(
+                "Gemini call returned empty text (stage=%s model=%s finish_reason=%s)",
+                self.stage, model, finish_reason,
+            )
+            raise ValueError(f"Gemini returned an empty response (finish_reason={finish_reason}).")
+        return out
 
     @staticmethod
     def parse_json(text: str) -> Any:

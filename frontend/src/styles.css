@@ -14,6 +14,13 @@ html, body { margin: 0; padding: 0; background: #14161d; min-height: 100%; }
 .serif{font-family:'Newsreader',Georgia,serif;}
 .eyebrow{font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted2);}
 
+/* Sidebar section headers (Tools / Project / History) — a bolder, more
+   legible variant of .eyebrow. The plain .eyebrow style reads great as a
+   small secondary label elsewhere, but was too washed-out as a primary
+   section heading users scan the whole sidebar by. */
+.panel-head-label{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--txt);}
+
 .sm-wrap{max-width:1240px;margin:0 auto;padding:22px 24px 80px;}
 .sm-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;
   border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:22px;flex-wrap:wrap;}
@@ -392,3 +399,18 @@ a{color:var(--indigo);}
 .hist-meta svg{flex:0 0 10px;}
 .hist-empty{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--muted2);line-height:1.6;}
 .hist-del:hover,.hist-del.confirm{color:#d1352b;opacity:1;}
+
+/* Help tip — a "?" icon that reveals an explainer on hover (mouse) or on
+   click (touch, and to pin it open while reading). See MethodsPanel.jsx. */
+.help-tip{position:relative;display:inline-flex;vertical-align:middle;}
+.help-tip-btn{width:17px;height:17px;border-radius:50%;border:1px solid var(--line);
+  background:var(--panel2);color:var(--muted);font-size:11px;line-height:1;font-weight:600;
+  display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0;
+  font-family:inherit;}
+.help-tip-btn:hover,.help-tip-btn[aria-expanded="true"]{border-color:var(--indigo);color:var(--indigo);}
+.help-tip-pop{position:absolute;top:24px;left:0;z-index:20;width:320px;max-width:min(320px,80vw);
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;
+  font-size:13px;font-weight:400;line-height:1.55;color:var(--muted);text-align:left;
+  box-shadow:0 10px 30px rgba(20,28,50,.14);opacity:0;visibility:hidden;
+  transform:translateY(-4px);transition:opacity .12s ease,transform .12s ease;}
+.help-tip:hover .help-tip-pop,.help-tip-pop.open{opacity:1;visibility:visible;transform:translateY(0);}

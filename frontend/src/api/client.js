@@ -35,6 +35,17 @@ const WRITE_TIMEOUT_MS_DEEP = 600_000;
 // failed: Timed out" — that was this, not a real backend hang).
 const REFINE_TIMEOUT_MS = 300_000;
 
+// Paper chat is a single LLM call, but not always a cheap one: "Report" and
+// "Diagram" chips (and any figure/table question) attach the FULL PDF and,
+// in Deep mode, run it through Sonnet — that alone can take well past 75s on
+// a long paper, especially with any provider-side latency. The generic 75s
+// budget was tripping on ordinary Deep-mode latency and showing a misleading
+// "may be rate-limited" message for what was really just a slow-but-healthy
+// call. Quick mode (Gemini, abstract/text only) rarely needs this long, but
+// giving both modes the same headroom is simplest and costs nothing when the
+// call finishes early anyway.
+const CHAT_TIMEOUT_MS = 180_000;
+
 // Authenticated GET with the same 401-refresh-retry + real error surfacing as
 // request() below — several GET endpoints (usage trend, etc.) used to bypass
 // this with a raw fetch(...).then(r => r.json()), so an expired token (or any
@@ -82,6 +93,27 @@ async function getBinary(path) {
 // Same 401-refresh-retry pattern as getJSON, but DELETE with no body.
 async function del(path) {
   const send = async () => fetch(BASE + path, { method: "DELETE", headers: await authHeaders() });
+  let res = await send();
+  if (res.status === 401 && (await refreshAccessToken())) {
+    res = await send();
+  }
+  if (!res.ok) {
+    let detail = "Request failed (" + res.status + ")";
+    try {
+      const j = await res.json();
+      if (j.detail) detail = j.detail;
+    } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+async function patch(path, body) {
+  const send = async () => fetch(BASE + path, {
+    method: "PATCH",
+    headers: await authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body || {}),
+  });
   let res = await send();
   if (res.status === 401 && (await refreshAccessToken())) {
     res = await send();
@@ -263,6 +295,12 @@ export const api = {
   deleteAnnotation: (runId, idx, annotationId) =>
     del(`/api/runs/${runId}/papers/${idx}/annotations/${annotationId}`),
 
+  // Reposition an existing annotation (currently used for dragging text
+  // notes to a new spot on the page) — only `rects` moves, everything else
+  // about the mark stays the same.
+  moveAnnotation: (runId, idx, annotationId, rects) =>
+    patch(`/api/runs/${runId}/papers/${idx}/annotations/${annotationId}`, { rects }),
+
   designExperiments: (runId, apiKey, model) =>
     request(`/api/runs/${runId}/experiments`, { api_key: apiKey, model }),
 
@@ -343,7 +381,7 @@ export const api = {
       api_key: apiKey,
       model,
       chat_mode: chatMode,
-    }),
+    }, CHAT_TIMEOUT_MS),
 
   assessPaper: (runId, paper, scope, apiKey, model) =>
     request(`/api/runs/${runId}/assess`, {
@@ -539,6 +577,63 @@ export const api = {
     request(`/api/projects/${projectId}/zotero/import`, {
       api_key: apiKey, library_id: libraryId, library_type: libraryType || "user",
     }),
+
+  // ── Project sharing: collaborators (full access) + read-only email links ──
+  listCollaborators: async (projectId) =>
+    fetch(BASE + `/api/projects/${projectId}/collaborators`, { headers: await authHeaders() }).then((r) => r.json()),
+  addCollaborator: async (projectId, email) => {
+    const res = await fetch(BASE + `/api/projects/${projectId}/collaborators`, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ email }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Could not add collaborator.");
+    return data;
+  },
+  removeCollaborator: async (projectId, userId) =>
+    fetch(BASE + `/api/projects/${projectId}/collaborators/${userId}`, {
+      method: "DELETE", headers: await authHeaders(),
+    }).then((r) => r.json()),
+  listShareLinks: async (projectId) =>
+    fetch(BASE + `/api/projects/${projectId}/share-links`, { headers: await authHeaders() }).then((r) => r.json()),
+  createShareLink: async (projectId, emails) => {
+    const res = await fetch(BASE + `/api/projects/${projectId}/share-links`, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ emails }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Could not create share link.");
+    return data;
+  },
+  revokeShareLink: async (projectId, linkId) =>
+    fetch(BASE + `/api/projects/${projectId}/share-links/${linkId}`, {
+      method: "DELETE", headers: await authHeaders(),
+    }).then((r) => r.json()),
+
+  // Public share viewer — no auth headers, token + email in the request itself
+  shareVerify: async (token, email) => {
+    const res = await fetch(BASE + `/api/share/${token}/verify`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Access denied.");
+    return data;
+  },
+  shareGetProject: async (token, email) => {
+    const res = await fetch(BASE + `/api/share/${token}/project?email=` + encodeURIComponent(email));
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Access denied.");
+    return data;
+  },
+  shareGetRun: async (token, runId, email) => {
+    const res = await fetch(BASE + `/api/share/${token}/runs/${runId}?email=` + encodeURIComponent(email));
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Access denied.");
+    return data;
+  },
 
   // Session history — no LLM calls
   listSessions: async () =>

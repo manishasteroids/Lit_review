@@ -55,6 +55,7 @@ def get_run(run_id: str, user_id: str):
         experiment_critique=d.get("experimentCritique"),
         experiment_iterations=d.get("experimentIterations") or [],
         experiment_debate=d.get("experimentDebate") or {},
+        experiment_kg_bridges=d.get("experimentKgBridges") or [],
     )
     RUNS[run_id] = run
     return run
@@ -297,6 +298,7 @@ def _persist_done(run, user_id, notes=None, side=None):
             "mode": run.mode,
             "experimentPlan": run.experiment_plan, "experimentCritique": run.experiment_critique,
             "experimentIterations": run.experiment_iterations, "experimentDebate": run.experiment_debate,
+            "experimentKgBridges": run.experiment_kg_bridges,
         },
     )
     return side
@@ -323,6 +325,7 @@ def _persist_experiments(run, user_id) -> None:
         data["experimentCritique"] = run.experiment_critique
         data["experimentIterations"] = run.experiment_iterations
         data["experimentDebate"] = run.experiment_debate
+        data["experimentKgBridges"] = run.experiment_kg_bridges
         save_session(
             session_id=run.run_id, topic=run.topic,
             stage=(existing.get("stage") if existing else run.stage) or run.stage,
@@ -481,9 +484,13 @@ def paper_pdf(run_id: str, idx: int, user_id: str = Depends(require_user)):
 
 
 class AnnotationBody(BaseModel):
-    kind: str            # "highlight" | "underline" | "comment"
+    kind: str            # "highlight" | "underline" | "comment" | "drawing" | "text" | "shape"
     page: int
-    rects: list[dict]    # [{x,y,w,h}, ...] in PDF-point space at scale=1
+    # [{x,y,w,h}, ...] in PDF-point space at scale=1 for highlight/underline/
+    # comment; for "drawing" a single-item list [{"path": [[x,y], ...]}]; for
+    # "text" [{"x","y","text"}]; for "shape" [{"shape":"rect"|"circle",
+    # "x","y","w","h"}] — always unscaled PDF-point space.
+    rects: list[dict]
     color: str | None = None
     snippet: str | None = None   # the selected text
     comment: str | None = None   # only for kind == "comment"
@@ -515,8 +522,8 @@ def create_annotation(run_id: str, idx: int, body: AnnotationBody, user_id: str 
 
     run = get_run(run_id, user_id)
     paper = _paper_or_404(run, idx)
-    if body.kind not in ("highlight", "underline", "comment"):
-        raise HTTPException(400, "kind must be highlight, underline, or comment.")
+    if body.kind not in ("highlight", "underline", "comment", "drawing", "text", "shape"):
+        raise HTTPException(400, "kind must be highlight, underline, comment, drawing, text, or shape.")
     if not body.rects:
         raise HTTPException(400, "An annotation needs at least one rect.")
     ann = add_annotation(
@@ -526,6 +533,27 @@ def create_annotation(run_id: str, idx: int, body: AnnotationBody, user_id: str 
     if not ann:
         raise HTTPException(500, "Couldn't save that annotation.")
     return ann
+
+
+class AnnotationMoveBody(BaseModel):
+    rects: list[dict]
+
+
+@router.patch("/runs/{run_id}/papers/{idx}/annotations/{annotation_id}")
+def move_annotation(run_id: str, idx: int, annotation_id: int, body: AnnotationMoveBody,
+                     user_id: str = Depends(require_user)):
+    """Reposition an existing annotation (drag-to-move) — only its rects
+    change, everything else about the mark stays as it was."""
+    from core.annotations import update_annotation_rects, paper_key_of
+
+    run = get_run(run_id, user_id)
+    paper = _paper_or_404(run, idx)
+    if not body.rects:
+        raise HTTPException(400, "rects can't be empty.")
+    ok = update_annotation_rects(user_id, paper_key_of(paper), annotation_id, body.rects)
+    if not ok:
+        raise HTTPException(404, "Annotation not found.")
+    return {"ok": True}
 
 
 @router.delete("/runs/{run_id}/papers/{idx}/annotations/{annotation_id}")
@@ -585,12 +613,28 @@ async def upload_paper(
 
     guessed_title = (title or "").strip()
     if not guessed_title:
-        # Fall back to the first non-trivial line of the extracted text, else the filename.
+        # Fall back to the first line of the extracted text that actually looks
+        # like a title, else the filename. Plain-text extraction often puts
+        # journal boilerplate (received/accepted dates, DOIs, copyright lines,
+        # running headers) before the real title line, so skip those instead
+        # of blindly taking the first non-trivial line.
+        _BOILERPLATE = _re.compile(
+            r"\b(received|accepted|revised|published|submitted|doi|issn|isbn|"
+            r"copyright|all rights reserved|www\.|https?://|"
+            r"vol(ume)?\.?\s*\d|no\.\s*\d|page\s*\d|^\d+$)\b",
+            _re.IGNORECASE,
+        )
         for line in text.splitlines():
             line = line.strip()
-            if 8 <= len(line) <= 200:
-                guessed_title = line
-                break
+            if not (8 <= len(line) <= 200):
+                continue
+            if _BOILERPLATE.search(line):
+                continue
+            letters = sum(c.isalpha() for c in line)
+            if letters < max(6, len(line) * 0.4):   # mostly non-letters -> not a title
+                continue
+            guessed_title = line
+            break
         if not guessed_title:
             guessed_title = os.path.splitext(name)[0]
 
@@ -698,7 +742,7 @@ def design_experiments(run_id: str, body: SynthesizeBody, user_id: str = Depends
     except Exception as e:
         raise HTTPException(502, f"Experiment designer failed: {e}")
     _persist_experiments(run, user_id)
-    return {"run_id": run.run_id, "experiment_plan": result}
+    return {"run_id": run.run_id, "experiment_plan": result, "experiment_kg_bridges": run.experiment_kg_bridges}
 
 
 @router.post("/runs/{run_id}/experiments/refine")
@@ -718,6 +762,7 @@ def refine_experiments(run_id: str, body: SynthesizeBody, user_id: str = Depends
         "experiment_plan": result["plan"],
         "experiment_critique": result["critique"],
         "iterations": result["iterations"],
+        "experiment_kg_bridges": run.experiment_kg_bridges,
     }
 
 
@@ -1016,6 +1061,7 @@ def get_run_state(run_id: str, user_id: str = Depends(require_user)):
         "experiment_critique": run.experiment_critique,
         "experiment_iterations": run.experiment_iterations,
         "experiment_debate": run.experiment_debate,
+        "experiment_kg_bridges": run.experiment_kg_bridges,
     }
  
  
