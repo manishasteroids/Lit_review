@@ -299,15 +299,28 @@ class LLMClient:
         body = t[start:]
         try:
             return json.JSONDecoder().raw_decode(body)[0]
-        except json.JSONDecodeError:
-            # Common cause: the response hit max_tokens mid-value (an
+        except json.JSONDecodeError as e1:
+            # Common cause #1: the response hit max_tokens mid-value (an
             # "Unterminated string" or missing closing bracket right at the
             # end of the text) — the JSON is otherwise complete/valid, it
             # just got cut off. Try to salvage it instead of discarding an
-            # otherwise-good response; if the text is broken for some other
-            # reason this repair won't produce valid JSON either and the
-            # original error propagates from the retry below.
-            return json.JSONDecoder().raw_decode(LLMClient._repair_truncated_json(body))[0]
+            # otherwise-good response.
+            try:
+                return json.JSONDecoder().raw_decode(LLMClient._repair_truncated_json(body))[0]
+            except json.JSONDecodeError:
+                pass
+            # Common cause #2: the model put a literal, un-escaped `"` inside
+            # a string value (e.g. a search term like the CISPR "25" standard,
+            # or a quoted phrase) — valid English, invalid JSON. That reads as
+            # "Expecting ',' delimiter" partway through the document, not at
+            # the end, so the truncation repair above doesn't touch it. Walk
+            # the text and escape any quote that isn't actually closing a
+            # string (i.e. isn't followed by the punctuation JSON expects
+            # after a string ends).
+            try:
+                return json.JSONDecoder().raw_decode(LLMClient._escape_stray_quotes(body))[0]
+            except json.JSONDecodeError:
+                raise e1
 
     @staticmethod
     def _repair_truncated_json(t: str) -> str:
@@ -339,3 +352,46 @@ class LLMClient:
         for opener in reversed(stack):
             repaired += "}" if opener == "{" else "]"
         return repaired
+
+    @staticmethod
+    def _escape_stray_quotes(t: str) -> str:
+        """Best-effort repair for a literal, un-escaped `"` inside a JSON
+        string value (models do this constantly with quoted terms/standard
+        names). At each `"` encountered while inside a string, look ahead
+        past whitespace: if the next non-space character is one JSON would
+        actually expect right after a string ends (`,`, `}`, `]`, `:`, or
+        end-of-text), treat it as the real closing quote; otherwise it's a
+        stray quote mid-value — escape it and keep going. Not a general JSON
+        repair tool, just enough to handle this one common failure mode."""
+        out: list[str] = []
+        in_string = False
+        escape = False
+        n = len(t)
+        i = 0
+        while i < n:
+            ch = t[i]
+            if in_string:
+                if escape:
+                    out.append(ch)
+                    escape = False
+                elif ch == "\\":
+                    out.append(ch)
+                    escape = True
+                elif ch == '"':
+                    j = i + 1
+                    while j < n and t[j] in " \t\r\n":
+                        j += 1
+                    nxt = t[j] if j < n else ""
+                    if nxt in ",}]:" or j >= n:
+                        in_string = False
+                        out.append(ch)
+                    else:
+                        out.append('\\"')
+                else:
+                    out.append(ch)
+            else:
+                if ch == '"':
+                    in_string = True
+                out.append(ch)
+            i += 1
+        return "".join(out)

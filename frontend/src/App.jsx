@@ -199,6 +199,22 @@ export default function App() {
   }, [signedOut]);
   useEffect(() => { refreshProjects(); }, [refreshProjects]);
 
+  // Re-fetch the project you're currently "inside" (its run list, mainly) —
+  // used after an action that changes which runs belong to it, e.g. filing
+  // an existing History run under it. Set via setCurrentProject with a
+  // functional update so it only touches state if you're still in the same
+  // project by the time the fetch resolves (nothing to do if you navigated
+  // away, and nothing to overwrite with if you'd switched to a different one).
+  const refreshCurrentProject = useCallback(() => {
+    setCurrentProject((cur) => {
+      if (!cur) return cur;
+      api.getProject(cur.id).then((p) => {
+        if (p && !p.error) setCurrentProject((now) => (now && now.id === p.id ? p : now));
+      }).catch(() => {});
+      return cur;
+    });
+  }, []);
+
   // Timezone the user picked in Settings, for absolute History timestamps.
   // "" means auto-detect (browser timezone) — see formatTimestamp() above.
   const [profileTz, setProfileTz] = useState("");
