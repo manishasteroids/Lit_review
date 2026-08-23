@@ -55,6 +55,7 @@ def get_run(run_id: str, user_id: str):
         experiment_critique=d.get("experimentCritique"),
         experiment_iterations=d.get("experimentIterations") or [],
         experiment_debate=d.get("experimentDebate") or {},
+        experiment_kg_bridges=d.get("experimentKgBridges") or [],
     )
     RUNS[run_id] = run
     return run
@@ -297,6 +298,7 @@ def _persist_done(run, user_id, notes=None, side=None):
             "mode": run.mode,
             "experimentPlan": run.experiment_plan, "experimentCritique": run.experiment_critique,
             "experimentIterations": run.experiment_iterations, "experimentDebate": run.experiment_debate,
+            "experimentKgBridges": run.experiment_kg_bridges,
         },
     )
     return side
@@ -323,6 +325,7 @@ def _persist_experiments(run, user_id) -> None:
         data["experimentCritique"] = run.experiment_critique
         data["experimentIterations"] = run.experiment_iterations
         data["experimentDebate"] = run.experiment_debate
+        data["experimentKgBridges"] = run.experiment_kg_bridges
         save_session(
             session_id=run.run_id, topic=run.topic,
             stage=(existing.get("stage") if existing else run.stage) or run.stage,
@@ -396,6 +399,15 @@ def write(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user
         pipeline.write(run)
     except Exception as e:
         raise HTTPException(502, f"Writer Agent failed: {e}")
+    # A run started from "Analyze your own documents" (no research question,
+    # just uploaded files) has nothing better to call itself at creation time
+    # than the "Untitled documents" placeholder — but the Writer just
+    # generated a real title from the actual content. Adopt it now so
+    # History stops showing "Untitled documents" forever once a review
+    # exists. Only replaces the placeholder, never a real user-typed topic.
+    generated_title = (run.sections or {}).get("title")
+    if generated_title and (not run.topic or run.topic.strip() == "Untitled documents"):
+        run.topic = generated_title.strip()
     side = _persist_done(run, user_id, notes=body.notes)
     return {"run_id": run.run_id, "sections": run.sections,
             "side_modules": side, "stage": run.stage}
@@ -412,6 +424,147 @@ def _url_doi(url: str) -> str:
     return m.group(0).lower() if m else ""
  
  
+def _clip_at_word(text: str, limit: int) -> str:
+    """Truncate to `limit` chars without cutting a word in half. A plain
+    text[:limit] slice (what upload_paper used to do for its "abstract",
+    shown verbatim as the Excerpt column in Sources) chops mid-word wherever
+    the limit happens to land — reads like the text is broken/corrupted
+    rather than intentionally shortened. Back up to the last whitespace
+    before the limit and append an ellipsis so it's visibly a excerpt, not
+    the whole document."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    sp = cut.rfind(" ")
+    if sp > limit * 0.6:   # don't back up so far it leaves almost nothing
+        cut = cut[:sp]
+    return cut.rstrip() + "…"
+
+
+# Journal boilerplate (received/accepted dates, DOIs, copyright, running
+# headers) that shouldn't be mistaken for a title or author line.
+_BOILERPLATE = re.compile(
+    r"\b(received|accepted|revised|published|submitted|doi|issn|isbn|"
+    r"copyright|all rights reserved|www\.|https?://|"
+    r"vol(ume)?\.?\s*\d|no\.\s*\d|page\s*\d|^\d+$)\b",
+    re.IGNORECASE,
+)
+# A line that looks like it's naming authors/affiliations — emails,
+# footnote-style superscripts right after a word (Name1,2 / Name*), or
+# institution keywords.
+_AUTHOR_KEYWORDS = re.compile(
+    r"@|\b\w+[\d*†‡]{1,3}\s*,|university|department|institute|"
+    r"laboratory|school of|college of|corporation|\bgoogle\b|\bstanford\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_author_list(s: str) -> bool:
+    """Catches the plain 'Firstname Lastname, Firstname Lastname, ...' case
+    too — no digits/emails/institution keywords for _AUTHOR_KEYWORDS to
+    catch, just a comma/&/"and"-separated list of short, all-Capitalized-word
+    name-shaped segments. ("&" matters — two-author lines are commonly
+    written "First Last & First Last" with no comma at all.)"""
+    segs = [seg.strip() for seg in re.split(r",|&|\band\b", s) if seg.strip()]
+    if len(segs) < 2:
+        return False
+    name_like = 0
+    for seg in segs:
+        words = seg.split()
+        if 1 <= len(words) <= 4 and len(seg) <= 40 and \
+                all(w[0].isupper() for w in words if w[:1].isalpha()):
+            name_like += 1
+    return name_like / len(segs) >= 0.6
+
+
+def _is_author_line(s: str) -> bool:
+    return bool(_AUTHOR_KEYWORDS.search(s)) or _looks_like_author_list(s)
+
+
+# For picking out the actual NAMES line specifically (as opposed to
+# _is_author_line, which is deliberately broad — affiliations and emails
+# count too — because its job is just deciding where a wrapped title has to
+# stop). An institution/email line matches _is_author_line but is never
+# itself the author line, so extracting names has to exclude it explicitly —
+# otherwise "Adib Bazgir & Yuwen Zhang" (no comma/digits for the broad check
+# to key on) loses to "Department of Mechanical and Aerospace Engineering"
+# on the very next line, which does.
+_INSTITUTION_OR_EMAIL = re.compile(
+    r"@|university|department|institute|laboratory|school of|college of|corporation",
+    re.IGNORECASE,
+)
+# Unicode asterisk/dagger variants LaTeX templates commonly render footnote
+# markers with (∗ U+2217, † U+2020, ‡ U+2021 are already covered by \W below
+# via explicit inclusion; plain ASCII * and digits too).
+_FOOTNOTE_MARKER = re.compile(r"[\d*∗†‡§]+")
+_YEAR = re.compile(r"\b(19|20)\d{2}\b")
+
+
+def _extract_authors_and_year(text: str) -> tuple[str, int | None]:
+    """Best-effort authors + publication year for an uploaded file — these
+    used to just be left blank ("" / None), which is what made the in-app
+    Review's reference list read as "—, "Title," uploaded file, ." with no
+    author and a dangling comma where the year should be. Not as reliable as
+    real bibliographic metadata (there's no structured source to pull from,
+    same caveat as the title guess), but a citation with a plausible author
+    list and year reads as an actual reference instead of an obvious gap."""
+    authors = ""
+    for line in text.splitlines()[:15]:
+        s = line.strip()
+        if not s or _INSTITUTION_OR_EMAIL.search(s):
+            continue
+        cleaned = _FOOTNOTE_MARKER.sub("", s)
+        cleaned = re.sub(r"\s+,", ",", cleaned)          # marker stripped before a comma leaves "Name ,"
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,;&")
+        if _looks_like_author_list(cleaned):
+            authors = cleaned
+            break
+    year = None
+    m = _YEAR.search(text[:3000])
+    if m:
+        y = int(m.group(0))
+        if 1990 <= y <= 2035:
+            year = y
+    return authors, year
+
+
+_ABSTRACT_HEADING = re.compile(r"\babstract\b\.?:?\s*", re.IGNORECASE)
+_LOOKS_LIKE_AFFILIATION_OR_CONTACT = re.compile(
+    r"@|\b\w+[\d*†‡]{1,3}\b|university|department|institute|laboratory|"
+    r"school of|college of|corporation|^\s*[\d,\s]+$",
+    re.IGNORECASE,
+)
+
+
+def _extract_abstract_source(text: str) -> str:
+    """The uploaded-file "abstract" used to be just the first ~1500 chars of
+    raw extracted text — for a real paper that's the title, every author
+    name, every affiliation, and every contact email BEFORE any actual
+    abstract content, since PDF text extraction has no notion of "this part
+    is the abstract" — it's one flat stream of text in reading order. Skip
+    past that front matter so what's shown as the excerpt is the actual
+    substance of the paper, the way an "Excerpt" column should read.
+
+    Primary strategy: most papers literally have the word "Abstract" as a
+    heading right before the real content — find it (only search near the
+    start, so a stray later use of the word doesn't match) and start there.
+    Fallback, for the papers that don't: skip any of the first few lines
+    that look like an author/affiliation/email block rather than prose."""
+    heading = _ABSTRACT_HEADING.search(text[:4000])
+    if heading:
+        return text[heading.end():].strip()
+
+    lines = text.splitlines()
+    i = 0
+    while i < min(len(lines), 8):
+        s = lines[i].strip()
+        if s and not _LOOKS_LIKE_AFFILIATION_OR_CONTACT.search(s) and \
+                sum(c.isalpha() for c in s) >= max(20, len(s) * 0.5):
+            break
+        i += 1
+    return "\n".join(lines[i:]).strip() or text
+
+
 def _is_duplicate(run: RunState, paper: dict) -> bool:
     nt = _norm_title(paper.get("title"))
     pd = _url_doi(paper.get("url"))
@@ -481,9 +634,13 @@ def paper_pdf(run_id: str, idx: int, user_id: str = Depends(require_user)):
 
 
 class AnnotationBody(BaseModel):
-    kind: str            # "highlight" | "underline" | "comment"
+    kind: str            # "highlight" | "underline" | "comment" | "drawing" | "text" | "shape"
     page: int
-    rects: list[dict]    # [{x,y,w,h}, ...] in PDF-point space at scale=1
+    # [{x,y,w,h}, ...] in PDF-point space at scale=1 for highlight/underline/
+    # comment; for "drawing" a single-item list [{"path": [[x,y], ...]}]; for
+    # "text" [{"x","y","text"}]; for "shape" [{"shape":"rect"|"circle",
+    # "x","y","w","h"}] — always unscaled PDF-point space.
+    rects: list[dict]
     color: str | None = None
     snippet: str | None = None   # the selected text
     comment: str | None = None   # only for kind == "comment"
@@ -515,8 +672,8 @@ def create_annotation(run_id: str, idx: int, body: AnnotationBody, user_id: str 
 
     run = get_run(run_id, user_id)
     paper = _paper_or_404(run, idx)
-    if body.kind not in ("highlight", "underline", "comment"):
-        raise HTTPException(400, "kind must be highlight, underline, or comment.")
+    if body.kind not in ("highlight", "underline", "comment", "drawing", "text", "shape"):
+        raise HTTPException(400, "kind must be highlight, underline, comment, drawing, text, or shape.")
     if not body.rects:
         raise HTTPException(400, "An annotation needs at least one rect.")
     ann = add_annotation(
@@ -526,6 +683,27 @@ def create_annotation(run_id: str, idx: int, body: AnnotationBody, user_id: str 
     if not ann:
         raise HTTPException(500, "Couldn't save that annotation.")
     return ann
+
+
+class AnnotationMoveBody(BaseModel):
+    rects: list[dict]
+
+
+@router.patch("/runs/{run_id}/papers/{idx}/annotations/{annotation_id}")
+def move_annotation(run_id: str, idx: int, annotation_id: int, body: AnnotationMoveBody,
+                     user_id: str = Depends(require_user)):
+    """Reposition an existing annotation (drag-to-move) — only its rects
+    change, everything else about the mark stays as it was."""
+    from core.annotations import update_annotation_rects, paper_key_of
+
+    run = get_run(run_id, user_id)
+    paper = _paper_or_404(run, idx)
+    if not body.rects:
+        raise HTTPException(400, "rects can't be empty.")
+    ok = update_annotation_rects(user_id, paper_key_of(paper), annotation_id, body.rects)
+    if not ok:
+        raise HTTPException(404, "Annotation not found.")
+    return {"ok": True}
 
 
 @router.delete("/runs/{run_id}/papers/{idx}/annotations/{annotation_id}")
@@ -558,7 +736,6 @@ async def upload_paper(
     original file is kept on disk so the in-app PDF viewer can show it back
     (PDFs only; DOCX/PPTX have no in-app preview yet)."""
     import os
-    import re as _re
     from core.paper_text import docx_bytes_to_text, pdf_bytes_to_text, pptx_bytes_to_text
 
     run = get_run(run_id, user_id)
@@ -585,21 +762,61 @@ async def upload_paper(
 
     guessed_title = (title or "").strip()
     if not guessed_title:
-        # Fall back to the first non-trivial line of the extracted text, else the filename.
-        for line in text.splitlines():
-            line = line.strip()
-            if 8 <= len(line) <= 200:
-                guessed_title = line
-                break
+        # Fall back to guessing the title from the extracted text, else the
+        # filename. This is inherently a guess: plain-text extraction has no
+        # concept of "this is the title" vs. "this is an author line" — a
+        # PDF's title is just whatever text is biggest/topmost on the page,
+        # a distinction that's lost once it's flattened to a stream of lines.
+        # Two known failure modes this tries to handle:
+        #  1. Journal boilerplate (received/accepted dates, DOIs, copyright,
+        #     running headers) sitting before the real title line.
+        #  2. A long title that WRAPS onto a second line before the author
+        #     list starts — taking only the first line truncates it (e.g.
+        #     "Autonomous Research Agents:" cut off right before the actual
+        #     subtitle). Continuation lines are merged in as long as the next
+        #     line doesn't look like it's already the author/affiliation
+        #     block.
+        lines = text.splitlines()
+        start = None
+        for i, line in enumerate(lines):
+            s = line.strip()
+            if not (8 <= len(s) <= 200):
+                continue
+            if _BOILERPLATE.search(s):
+                continue
+            letters = sum(c.isalpha() for c in s)
+            if letters < max(6, len(s) * 0.4):   # mostly non-letters -> not a title
+                continue
+            start = i
+            break
+        if start is not None:
+            parts_t = [lines[start].strip()]
+            total_len = len(parts_t[0])
+            for j in range(start + 1, min(start + 4, len(lines))):
+                nxt = lines[j].strip()
+                if not nxt or total_len > 220:
+                    break
+                if _is_author_line(nxt) or _BOILERPLATE.search(nxt):
+                    break
+                # A title line ending in sentence punctuation (not a colon —
+                # "Autonomous Research Agents: A Survey…" is exactly the
+                # wrapped-subtitle case this is for) has almost certainly
+                # already finished.
+                if parts_t[-1].endswith((".", "!", "?")):
+                    break
+                parts_t.append(nxt)
+                total_len += len(nxt)
+            guessed_title = " ".join(parts_t)
         if not guessed_title:
             guessed_title = os.path.splitext(name)[0]
 
+    guessed_authors, guessed_year = _extract_authors_and_year(text)
     paper = {
         "title": guessed_title,
-        "authors": "",
-        "year": None,
+        "authors": guessed_authors,
+        "year": guessed_year,
         "venue": "uploaded file",
-        "abstract": text[:1500],
+        "abstract": _clip_at_word(_extract_abstract_source(text), 1500),
         "url": None,
         "source": "upload",
     }
@@ -698,7 +915,7 @@ def design_experiments(run_id: str, body: SynthesizeBody, user_id: str = Depends
     except Exception as e:
         raise HTTPException(502, f"Experiment designer failed: {e}")
     _persist_experiments(run, user_id)
-    return {"run_id": run.run_id, "experiment_plan": result}
+    return {"run_id": run.run_id, "experiment_plan": result, "experiment_kg_bridges": run.experiment_kg_bridges}
 
 
 @router.post("/runs/{run_id}/experiments/refine")
@@ -718,6 +935,7 @@ def refine_experiments(run_id: str, body: SynthesizeBody, user_id: str = Depends
         "experiment_plan": result["plan"],
         "experiment_critique": result["critique"],
         "iterations": result["iterations"],
+        "experiment_kg_bridges": run.experiment_kg_bridges,
     }
 
 
@@ -995,7 +1213,9 @@ def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require
             "asked for a summary, cover objective, method, data, key results (with numbers), "
             "and limitations." + CHAT_FORMAT
         )
-        answer = llm.call(content=blocks, system=system, max_tokens=1500)
+        answer = llm.call(content=blocks, system=system, max_tokens=2400)
+        if llm.last_truncated:
+            answer = answer.rstrip() + "\n\n*(Response was cut short by length — ask “continue” to pick up where this left off.)*"
         source = "+".join(parts) or "abstract"
     except Exception as e:
         raise HTTPException(502, f"Chat failed: {e}")
@@ -1016,6 +1236,7 @@ def get_run_state(run_id: str, user_id: str = Depends(require_user)):
         "experiment_critique": run.experiment_critique,
         "experiment_iterations": run.experiment_iterations,
         "experiment_debate": run.experiment_debate,
+        "experiment_kg_bridges": run.experiment_kg_bridges,
     }
  
  
@@ -1118,11 +1339,24 @@ def studio_chat(run_id: str, body: StudioChatBody, user_id: str = Depends(requir
         "\n\n" + FOLLOWUPS_INSTRUCTION
     )
     try:
-        raw = llm.call(user_text=convo, system=system, max_tokens=1400)
+        # 1400, then 1800, both still proved tight for a thorough Deep-mode
+        # answer over many sources — a request for a phased plan complete
+        # with an inline Mermaid diagram ran out of budget mid-sentence in
+        # the prose *after* the diagram, nowhere near the ///FOLLOWUPS///
+        # marker this budget was originally sized around. Diagrams alone can
+        # run several hundred tokens. Sized up with real headroom; this is a
+        # ceiling, not a target, so a short answer costs the same as before.
+        raw = llm.call(user_text=convo, system=system, max_tokens=3200)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"Studio chat failed: {e}")
 
     answer, followups = _split_followups(raw)
+    if llm.last_truncated:
+        # Even with more headroom, an unusually long answer can still hit the
+        # ceiling — make that visible instead of leaving the last sentence
+        # dangling with no explanation, which reads like a bug rather than a
+        # budget limit.
+        answer = answer.rstrip() + "\n\n*(Response was cut short by length — ask “continue” to pick up where this left off.)*"
     if not followups:
         # Model didn't emit the block (or emitted something unparseable) —
         # fall back to the old keyword heuristic rather than showing nothing.

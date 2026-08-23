@@ -90,31 +90,48 @@ def create_project(user_id: str, name: str, description: str = "") -> dict:
 
 
 def list_projects(user_id: str) -> list[dict]:
+    """Projects the user owns, plus projects they've been added to as a
+    collaborator (full access — see core/project_sharing.py). `role` tells
+    the frontend whether to show owner-only controls (delete, sharing)."""
     with _conn() as conn:
-        rows = conn.execute(
-            "SELECT p.*, "
+        owned = conn.execute(
+            "SELECT p.*, 'owner' AS role, "
             "(SELECT COUNT(*) FROM sessions s WHERE s.project_id = p.id) AS run_count, "
             "(SELECT COUNT(*) FROM project_papers pp WHERE pp.project_id = p.id) AS paper_count, "
             "(SELECT COUNT(*) FROM project_notes pn WHERE pn.project_id = p.id) AS note_count "
-            f"FROM projects p WHERE p.user_id = {_PH} ORDER BY p.updated_at DESC",
+            f"FROM projects p WHERE p.user_id = {_PH}",
             (user_id,),
         ).fetchall()
-    return [dict(r) for r in rows]
+        shared = conn.execute(
+            "SELECT p.*, 'collaborator' AS role, "
+            "(SELECT COUNT(*) FROM sessions s WHERE s.project_id = p.id) AS run_count, "
+            "(SELECT COUNT(*) FROM project_papers pp WHERE pp.project_id = p.id) AS paper_count, "
+            "(SELECT COUNT(*) FROM project_notes pn WHERE pn.project_id = p.id) AS note_count "
+            "FROM projects p JOIN project_collaborators c ON c.project_id = p.id "
+            f"WHERE c.user_id = {_PH}",
+            (user_id,),
+        ).fetchall()
+    rows = [dict(r) for r in owned] + [dict(r) for r in shared]
+    rows.sort(key=lambda r: r["updated_at"], reverse=True)
+    return rows
 
 
 def get_project(project_id: str, user_id: str) -> Optional[dict]:
+    from core.project_sharing import user_has_project_access
+
     with _conn() as conn:
-        row = conn.execute(
-            f"SELECT * FROM projects WHERE id = {_PH} AND user_id = {_PH}",
-            (project_id, user_id),
-        ).fetchone()
+        row = conn.execute(f"SELECT * FROM projects WHERE id = {_PH}", (project_id,)).fetchone()
         if not row:
             return None
         proj = dict(row)
+        if not user_has_project_access(project_id, user_id):
+            return None
+        # Every run filed under a shared project is visible to every
+        # collaborator, not just whoever ran it — that's the point of sharing.
         runs = conn.execute(
-            "SELECT id, topic, stage, paper_count, created_at, updated_at "
-            f"FROM sessions WHERE project_id = {_PH} AND user_id = {_PH} ORDER BY updated_at DESC",
-            (project_id, user_id),
+            "SELECT id, user_id, topic, stage, paper_count, created_at, updated_at "
+            f"FROM sessions WHERE project_id = {_PH} ORDER BY updated_at DESC",
+            (project_id,),
         ).fetchall()
         papers = conn.execute(
             f"SELECT * FROM project_papers WHERE project_id = {_PH} ORDER BY added_at DESC",
@@ -124,6 +141,7 @@ def get_project(project_id: str, user_id: str) -> Optional[dict]:
             f"SELECT * FROM project_notes WHERE project_id = {_PH} ORDER BY updated_at DESC",
             (project_id,),
         ).fetchall()
+    proj["role"] = "owner" if proj["user_id"] == user_id else "collaborator"
     proj["runs"] = [dict(r) for r in runs]
     proj["papers"] = [{**dict(r), "paper": json.loads(r["paper"])} for r in papers]
     proj["notes"] = [dict(r) for r in notes]
@@ -132,6 +150,10 @@ def get_project(project_id: str, user_id: str) -> Optional[dict]:
 
 def update_project(project_id: str, user_id: str, name: Optional[str] = None,
                     description: Optional[str] = None) -> Optional[dict]:
+    from core.project_sharing import user_has_project_access
+
+    if not user_has_project_access(project_id, user_id):
+        return None
     sets, vals = [], []
     if name is not None:
         sets.append("name = " + _PH); vals.append(name.strip() or "Untitled project")
@@ -140,10 +162,10 @@ def update_project(project_id: str, user_id: str, name: Optional[str] = None,
     if not sets:
         return get_project(project_id, user_id)
     sets.append("updated_at = " + _PH); vals.append(_now())
-    vals += [project_id, user_id]
+    vals += [project_id]
     with _conn() as conn:
         conn.execute(
-            f"UPDATE projects SET {', '.join(sets)} WHERE id = {_PH} AND user_id = {_PH}", vals,
+            f"UPDATE projects SET {', '.join(sets)} WHERE id = {_PH}", vals,
         )
     return get_project(project_id, user_id)
 
@@ -169,20 +191,22 @@ def delete_project(project_id: str, user_id: str, keep_runs: bool = True) -> boo
             )
         conn.execute(f"DELETE FROM project_papers WHERE project_id = {_PH}", (project_id,))
         conn.execute(f"DELETE FROM project_notes WHERE project_id = {_PH}", (project_id,))
+        conn.execute(f"DELETE FROM project_collaborators WHERE project_id = {_PH}", (project_id,))
+        conn.execute(f"DELETE FROM project_share_links WHERE project_id = {_PH}", (project_id,))
         conn.execute(f"DELETE FROM projects WHERE id = {_PH}", (project_id,))
     return True
 
 
 def assign_session(session_id: str, user_id: str, project_id: Optional[str]) -> bool:
-    """File (or unfile, if project_id is None) a run under a project."""
+    """File (or unfile, if project_id is None) a run under a project. The run
+    must be your own; the project just needs to be one you have access to
+    (owner or collaborator) — a collaborator can file their own runs into a
+    shared project."""
+    from core.project_sharing import user_has_project_access
+
+    if project_id and not user_has_project_access(project_id, user_id):
+        return False
     with _conn() as conn:
-        if project_id:
-            owner = conn.execute(
-                f"SELECT id FROM projects WHERE id = {_PH} AND user_id = {_PH}",
-                (project_id, user_id),
-            ).fetchone()
-            if not owner:
-                return False
         cur = conn.execute(
             f"UPDATE sessions SET project_id = {_PH} WHERE id = {_PH} AND user_id = {_PH}",
             (project_id, session_id, user_id),
@@ -206,10 +230,13 @@ def add_paper(project_id: str, user_id: str, paper: dict, source: str = "manual"
 
 
 def remove_paper(project_id: str, user_id: str, paper_id: str) -> bool:
+    """No user_id filter on the row itself — any collaborator with access to
+    the project can remove a paper someone else added (full edit access).
+    The route already gates on get_project(project_id, user_id) first."""
     with _conn() as conn:
         cur = conn.execute(
-            f"DELETE FROM project_papers WHERE id = {_PH} AND project_id = {_PH} AND user_id = {_PH}",
-            (paper_id, project_id, user_id),
+            f"DELETE FROM project_papers WHERE id = {_PH} AND project_id = {_PH}",
+            (paper_id, project_id),
         )
         return cur.rowcount > 0
 
@@ -232,6 +259,8 @@ def add_note(project_id: str, user_id: str, title: str, body: str) -> dict:
 
 def update_note(project_id: str, user_id: str, note_id: str,
                  title: Optional[str] = None, body: Optional[str] = None) -> Optional[dict]:
+    """No user_id filter on the row — any collaborator can edit a note
+    someone else wrote (full edit access). Route gates on project access."""
     sets, vals = [], []
     if title is not None:
         sets.append("title = " + _PH); vals.append(title)
@@ -240,11 +269,11 @@ def update_note(project_id: str, user_id: str, note_id: str,
     if not sets:
         return None
     sets.append("updated_at = " + _PH); vals.append(_now())
-    vals += [note_id, project_id, user_id]
+    vals += [note_id, project_id]
     with _conn() as conn:
         conn.execute(
             f"UPDATE project_notes SET {', '.join(sets)} "
-            f"WHERE id = {_PH} AND project_id = {_PH} AND user_id = {_PH}", vals,
+            f"WHERE id = {_PH} AND project_id = {_PH}", vals,
         )
         row = conn.execute(f"SELECT * FROM project_notes WHERE id = {_PH}", (note_id,)).fetchone()
     return dict(row) if row else None
@@ -253,7 +282,7 @@ def update_note(project_id: str, user_id: str, note_id: str,
 def remove_note(project_id: str, user_id: str, note_id: str) -> bool:
     with _conn() as conn:
         cur = conn.execute(
-            f"DELETE FROM project_notes WHERE id = {_PH} AND project_id = {_PH} AND user_id = {_PH}",
-            (note_id, project_id, user_id),
+            f"DELETE FROM project_notes WHERE id = {_PH} AND project_id = {_PH}",
+            (note_id, project_id),
         )
         return cur.rowcount > 0

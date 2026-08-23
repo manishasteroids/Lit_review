@@ -23,7 +23,7 @@ import { useConfirm } from "./components/ConfirmModal.jsx";
 import {
   RotateCw, AlertTriangle, Sparkles, PenTool,
   BookOpen, Layers, Brain, Network, BarChart3, FlaskConical,
-  Plus, Trash2, Coins, MessageSquare, ArrowLeft,
+  Plus, Trash2, Coins, MessageSquare, ArrowLeft, Folder, ChevronDown,
 } from "./components/icons.jsx";
 
 import MethodsPanel from "./components/MethodsPanel.jsx";
@@ -33,6 +33,11 @@ const SOURCE_ICON = {
   semantic_scholar: "🔬",
   arxiv: "📄",
   pubmed: "🧬",
+  openalex: "🌐",
+  crossref: "🔗",
+  clinicaltrials: "⚕️",
+  ieee: "⚡",
+  patents: "📜",
 };
 
 const TOOLS = [
@@ -56,6 +61,19 @@ function relativeTime(iso) {
   if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
   if (diff < 2592000) return Math.floor(diff / 86400) + "d ago";
   return new Date(iso).toLocaleDateString();
+}
+
+// Absolute timestamp in the user's chosen profile timezone (falls back to
+// the browser's own timezone when `tz` is empty/invalid — see ProfileModal's
+// "Auto-detect" option, which saves "" for exactly this reason).
+function formatTimestamp(iso, tz) {
+  if (!iso) return "";
+  const opts = { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
+  try {
+    return new Date(iso).toLocaleString(undefined, tz ? { ...opts, timeZone: tz } : opts);
+  } catch {
+    return new Date(iso).toLocaleString(undefined, opts);
+  }
 }
 
 function groupSessions(sessions) {
@@ -95,6 +113,55 @@ const H = {
   loginText: { fontSize: 12, color: "var(--txt)", lineHeight: 1.5, marginBottom: 10 },
 };
 
+// "+ New" dropdown menu + inline "New project" popover, anchored under the button.
+const NEWMENU = {
+  menu: {
+    position: "absolute", top: "calc(100% + 6px)", left: 0, right: 0, zIndex: 30,
+    background: "var(--card,#fff)", border: "1px solid var(--line)", borderRadius: 10,
+    boxShadow: "0 10px 28px rgba(0,0,0,.14)", padding: 5,
+  },
+  item: {
+    display: "block", width: "100%", textAlign: "left", background: "none", border: "none",
+    borderRadius: 7, padding: "8px 9px", fontSize: 12.5, color: "var(--txt)", cursor: "pointer",
+    fontFamily: "inherit",
+  },
+  item2: {
+    display: "flex", alignItems: "flex-start", gap: 10, width: "100%", textAlign: "left",
+    background: "none", border: "none", borderRadius: 8, padding: "9px 10px", cursor: "pointer",
+    fontFamily: "inherit",
+  },
+  itemIc: {
+    flex: "0 0 26px", width: 26, height: 26, borderRadius: 7, background: "var(--indigo-soft)",
+    color: "var(--indigo)", display: "flex", alignItems: "center", justifyContent: "center", marginTop: 1,
+  },
+  itemTitle: { display: "block", fontSize: 13, fontWeight: 600, color: "var(--txt)" },
+  itemSub: { display: "block", fontSize: 11, color: "var(--muted)", marginTop: 1 },
+  popover: {
+    position: "absolute", top: "calc(100% + 6px)", left: 0, right: 0, zIndex: 31,
+    background: "var(--card,#fff)", border: "1px solid var(--line)", borderRadius: 10,
+    boxShadow: "0 10px 28px rgba(0,0,0,.14)", padding: 10,
+  },
+  input: {
+    width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid var(--line)",
+    fontFamily: "inherit", fontSize: 13, color: "var(--txt)", background: "var(--ink)",
+    outline: "none", boxSizing: "border-box",
+  },
+};
+
+// "File next search under…" chip + popover in the sidebar Project panel.
+const PICK = {
+  chip: {
+    display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left",
+    background: "var(--card,#fff)", border: "1px solid var(--line)", borderRadius: 8,
+    padding: "7px 9px", cursor: "pointer", fontFamily: "inherit", color: "var(--txt)",
+  },
+  chipLabel: {
+    flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+    fontSize: 12.5, fontWeight: 500,
+  },
+  itemActive: { background: "var(--indigo-soft)", color: "var(--indigo)", fontWeight: 600 },
+};
+
 export default function App() {
   const session = useSession();
   const signedOut = authEnabled && !session;
@@ -115,12 +182,81 @@ export default function App() {
   const [showProjects, setShowProjects] = useState(false);
   const [projects, setProjects] = useState([]);
   const [selectedProject, setSelectedProject] = useState("");  // project to file the NEXT run under
+  const [currentProject, setCurrentProject] = useState(null);  // the project workspace you're "inside", if any
+  const [newMenuOpen, setNewMenuOpen] = useState(false);
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [newProjectBusy, setNewProjectBusy] = useState(false);
+  const [newProjectErr, setNewProjectErr] = useState(null);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false); // "file next search under..." popover
+  const [pickerNewOpen, setPickerNewOpen] = useState(false);
+  const [pickerNewName, setPickerNewName] = useState("");
+  const [pickerBusy, setPickerBusy] = useState(false);
 
   const refreshProjects = useCallback(() => {
     if (signedOut) { setProjects([]); return; }
     api.listProjects().then((d) => setProjects(d.projects || [])).catch(() => {});
   }, [signedOut]);
   useEffect(() => { refreshProjects(); }, [refreshProjects]);
+
+  // Re-fetch the project you're currently "inside" (its run list, mainly) —
+  // used after an action that changes which runs belong to it, e.g. filing
+  // an existing History run under it. Set via setCurrentProject with a
+  // functional update so it only touches state if you're still in the same
+  // project by the time the fetch resolves (nothing to do if you navigated
+  // away, and nothing to overwrite with if you'd switched to a different one).
+  const refreshCurrentProject = useCallback(() => {
+    setCurrentProject((cur) => {
+      if (!cur) return cur;
+      api.getProject(cur.id).then((p) => {
+        if (p && !p.error) setCurrentProject((now) => (now && now.id === p.id ? p : now));
+      }).catch(() => {});
+      return cur;
+    });
+  }, []);
+
+  // Timezone the user picked in Settings, for absolute History timestamps.
+  // "" means auto-detect (browser timezone) — see formatTimestamp() above.
+  const [profileTz, setProfileTz] = useState("");
+  const refreshProfileTz = useCallback(() => {
+    if (signedOut) { setProfileTz(""); return; }
+    api.getProfile().then((p) => setProfileTz(p.timezone_pref || "")).catch(() => {});
+  }, [signedOut]);
+  useEffect(() => { refreshProfileTz(); }, [refreshProfileTz]);
+
+  async function createProjectAndOpen(e) {
+    e.preventDefault();
+    if (!newProjectName.trim()) return;
+    setNewProjectBusy(true); setNewProjectErr(null);
+    try {
+      const p = await api.createProject(newProjectName.trim(), "");
+      refreshProjects();
+      setNewProjectOpen(false); setNewProjectName("");
+      openProject(p);
+    } catch (e2) {
+      setNewProjectErr(e2.message || "Could not create project.");
+    } finally {
+      setNewProjectBusy(false);
+    }
+  }
+
+  // Create a project from the "file next search under…" picker without
+  // entering its workspace — just selects it so the next run gets filed there.
+  async function createProjectAndSelect(e) {
+    e.preventDefault();
+    if (!pickerNewName.trim()) return;
+    setPickerBusy(true);
+    try {
+      const p = await api.createProject(pickerNewName.trim(), "");
+      refreshProjects();
+      setSelectedProject(p.id);
+      setPickerNewOpen(false); setPickerNewName(""); setProjectPickerOpen(false);
+    } catch (e2) {
+      setError(e2.message || "Could not create project.");
+    } finally {
+      setPickerBusy(false);
+    }
+  }
 
   const [runId, setRunId] = useState(null);
   const [reform, setReform] = useState(null);
@@ -136,6 +272,7 @@ export default function App() {
   const [experimentCritique, setExperimentCritique] = useState(null);
   const [experimentIterations, setExperimentIterations] = useState(0);
   const [experimentDebate, setExperimentDebate] = useState({});  // hypothesis index -> [{argument,stance,response}]
+  const [experimentKgBridges, setExperimentKgBridges] = useState([]);  // see backend pipeline/knowledge_graph.find_bridge_candidates
   const [tab, setTab] = useState("review");
   const [prevTab, setPrevTab] = useState("review"); // Studio opens full-screen — Back returns here
   const reviewRef = useRef(null);
@@ -152,6 +289,10 @@ export default function App() {
   // Session list from backend (no LLM) + delete-confirm state
   const [sessions, setSessions] = useState([]);
   const [confirmId, setConfirmId] = useState(null);
+  const [fileMenuId, setFileMenuId] = useState(null); // which History row's "add to project" popover is open
+  const [fileMenuNewOpen, setFileMenuNewOpen] = useState(false);
+  const [fileMenuNewName, setFileMenuNewName] = useState("");
+  const [fileMenuBusy, setFileMenuBusy] = useState(false);
 
   // History is per-user: skip the fetch entirely while signed out.
   const refreshSessions = useCallback(() => {
@@ -177,8 +318,35 @@ export default function App() {
     setExtractions([]); setExtractStats(null); setSynth(null); setSections({}); setSideModules(null);
     setEvalRes(null); setError(null); setDone({}); setStage("query");
     setExperimentPlan(null); setExperimentCritique(null); setExperimentIterations(0); setExperimentDebate({});
+    setExperimentKgBridges([]);
     setTab("review"); setProgressMsgs([]); setNotes({});
     setIncluded({}); setAnalysisStale(false);
+  }
+
+  // Leave whatever project you're in (if any) and start a blank, unfiled chat.
+  function startNewChat() {
+    setCurrentProject(null);
+    setSelectedProject("");
+    reset();
+    setTopic("");
+  }
+
+  // Enter a project's workspace: every new search now files under it
+  // (selectedProject), the header shows its name, and we jump straight to
+  // its most recently updated run (or, optionally, a specific one) so
+  // opening a project always resumes prior work instead of a blank slate.
+  function openProject(proj, runIdToOpen) {
+    setShowProjects(false);
+    setCurrentProject(proj);
+    setSelectedProject(proj.id);
+    const target = runIdToOpen || (proj.runs || [])[0]?.id;
+    if (target) restoreSession(target);
+    else { reset(); setTopic(""); }
+  }
+
+  function exitProject() {
+    setCurrentProject(null);
+    setSelectedProject("");
   }
 
   // Restore a session — zero LLM calls
@@ -205,6 +373,7 @@ export default function App() {
         setExperimentCritique(d.experimentCritique || null);
         setExperimentIterations((d.experimentIterations || []).length);
         setExperimentDebate(d.experimentDebate || {});
+        setExperimentKgBridges(d.experimentKgBridges || []);
         const inc = {};
         Object.entries(d.approved || {}).forEach(([k, v]) => { if (v) inc[Number(k)] = true; });
         setIncluded(inc);
@@ -225,6 +394,39 @@ export default function App() {
   async function deleteSession(id) {
     await api.deleteSession(id);
     refreshSessions();
+  }
+
+  // File an already-searched History run under a project (existing or new)
+  // after the fact — separate from `selectedProject`/`currentProject`, which
+  // only apply to runs started FROM INSIDE a project going forward.
+  async function fileSessionUnderProject(sessionId, projectId) {
+    setFileMenuBusy(true);
+    try {
+      await api.assignRunProject(sessionId, projectId);
+      setFileMenuId(null);
+      setFileMenuNewOpen(false);
+      setFileMenuNewName("");
+      refreshSessions();
+      refreshProjects();
+      refreshCurrentProject();
+    } catch (e) {
+      setError({ stage: "File under project", msg: e.message });
+    } finally {
+      setFileMenuBusy(false);
+    }
+  }
+
+  async function createProjectAndFile(sessionId, e) {
+    e.preventDefault();
+    if (!fileMenuNewName.trim()) return;
+    setFileMenuBusy(true);
+    try {
+      const p = await api.createProject(fileMenuNewName.trim(), "");
+      await fileSessionUnderProject(sessionId, p.id);
+    } catch (e2) {
+      setError({ stage: "File under project", msg: e2.message || "Could not create project." });
+      setFileMenuBusy(false);
+    }
   }
 
   // What shows in Sources/Review: a paper the user hasn't removed. `included`
@@ -277,7 +479,7 @@ export default function App() {
       setDone((d) => ({ ...d, query: true, reformulate: true, search: true }));
       setStage("filter");
       refreshSessions();
-      if (selectedProject) refreshProjects();
+      if (selectedProject) { refreshProjects(); refreshCurrentProject(); }
     } catch (e) {
       setError({ stage: "Query Reformulator / Academic Search", msg: e.message, retry: runStart });
       setStage("query");
@@ -303,7 +505,7 @@ export default function App() {
       setDone({ query: true, reformulate: true, search: true, extract: true, synthesize: true });
       setTab("sources");
       refreshSessions();
-      if (selectedProject) refreshProjects();
+      if (selectedProject) { refreshProjects(); refreshCurrentProject(); }
     } catch (e) {
       setError({ stage: "Analyze your own documents", msg: e.message, retry: startAnalyzeDocs });
     } finally {
@@ -381,8 +583,8 @@ export default function App() {
 
   // Same as addPaperToSources, but for a locally-uploaded PDF/DOCX instead of
   // a resolved search result — extraction happens server-side in one call.
-  async function uploadPaperToSources(file) {
-    const res = await api.uploadPaper(runId, file, apiKey || undefined, model, notes);
+  async function uploadPaperToSources(file, titleOverride) {
+    const res = await api.uploadPaper(runId, file, apiKey || undefined, model, notes, titleOverride);
     const np = { ...res.paper, added: true };
     setPapers((prev) => [...prev, np]);
     if (res.extraction) {
@@ -456,6 +658,7 @@ export default function App() {
       setExperimentPlan(res.experiment_plan);
       setExperimentCritique(null);
       setExperimentIterations(0);
+      setExperimentKgBridges(res.experiment_kg_bridges || []);
     } catch (e) {
       setError({ stage: "Experiment Designer", msg: e.message, retry: runDesignExperiments });
     } finally {
@@ -473,6 +676,7 @@ export default function App() {
       setExperimentPlan(res.experiment_plan);
       setExperimentCritique(res.experiment_critique);
       setExperimentIterations(res.iterations);
+      setExperimentKgBridges(res.experiment_kg_bridges || []);
     } catch (e) {
       setError({ stage: "Hypothesis Refinement", msg: e.message, retry: runRefineExperiments });
     } finally {
@@ -562,11 +766,6 @@ export default function App() {
         md += "\n";
       });
       download(`${slug}.md`, md, "text/markdown;charset=utf-8");
-    } else if (fmt === "csv") {
-      const cols = ["n", "title", "authors", "year", "venue", "url", "method", "finding", "metrics", "contribution", "relevance", "note"];
-      const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-      const csv = [cols.join(",")].concat(rows.map((r) => cols.map((c) => esc(r[c])).join(","))).join("\n");
-      download(`${slug}.csv`, csv, "text/csv;charset=utf-8");
     } else if (fmt === "bib") {
       const bib = rows.map((r) => {
         const first = (r.authors || "unknown").split(/[ ,]/)[0].toLowerCase().replace(/[^a-z]/g, "") || "ref";
@@ -585,13 +784,6 @@ export default function App() {
   }
 
   const grouped = groupSessions(sessions);
-
-  // "Welcome, <name>" — prefer the auth profile name, fall back to email local-part.
-  const firstName = (() => {
-    const m = session?.user?.user_metadata || {};
-    const n = m.full_name || m.name || (session?.user?.email || "").split("@")[0] || "";
-    return n ? String(n).trim().split(/\s+/)[0] : "";
-  })();
 
   // Signed-out visitors see the public landing page; the tools app is gated
   // behind login. (All hooks above run unconditionally, so this early return
@@ -644,31 +836,36 @@ export default function App() {
       )}
 
       {accountTab && (
-        <ProfileModal user={session?.user} tab={accountTab} onClose={() => setAccountTab(null)} />
+        <ProfileModal user={session?.user} tab={accountTab}
+          onClose={() => { setAccountTab(null); refreshProfileTz(); }} />
       )}
 
       {showProjects && (
         <ProjectsModal
           onClose={() => { setShowProjects(false); refreshProjects(); }}
-          onOpenRun={(id) => { setShowProjects(false); restoreSession(id); }}
+          onOpenRun={(id, proj) => openProject(proj, id)}
+          onOpenProject={(proj) => openProject(proj)}
         />
       )}
       <div className="sm-wrap wide">
         <div className="sm-head" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 20 }}>
           <div>
-            <div className="eyebrow" style={{ marginBottom: 8 }}>Multi-agent literature review · live pipeline</div>
-            <div className="sm-title"><b>Sift</b> <span style={{ color: "var(--muted)", fontWeight: 400 }}>/ lit-review agent</span></div>
+            <div className="eyebrow" style={{ marginBottom: 8 }}>
+              {currentProject ? "Project workspace" : "Multi-agent literature review · live pipeline"}
+            </div>
+            <div className="sm-title">
+              <b>Sift</b>{" "}
+              <span style={{ color: "var(--muted)", fontWeight: 400 }}>
+                / {currentProject ? currentProject.name : "lit-review agent"}
+              </span>
+            </div>
             <div className="sm-gloss">
-              Enter a research question and watch it move through the agent pipeline — reformulate,
-              search the live web, filter sources, extract, critique, and write a cited review.
+              {currentProject
+                ? "Every search you run here is filed under this project — papers, notes and review history all stay together."
+                : "Enter a research question and watch it move through the agent pipeline — reformulate, search the live web, filter sources, extract, critique, and write a cited review."}
             </div>
           </div>
           <div style={{ flexShrink: 0, paddingTop: 4, display: "flex", alignItems: "center", gap: 10 }}>
-            {firstName && (
-              <span style={{ fontSize: 13.5, color: "var(--muted)", whiteSpace: "nowrap" }}>
-                Welcome, <b style={{ color: "var(--txt)", fontWeight: 600 }}>{firstName}</b>
-              </span>
-            )}
             <AuthButtons
               extraItems={[{
                 label: "Profile",
@@ -699,17 +896,58 @@ export default function App() {
         <div className="grid3">
           {/* LEFT: Tools + History */}
           <div className="lcol">
-            <button
-              className="btn"
-              disabled={busy}
-              onClick={() => { if (!busy) { reset(); setTopic(""); } }}
-              style={{ width: "100%", justifyContent: "center", display: "flex", alignItems: "center", gap: 6 }}
-            >
-              <Plus size={14} /> New chat
-            </button>
+            <div style={{ position: "relative" }}>
+              <button
+                className="btn"
+                disabled={busy}
+                onClick={() => setNewMenuOpen((o) => !o)}
+                style={{ width: "100%", justifyContent: "center", display: "flex", alignItems: "center", gap: 6 }}
+              >
+                <Plus size={14} /> New {newMenuOpen ? "▴" : "▾"}
+              </button>
+              {newMenuOpen && (
+                <div style={NEWMENU.menu} onMouseLeave={() => setNewMenuOpen(false)}>
+                  <button style={NEWMENU.item2} onClick={() => { setNewMenuOpen(false); if (!busy) startNewChat(); }}>
+                    <span style={NEWMENU.itemIc}><MessageSquare size={15} /></span>
+                    <span>
+                      <span style={NEWMENU.itemTitle}>New chat</span>
+                      <span style={NEWMENU.itemSub}>Start a fresh research question</span>
+                    </span>
+                  </button>
+                  <button style={NEWMENU.item2} onClick={() => { setNewMenuOpen(false); setNewProjectOpen(true); }}>
+                    <span style={NEWMENU.itemIc}><Folder size={15} /></span>
+                    <span>
+                      <span style={NEWMENU.itemTitle}>New project</span>
+                      <span style={NEWMENU.itemSub}>Group searches, papers &amp; notes together</span>
+                    </span>
+                  </button>
+                  <button style={NEWMENU.item2} onClick={() => { setNewMenuOpen(false); setShowProjects(true); }}>
+                    <span style={NEWMENU.itemIc}><Layers size={15} /></span>
+                    <span>
+                      <span style={NEWMENU.itemTitle}>Open existing project</span>
+                      <span style={NEWMENU.itemSub}>Browse, share &amp; manage your projects</span>
+                    </span>
+                  </button>
+                </div>
+              )}
+              {newProjectOpen && (
+                <form onSubmit={createProjectAndOpen} style={NEWMENU.popover}>
+                  <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>New project</div>
+                  <input autoFocus style={NEWMENU.input} placeholder="Project name"
+                    value={newProjectName} onChange={(e) => setNewProjectName(e.target.value)} />
+                  <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                    <button type="submit" disabled={newProjectBusy} className="btn sm" style={{ flex: 1 }}>
+                      {newProjectBusy ? "Creating…" : "Create & open"}
+                    </button>
+                    <button type="button" className="btn ghost sm" onClick={() => setNewProjectOpen(false)}>Cancel</button>
+                  </div>
+                  {newProjectErr && <div style={{ color: "#f08a8a", fontSize: 11.5, marginTop: 6 }}>{newProjectErr}</div>}
+                </form>
+              )}
+            </div>
 
             <div className="panel">
-              <div className="eyebrow" style={{ marginBottom: 12 }}>Tools</div>
+              <div className="panel-head-label" style={{ marginBottom: 12 }}>Tools</div>
               {TOOLS.map(([k, Ic, lab]) => {
                 // Token usage isn't tied to any one run — it's useful with no
                 // active session too (spend trend, all-time totals) — so it
@@ -738,48 +976,117 @@ export default function App() {
             {!signedOut && (
               <div className="panel">
                 <div style={H.head}>
-                  <span className="eyebrow">Projects</span>
-                  <button style={H.newBtn} onClick={() => setShowProjects(true)} title="Manage projects">
-                    <Plus size={14} />
-                  </button>
+                  <span className="panel-head-label">Project</span>
+                  {!currentProject && (
+                    <button style={H.newBtn} onClick={() => setShowProjects(true)} title="Manage projects">
+                      <Plus size={14} />
+                    </button>
+                  )}
                 </div>
-                {stage === "query" && (
-                  <>
-                    <select
-                      value={selectedProject}
-                      onChange={(e) => setSelectedProject(e.target.value)}
-                      style={{
-                        width: "100%", fontFamily: "'JetBrains Mono',monospace", fontSize: 11.5,
-                        color: "var(--txt)", background: "var(--card,#fff)", border: "1px solid var(--line)",
-                        borderRadius: 7, padding: "6px 8px", marginTop: 2,
-                      }}
-                    >
-                      <option value="">No project (unfiled)</option>
-                      {projects.map((p) => (
-                        <option key={p.id} value={p.id}>{p.name}</option>
-                      ))}
-                    </select>
-                    {projects.length === 0 && (
-                      <div style={{ ...H.empty, padding: "6px 2px 0" }}>
-                        Create a project to file this search and its papers, notes and history under it.
+                {currentProject ? (
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: "var(--txt)" }}>{currentProject.name}</div>
+                    <div style={{ ...H.empty, padding: "4px 2px 8px" }}>
+                      New searches file under this project. Pick a run below to reopen it.
+                    </div>
+                    {(currentProject.runs || []).length === 0 ? (
+                      <div style={{ ...H.empty, padding: "0 2px 8px" }}>No runs in this project yet.</div>
+                    ) : (
+                      <div style={{ ...H.scroll, maxHeight: 220, marginBottom: 8 }}>
+                        {currentProject.runs.map((r) => (
+                          <div
+                            key={r.id}
+                            style={{ ...H.item, ...(r.id === runId ? H.itemActive : {}) }}
+                            onClick={() => !busy && restoreSession(r.id)}
+                            title={r.topic}
+                          >
+                            <div style={H.itemTopic}>{r.topic || "Untitled review"}</div>
+                            <div style={H.meta}>
+                              <span style={{ ...H.badge, ...(r.stage === "done" ? H.badgeDone : H.badgeFilter) }}>
+                                {r.stage === "done" ? "✓ review" : "◦ filter"}
+                              </span>
+                              <span style={H.dot}>·</span>
+                              <span>{r.paper_count}p</span>
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     )}
-                  </>
-                )}
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button style={H.newBtn} onClick={() => { reset(); setTopic(""); }}>+ New search</button>
+                      <button style={H.newBtn} onClick={() => setShowProjects(true)}>Manage</button>
+                      <button style={H.newBtn} onClick={exitProject}>Exit project</button>
+                    </div>
+                  </div>
+                ) : stage === "query" ? (
+                  <div style={{ position: "relative" }}>
+                    <button
+                      type="button"
+                      style={PICK.chip}
+                      onClick={() => { setPickerNewOpen(false); setProjectPickerOpen((o) => !o); }}
+                    >
+                      <Folder size={13} />
+                      <span style={PICK.chipLabel}>
+                        {selectedProject
+                          ? (projects.find((p) => p.id === selectedProject)?.name || "Project")
+                          : "File under a project…"}
+                      </span>
+                      <ChevronDown size={13} style={{ flexShrink: 0, opacity: .6 }} />
+                    </button>
+
+                    {projectPickerOpen && (
+                      <div style={NEWMENU.menu} onClick={(e) => e.stopPropagation()}
+                        onMouseLeave={() => { if (!pickerNewOpen) setProjectPickerOpen(false); }}>
+                        <button
+                          style={{ ...NEWMENU.item, ...(!selectedProject ? PICK.itemActive : {}) }}
+                          onClick={() => { setSelectedProject(""); setProjectPickerOpen(false); }}
+                        >
+                          No project (unfiled)
+                        </button>
+                        {projects.map((p) => (
+                          <button
+                            key={p.id}
+                            style={{ ...NEWMENU.item, ...(p.id === selectedProject ? PICK.itemActive : {}) }}
+                            onClick={() => { setSelectedProject(p.id); setProjectPickerOpen(false); }}
+                          >
+                            {p.id === selectedProject ? "✓ " : ""}{p.name}
+                          </button>
+                        ))}
+                        {projects.length === 0 && !pickerNewOpen && (
+                          <div style={{ ...H.empty, padding: "4px 9px" }}>No projects yet.</div>
+                        )}
+                        {pickerNewOpen ? (
+                          <form onSubmit={createProjectAndSelect} style={{ padding: 6 }}>
+                            <input autoFocus style={NEWMENU.input} placeholder="Project name"
+                              value={pickerNewName} onChange={(e) => setPickerNewName(e.target.value)} />
+                            <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                              <button type="submit" disabled={pickerBusy} className="btn sm" style={{ flex: 1 }}>
+                                {pickerBusy ? "Creating…" : "Create & select"}
+                              </button>
+                            </div>
+                          </form>
+                        ) : (
+                          <button style={{ ...NEWMENU.item, color: "var(--indigo)" }}
+                            onClick={() => setPickerNewOpen(true)}>
+                            + New project
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {!selectedProject && projects.length === 0 && (
+                      <div style={{ ...H.empty, padding: "6px 2px 0" }}>
+                        File this search under a project to keep its papers, notes and history together.
+                      </div>
+                    )}
+                  </div>
+                ) : null}
               </div>
             )}
 
             <div className="panel">
               <div style={H.head}>
-                <span className="eyebrow">History</span>
-                <button
-                  style={H.newBtn}
-                  disabled={busy}
-                  onClick={() => { if (!busy) { reset(); setTopic(""); } }}
-                  title="New review"
-                >
-                  <Plus size={14} />
-                </button>
+                <span className="panel-head-label">History</span>
               </div>
 
               {signedOut ? (
@@ -802,24 +1109,37 @@ export default function App() {
                         {items.map((s) => (
                           <div
                             key={s.id}
-                            style={{ ...H.item, ...(s.id === runId ? H.itemActive : {}) }}
+                            style={{ ...H.item, position: "relative", ...(s.id === runId ? H.itemActive : {}) }}
                             onClick={() => !busy && restoreSession(s.id)}
                             onMouseLeave={() => setConfirmId(null)}
                             title={s.topic}
                           >
                             <div style={H.itemTop}>
                               <span style={H.itemTopic}>{s.topic}</span>
-                              <button
-                                style={{ ...H.del, ...(confirmId === s.id ? H.delConfirm : {}) }}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (confirmId === s.id) { deleteSession(s.id); setConfirmId(null); }
-                                  else setConfirmId(s.id);
-                                }}
-                                title={confirmId === s.id ? "Click again to confirm" : "Delete"}
-                              >
-                                <Trash2 size={12} />
-                              </button>
+                              <span style={{ display: "flex", flexShrink: 0 }}>
+                                <button
+                                  style={{ ...H.del, ...(fileMenuId === s.id ? { color: "var(--indigo)" } : {}) }}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setFileMenuNewOpen(false);
+                                    setFileMenuId((id) => (id === s.id ? null : s.id));
+                                  }}
+                                  title="Add to project"
+                                >
+                                  <Folder size={12} />
+                                </button>
+                                <button
+                                  style={{ ...H.del, ...(confirmId === s.id ? H.delConfirm : {}) }}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (confirmId === s.id) { deleteSession(s.id); setConfirmId(null); }
+                                    else setConfirmId(s.id);
+                                  }}
+                                  title={confirmId === s.id ? "Click again to confirm" : "Delete"}
+                                >
+                                  <Trash2 size={12} />
+                                </button>
+                              </span>
                             </div>
                             <div style={H.meta}>
                               <span style={{ ...H.badge, ...(s.stage === "done" ? H.badgeDone : H.badgeFilter) }}>
@@ -828,8 +1148,52 @@ export default function App() {
                               <span style={H.dot}>·</span>
                               <span>{s.paper_count}p</span>
                               <span style={H.dot}>·</span>
-                              <span>{relativeTime(s.updated_at)}</span>
+                              <span title={relativeTime(s.updated_at)}>{formatTimestamp(s.updated_at, profileTz)}</span>
+                              {s.project_id && (
+                                <>
+                                  <span style={H.dot}>·</span>
+                                  <span title="Filed under this project">
+                                    📁 {projects.find((p) => p.id === s.project_id)?.name || "project"}
+                                  </span>
+                                </>
+                              )}
                             </div>
+
+                            {fileMenuId === s.id && (
+                              <div style={NEWMENU.menu} onClick={(e) => e.stopPropagation()}>
+                                {s.project_id && (
+                                  <button style={NEWMENU.item} disabled={fileMenuBusy}
+                                    onClick={() => fileSessionUnderProject(s.id, null)}>
+                                    Remove from project
+                                  </button>
+                                )}
+                                {projects.filter((p) => p.id !== s.project_id).map((p) => (
+                                  <button key={p.id} style={NEWMENU.item} disabled={fileMenuBusy}
+                                    onClick={() => fileSessionUnderProject(s.id, p.id)}>
+                                    {p.name}
+                                  </button>
+                                ))}
+                                {projects.length === 0 && !fileMenuNewOpen && (
+                                  <div style={{ ...H.empty, padding: "4px 9px" }}>No projects yet.</div>
+                                )}
+                                {fileMenuNewOpen ? (
+                                  <form onSubmit={(e) => createProjectAndFile(s.id, e)} style={{ padding: 6 }}>
+                                    <input autoFocus style={NEWMENU.input} placeholder="Project name"
+                                      value={fileMenuNewName} onChange={(e) => setFileMenuNewName(e.target.value)} />
+                                    <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                                      <button type="submit" disabled={fileMenuBusy} className="btn sm" style={{ flex: 1 }}>
+                                        {fileMenuBusy ? "Creating…" : "Create & file"}
+                                      </button>
+                                    </div>
+                                  </form>
+                                ) : (
+                                  <button style={{ ...NEWMENU.item, color: "var(--indigo)" }}
+                                    onClick={() => setFileMenuNewOpen(true)}>
+                                    + New project
+                                  </button>
+                                )}
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -848,7 +1212,14 @@ export default function App() {
 
           {/* CENTER: Model selection + prompt / stage content */}
           <div className="ccol">
-            <div style={{ marginBottom: 16, display: "flex", justifyContent: "flex-end" }}>
+            {/* Sticky + same top offset as the Tools/Project/History rail
+                (lcol) and the Agent Pipeline rail (rcol) — otherwise this
+                scrolls out of sync with them and no longer lines up once
+                the page is scrolled. */}
+            <div style={{
+              marginBottom: 16, display: "flex", justifyContent: "flex-end",
+              position: "sticky", top: 18, zIndex: 5, background: "var(--ink)", paddingBottom: 4,
+            }}>
               <ModeBar modes={modes} mode={mode} setMode={setMode} apiKey={apiKey} setApiKey={setApiKey} />
             </div>
 
@@ -1041,6 +1412,7 @@ export default function App() {
                       critique={experimentCritique}
                       iterations={experimentIterations}
                       debate={experimentDebate}
+                      kgBridges={experimentKgBridges}
                       busy={busy}
                       onDesign={runDesignExperiments}
                       onRefine={runRefineExperiments}
@@ -1063,7 +1435,6 @@ export default function App() {
                   </button>
                   <span style={{ width: 1, alignSelf: "stretch", background: "var(--line)", margin: "0 2px" }} />
                   <button className="btn ghost sm" disabled={!citeOrder.length} onClick={() => exportShortlist("md")}>Export .md</button>
-                  <button className="btn ghost sm" disabled={!citeOrder.length} onClick={() => exportShortlist("csv")}>Export .csv</button>
                   <button className="btn ghost sm" disabled={!citeOrder.length} onClick={() => exportShortlist("bib")}>Export .bib</button>
                 </div>
               </div>
@@ -1080,11 +1451,6 @@ export default function App() {
               </div>
             )}
 
-            <div className="foot">
-              Talks to the Sift backend (FastAPI) running at the address in <code>VITE_API_BASE</code>.
-              The Anthropic key lives server-side by default — only paste one above if you want to
-              override the server's key for this run.
-            </div>
           </div>
 
           {/* Agent Pipeline status */}

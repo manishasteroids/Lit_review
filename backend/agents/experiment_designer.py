@@ -14,11 +14,8 @@ it came from and marked evidenced (traceable to a source) vs proposed (the
 model's own inference), so the output is defensible rather than hallucinated.
 """
 import json
-import logging
 
 from agents.base import Agent
-
-log = logging.getLogger("samhita.experiment_designer")
 
 
 class ExperimentDesignerAgent(Agent):
@@ -41,6 +38,15 @@ class ExperimentDesignerAgent(Agent):
         "Given the synthesis and the extracted papers, propose testable experiments "
         "that would advance the open gaps. Ground every claim in the provided papers "
         "by their idx; never invent a benchmark, dataset, or citation. "
+        "You may also be given KNOWLEDGE-GRAPH BRIDGE CANDIDATES: pairs of concepts "
+        "that never co-occur in any single paper in this corpus, but each connects "
+        "separately to some shared concept through different papers — a structural "
+        "signal (not something any one paper states) that nobody here has combined "
+        "those two things yet. When a bridge candidate is genuinely relevant to the "
+        "topic, prefer building at least one hypothesis around it over a purely "
+        "text-synthesized gap, and say so explicitly in that hypothesis's rationale "
+        "(name the bridging concept). Do not force a bridge into the plan if none of "
+        "them actually fit the topic — an irrelevant bridge is worse than none. "
         "Produce AT MOST 2 hypotheses, each concise. Keep every string short. "
         'Respond ONLY with JSON (no markdown): {"domain":"<inferred domain>",'
         '"hypotheses":[{'
@@ -91,7 +97,6 @@ class ExperimentDesignerAgent(Agent):
             {k: e.get(k) for k in ("idx", "method", "finding", "limitation", "concepts")}
             for e in extractions
         ]
-        out = ""
         try:
             out = self.llm.call(
                 user_text=(
@@ -101,20 +106,14 @@ class ExperimentDesignerAgent(Agent):
                     f"Papers (cite by idx):\n{json.dumps(compact)}"
                 ),
                 system=self.REFINE_SYSTEM,
-                # Was 1600 — the full single-hypothesis schema (setup,
-                # variables, metrics/baselines arrays, failure_modes, etc.)
-                # plus the model's own reasoning routinely ran past that,
-                # cutting the JSON off mid-string and silently discarding
-                # the refine (falling back to the unchanged hypothesis).
-                max_tokens=2400,
+                max_tokens=1600,
             )
             revised = self.llm.parse_json(out)
             if isinstance(revised, dict) and revised.get("hypothesis"):
                 return revised
             return hypothesis
         except Exception:
-            log.warning("refine() failed to parse a revised hypothesis; keeping original. "
-                        "Raw output (first 500 chars): %r", out[:500], exc_info=True)
+            import traceback; traceback.print_exc()
             return hypothesis
 
     CHALLENGE_SYSTEM = (
@@ -151,7 +150,6 @@ class ExperimentDesignerAgent(Agent):
             {k: e.get(k) for k in ("idx", "method", "finding", "limitation", "concepts")}
             for e in extractions
         ]
-        out = ""
         try:
             out = self.llm.call(
                 user_text=(
@@ -161,7 +159,7 @@ class ExperimentDesignerAgent(Agent):
                     f"Papers (cite by idx):\n{json.dumps(compact)}"
                 ),
                 system=self.CHALLENGE_SYSTEM,
-                max_tokens=2400,  # see refine() above — same schema, same truncation risk
+                max_tokens=1600,
             )
             result = self.llm.parse_json(out)
             if (isinstance(result, dict) and result.get("stance") in ("revised", "defended")
@@ -170,12 +168,12 @@ class ExperimentDesignerAgent(Agent):
             return {"stance": "defended", "response": "Could not process the objection — no change made.",
                     "hypothesis": hypothesis}
         except Exception as e:
-            log.warning("respond_to_challenge() failed to parse a result; defending unchanged. "
-                        "Raw output (first 500 chars): %r", out[:500], exc_info=True)
+            import traceback; traceback.print_exc()
             return {"stance": "defended", "response": f"Error handling objection: {e}",
                     "hypothesis": hypothesis}
 
-    def run(self, topic: str, synthesis: dict, extractions: list[dict]) -> dict:
+    def run(self, topic: str, synthesis: dict, extractions: list[dict],
+            kg_bridges: list[dict] | None = None) -> dict:
         # Give the model the gaps/tensions (what to target) plus a compact view
         # of each paper (what to build on / cite), keyed by idx — same compaction
         # the synthesizer uses, so the citation idxs line up across stages.
@@ -190,14 +188,21 @@ class ExperimentDesignerAgent(Agent):
         }
         # Scale the budget a little with corpus size; cap for cost.
         max_tokens = 4000
-        out = ""
+        user_text = (
+            f"Research topic: {topic}\n\n"
+            f"Synthesis focus (target these gaps):\n{json.dumps(focus)}\n\n"
+            f"Papers (cite by idx):\n{json.dumps(compact)}"
+        )
+        if kg_bridges:
+            user_text += (
+                "\n\nKnowledge-graph bridge candidates (concept pairs with no "
+                "direct co-occurrence in this corpus, connected only through a "
+                "shared bridging concept — see system prompt):\n"
+                f"{json.dumps(kg_bridges)}"
+            )
         try:
             out = self.llm.call(
-                user_text=(
-                    f"Research topic: {topic}\n\n"
-                    f"Synthesis focus (target these gaps):\n{json.dumps(focus)}\n\n"
-                    f"Papers (cite by idx):\n{json.dumps(compact)}"
-                ),
+                user_text=user_text,
                 system=self.SYSTEM,
                 max_tokens=max_tokens,
             )
@@ -207,8 +212,7 @@ class ExperimentDesignerAgent(Agent):
                 return {"hypotheses": [], "note": "No plan produced."}
             return plan
         except Exception as e:
-            log.warning("run() failed to parse an experiment plan. "
-                        "Raw output (first 500 chars): %r", out[:500], exc_info=True)
+            import traceback; traceback.print_exc()
             return {
                 "hypotheses": [],
                 "note": f"Experiment designer error: {e}",

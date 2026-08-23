@@ -51,7 +51,21 @@ class Settings:
     ncbi_api_key: str = os.environ.get("NCBI_API_KEY", "")
     ncbi_email: str = os.environ.get("NCBI_EMAIL", "")
     ncbi_tool: str = os.environ.get("NCBI_TOOL", "sift")
-    
+
+    # IEEE Xplore Metadata API — free registered key, ~200 calls/day on the
+    # free tier, metadata only (no full text without an institutional
+    # subscription). Source is skipped silently when unset — see
+    # agents/academic_search.py's _ieee().
+    ieee_api_key: str = os.environ.get("IEEE_API_KEY", "")
+
+    # SerpApi (Google Patents) — third-party, paid beyond a small free trial
+    # quota. Source is skipped silently when unset.
+    serpapi_key: str = os.environ.get("SERPAPI_KEY", "")
+
+    # ClinicalTrials.gov — no key needed, always on.
+    # CrossRef — no key needed; a contact email is sent per their "polite
+    # pool" convention for better rate limits (reuses the Unpaywall email).
+
     # Supabase auth. Legacy projects sign JWTs with HS256 + this shared secret;
     # newer projects use asymmetric keys (ES256/RS256) verified via the project's
     # JWKS endpoint, which needs the project URL. Either path is supported.

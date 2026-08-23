@@ -11,6 +11,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.110.7",
     "dompurify": "^3.4.12",
+    "katex": "^0.16.9",
     "lucide-react": "^0.383.0",
     "marked": "^18.0.6",
     "mermaid": "^11.16.0",

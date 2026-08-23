@@ -66,6 +66,15 @@ class LLMClient:
         self.run_id = run_id
         self.stage = stage
 
+        # Set after every call() to "max_tokens" (Anthropic) or "MAX_TOKENS"
+        # (Gemini) when the response was cut off by the token budget rather
+        # than the model finishing naturally — e.g. a long structured Deep
+        # answer that runs out of room mid-sentence. Callers that care (chat
+        # endpoints, where a silently truncated answer just looks broken to
+        # the user) can check this right after call() and let the user know,
+        # rather than the response ending mid-thought with no explanation.
+        self.last_truncated = False
+
     def call(
         self,
         user_text: Optional[str] = None,
@@ -163,7 +172,31 @@ class LLMClient:
             cache_write=cache_write, cache_read=cache_read, web_searches=web_searches,
         )
 
-        return "\n".join(b.text for b in resp.content if b.type == "text").strip()
+        out = "\n".join(b.text for b in resp.content if b.type == "text").strip()
+        if not out:
+            # Anthropic returned zero text content (e.g. a refusal, or a
+            # response made up entirely of non-text blocks) — this used to
+            # propagate as an empty string all the way to json.loads(""),
+            # which fails with the cryptic "Expecting value: line 1 column 1
+            # (char 0)" deep inside parse_json with no indication the real
+            # problem was upstream. Surface it clearly here instead, and
+            # fall back to Gemini the same way a hard API error would.
+            stop_reason = getattr(resp, "stop_reason", None)
+            log.warning(
+                "Anthropic call returned empty text (stage=%s model=%s stop_reason=%s)",
+                self.stage, self.model, stop_reason,
+            )
+            if settings.gemini_api_key:
+                fallback_model = settings.gemini_model or "gemini-2.5-flash"
+                gem_text = f"{cache_prefix}\n{user_text or ''}" if cache_prefix else user_text
+                log.warning("Falling back to Gemini (%s) after empty Anthropic response", fallback_model)
+                return self._call_gemini(gem_text, system, max_tokens, content, model=fallback_model)
+            raise ValueError(
+                f"Anthropic returned an empty response (stop_reason={stop_reason}) "
+                "and no GEMINI_API_KEY is set to fall back to."
+            )
+        self.last_truncated = getattr(resp, "stop_reason", None) == "max_tokens"
+        return out
 
     def _call_gemini(self, user_text, system, max_tokens, content, model: str) -> str:
         """Route the same request to Google Gemini, converting Anthropic-style
@@ -243,7 +276,24 @@ class LLMClient:
             cache_read=cache_read,
         )
 
-        return (resp.text or "").strip()
+        out = (resp.text or "").strip()
+        if not out:
+            # Same empty-response problem as the Anthropic path above, but
+            # here it's usually a safety block or an empty/missing candidate
+            # rather than a refusal — surface the reason instead of quietly
+            # returning "" and letting parse_json() fail with an opaque
+            # "Expecting value: line 1 column 1 (char 0)" downstream.
+            candidates = getattr(resp, "candidates", None) or []
+            finish_reason = getattr(candidates[0], "finish_reason", None) if candidates else None
+            log.warning(
+                "Gemini call returned empty text (stage=%s model=%s finish_reason=%s)",
+                self.stage, model, finish_reason,
+            )
+            raise ValueError(f"Gemini returned an empty response (finish_reason={finish_reason}).")
+        candidates = getattr(resp, "candidates", None) or []
+        finish_reason = getattr(candidates[0], "finish_reason", None) if candidates else None
+        self.last_truncated = str(finish_reason) in ("MAX_TOKENS", "FinishReason.MAX_TOKENS")
+        return out
 
     @staticmethod
     def parse_json(text: str) -> Any:
@@ -262,15 +312,28 @@ class LLMClient:
         body = t[start:]
         try:
             return json.JSONDecoder().raw_decode(body)[0]
-        except json.JSONDecodeError:
-            # Common cause: the response hit max_tokens mid-value (an
+        except json.JSONDecodeError as e1:
+            # Common cause #1: the response hit max_tokens mid-value (an
             # "Unterminated string" or missing closing bracket right at the
             # end of the text) — the JSON is otherwise complete/valid, it
             # just got cut off. Try to salvage it instead of discarding an
-            # otherwise-good response; if the text is broken for some other
-            # reason this repair won't produce valid JSON either and the
-            # original error propagates from the retry below.
-            return json.JSONDecoder().raw_decode(LLMClient._repair_truncated_json(body))[0]
+            # otherwise-good response.
+            try:
+                return json.JSONDecoder().raw_decode(LLMClient._repair_truncated_json(body))[0]
+            except json.JSONDecodeError:
+                pass
+            # Common cause #2: the model put a literal, un-escaped `"` inside
+            # a string value (e.g. a search term like the CISPR "25" standard,
+            # or a quoted phrase) — valid English, invalid JSON. That reads as
+            # "Expecting ',' delimiter" partway through the document, not at
+            # the end, so the truncation repair above doesn't touch it. Walk
+            # the text and escape any quote that isn't actually closing a
+            # string (i.e. isn't followed by the punctuation JSON expects
+            # after a string ends).
+            try:
+                return json.JSONDecoder().raw_decode(LLMClient._escape_stray_quotes(body))[0]
+            except json.JSONDecodeError:
+                raise e1
 
     @staticmethod
     def _repair_truncated_json(t: str) -> str:
@@ -302,3 +365,46 @@ class LLMClient:
         for opener in reversed(stack):
             repaired += "}" if opener == "{" else "]"
         return repaired
+
+    @staticmethod
+    def _escape_stray_quotes(t: str) -> str:
+        """Best-effort repair for a literal, un-escaped `"` inside a JSON
+        string value (models do this constantly with quoted terms/standard
+        names). At each `"` encountered while inside a string, look ahead
+        past whitespace: if the next non-space character is one JSON would
+        actually expect right after a string ends (`,`, `}`, `]`, `:`, or
+        end-of-text), treat it as the real closing quote; otherwise it's a
+        stray quote mid-value — escape it and keep going. Not a general JSON
+        repair tool, just enough to handle this one common failure mode."""
+        out: list[str] = []
+        in_string = False
+        escape = False
+        n = len(t)
+        i = 0
+        while i < n:
+            ch = t[i]
+            if in_string:
+                if escape:
+                    out.append(ch)
+                    escape = False
+                elif ch == "\\":
+                    out.append(ch)
+                    escape = True
+                elif ch == '"':
+                    j = i + 1
+                    while j < n and t[j] in " \t\r\n":
+                        j += 1
+                    nxt = t[j] if j < n else ""
+                    if nxt in ",}]:" or j >= n:
+                        in_string = False
+                        out.append(ch)
+                    else:
+                        out.append('\\"')
+                else:
+                    out.append(ch)
+            else:
+                if ch == '"':
+                    in_string = True
+                out.append(ch)
+            i += 1
+        return "".join(out)

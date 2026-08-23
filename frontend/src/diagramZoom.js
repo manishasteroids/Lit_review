@@ -30,6 +30,9 @@ function ensureOverlay() {
       <span class="dz-pct">100%</span>
       <button class="dz-btn" data-act="in" aria-label="Zoom in" type="button">+</button>
       <button class="dz-btn" data-act="reset" aria-label="Reset zoom" type="button">Reset</button>
+      <span class="dz-sep"></span>
+      <button class="dz-btn dz-btn-wide" data-act="png" aria-label="Download PNG" type="button">⇩ PNG</button>
+      <button class="dz-btn dz-btn-wide" data-act="svg" aria-label="Download SVG" type="button">⇩ SVG</button>
     </div>
     <button class="dz-close" aria-label="Close" type="button">×</button>
     <div class="dz-viewport">
@@ -48,6 +51,8 @@ function ensureOverlay() {
     if (act === "in") setScale(scale + 0.25);
     else if (act === "out") setScale(scale - 0.25);
     else if (act === "reset") { panX = 0; panY = 0; setScale(1); }
+    else if (act === "svg") downloadSvg();
+    else if (act === "png") downloadPng();
   });
 
   viewport.addEventListener("wheel", (e) => {
@@ -101,6 +106,109 @@ function close() {
   if (!overlay) return;
   overlay.classList.remove("on");
   document.removeEventListener("keydown", onKey);
+}
+
+// Diagrams render at whatever intrinsic size mermaid chose, which is often
+// small — reading pixel dimensions straight off the SVG produces a blurry
+// download. Fall back to the viewBox (mermaid always sets one) and render at
+// a fixed multiplier for a crisp PNG regardless of on-screen zoom level.
+function svgDimensions(svg) {
+  const vb = svg.getAttribute("viewBox");
+  if (vb) {
+    const parts = vb.trim().split(/\s+/).map(Number);
+    if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) return { w: parts[2], h: parts[3] };
+  }
+  const w = parseFloat(svg.getAttribute("width")) || svg.getBoundingClientRect().width || 800;
+  const h = parseFloat(svg.getAttribute("height")) || svg.getBoundingClientRect().height || 600;
+  return { w, h };
+}
+
+function currentSvg() {
+  return overlay?.querySelector(".dz-box svg") || null;
+}
+
+function timestampedName(ext) {
+  const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  return `sift-diagram-${ts}.${ext}`;
+}
+
+function triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function downloadSvg() {
+  const svg = currentSvg();
+  if (!svg) return;
+  const clone = svg.cloneNode(true);
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  const source = new XMLSerializer().serializeToString(clone);
+  const blob = new Blob([source], { type: "image/svg+xml;charset=utf-8" });
+  triggerDownload(blob, timestampedName("svg"));
+}
+
+function downloadPng() {
+  const svg = currentSvg();
+  if (!svg) return;
+  const { w, h } = svgDimensions(svg);
+  const clone = svg.cloneNode(true);
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("width", w);
+  clone.setAttribute("height", h);
+  const source = new XMLSerializer().serializeToString(clone);
+
+  // A blob: URL as the <img> src worked in some browsers but silently failed
+  // to fire either onload or onerror in others (Safari in particular has
+  // been inconsistent about rasterizing SVG blob URLs) — the click did
+  // nothing with no error surfaced anywhere. A base64 data: URI is the more
+  // broadly-supported way to get an SVG into a canvas via <img>. Diagram
+  // labels routinely contain non-ASCII characters (→, en dashes, etc.), so
+  // btoa() needs the UTF-8-safe escape/encodeURIComponent dance — passing
+  // the raw string to btoa() throws on those characters.
+  let dataUrl;
+  try {
+    dataUrl = "data:image/svg+xml;charset=utf-8;base64," +
+      btoa(unescape(encodeURIComponent(source)));
+  } catch (err) {
+    console.error("diagramZoom: failed to encode SVG for PNG export", err);
+    downloadSvg();
+    return;
+  }
+
+  const SCALE = 2; // crisp on high-DPI screens without producing a huge file
+  const img = new Image();
+  img.onload = () => {
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = w * SCALE;
+      canvas.height = h * SCALE;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#ffffff";  // mermaid diagrams assume a white page background
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.scale(SCALE, SCALE);
+      ctx.drawImage(img, 0, 0, w, h);
+      canvas.toBlob((blob) => {
+        if (blob) triggerDownload(blob, timestampedName("png"));
+        else { console.error("diagramZoom: canvas.toBlob() returned null"); downloadSvg(); }
+      }, "image/png");
+    } catch (err) {
+      // Most likely a tainted-canvas SecurityError — fall back to SVG rather
+      // than leave the click looking like it did nothing.
+      console.error("diagramZoom: PNG export failed, falling back to SVG download", err);
+      downloadSvg();
+    }
+  };
+  img.onerror = (err) => {
+    console.error("diagramZoom: SVG failed to load as an Image for PNG export", err);
+    downloadSvg();
+  };
+  img.src = dataUrl;
 }
 
 function onKey(e) {

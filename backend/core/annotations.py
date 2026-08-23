@@ -86,7 +86,9 @@ def list_annotations(user_id: str, paper_key: str) -> list[dict]:
 def add_annotation(user_id: str, paper_key: str, kind: str, page: int,
                     rects: list[dict], color: Optional[str] = None,
                     snippet: Optional[str] = None, comment: Optional[str] = None) -> Optional[dict]:
-    if not user_id or not paper_key or kind not in ("highlight", "underline", "comment"):
+    if not user_id or not paper_key or kind not in (
+        "highlight", "underline", "comment", "drawing", "text", "shape",
+    ):
         return None
     rects = rects or []
     payload = json.dumps(rects)
@@ -114,6 +116,25 @@ def add_annotation(user_id: str, paper_key: str, kind: str, page: int,
         "snippet": (snippet or "")[:2000], "comment": (comment or "")[:4000],
         "rects": rects, "created_at": created_at,
     }
+
+
+def update_annotation_rects(user_id: str, paper_key: str, annotation_id: int,
+                             rects: list[dict]) -> bool:
+    """Move an existing annotation to a new position (drag-to-reposition —
+    currently used for text notes). Only `rects` changes; everything else
+    about the mark (kind, color, snippet, comment) is untouched."""
+    if not user_id or not paper_key or not rects:
+        return False
+    payload = json.dumps(rects)
+    if len(payload) > _MAX_RECTS_JSON:
+        return False
+    with _conn() as conn:
+        cur = conn.execute(
+            f"UPDATE paper_annotations SET rects = {_PH} "
+            f"WHERE id = {_PH} AND user_id = {_PH} AND paper_key = {_PH}",
+            (payload, annotation_id, user_id, paper_key),
+        )
+        return (cur.rowcount or 0) > 0
 
 
 def delete_annotation(user_id: str, paper_key: str, annotation_id: int) -> bool:

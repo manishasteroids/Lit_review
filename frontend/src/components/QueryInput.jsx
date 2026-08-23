@@ -1,5 +1,5 @@
 import React from "react";
-import { Sparkles, Cpu, Play, ChevronRight, Brain } from "./icons.jsx";
+import { Sparkles, Cpu, Play, ChevronRight, Brain, FileText } from "./icons.jsx";
 import { tierOf, TIER_META } from "../modelTiers.js";
 
 const BACKBONES = [
@@ -131,14 +131,40 @@ export default function QueryInput({ topic, setTopic, busy, onRun, onAnalyzeDocs
       </div>
 
       {onAnalyzeDocs && (
-        <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--line)" }}>
-          <button className="btn ghost sm" disabled={busy} onClick={onAnalyzeDocs}>
-            Or analyze your own documents →
-          </button>
-          <div className="muted tiny" style={{ marginTop: 6 }}>
-            Skip the search — upload PDFs, Word docs, or slide decks and go straight to Studio to chat, summarize, or build a report/deck from them.
-          </div>
-        </div>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onAnalyzeDocs}
+          style={{
+            marginTop: 18, width: "100%", display: "flex", alignItems: "center", gap: 13,
+            textAlign: "left", padding: "13px 15px", borderRadius: 12, cursor: busy ? "default" : "pointer",
+            border: "1px dashed var(--indigo)", background: "var(--indigo-soft)",
+            fontFamily: "inherit", opacity: busy ? 0.6 : 1,
+          }}
+        >
+          <span style={{
+            flex: "0 0 34px", width: 34, height: 34, borderRadius: 9, background: "var(--card,#fff)",
+            border: "1px solid var(--line)", display: "flex", alignItems: "center", justifyContent: "center",
+            color: "var(--indigo)",
+          }}>
+            <FileText size={17} />
+          </span>
+          <span style={{ minWidth: 0, flex: 1 }}>
+            <span style={{ display: "block", fontSize: 13.5, fontWeight: 700, color: "var(--txt)" }}>
+              Already have the papers? Analyze your own documents instead
+            </span>
+            <span style={{ display: "block", fontSize: 11.5, color: "var(--muted)", marginTop: 2, lineHeight: 1.5 }}>
+              Skip the search — upload PDFs, Word docs, or slide decks and go straight to Studio to chat, summarize, or build a report/deck from them.
+            </span>
+          </span>
+          <span style={{
+            flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 6,
+            background: "var(--indigo)", color: "#fff", fontSize: 12.5, fontWeight: 600,
+            borderRadius: 9, padding: "9px 14px", whiteSpace: "nowrap",
+          }}>
+            Analyze documents <ChevronRight size={14} />
+          </span>
+        </button>
       )}
     </div>
   );

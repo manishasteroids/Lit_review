@@ -160,6 +160,10 @@ def init_db() -> None:
     init_corpus_table()
     from core.annotations import init_annotations_table
     init_annotations_table()
+    from core.known_users import init_known_users_table
+    init_known_users_table()
+    from core.project_sharing import init_sharing_tables
+    init_sharing_tables()
 
 
 # ── Write ───────────────────────────────────────────────────────────────────
@@ -181,6 +185,7 @@ def save_session(
         INSERT INTO sessions (id, user_id, topic, stage, paper_count, created_at, updated_at, data)
         VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
         ON CONFLICT (id) DO UPDATE SET
+            topic       = EXCLUDED.topic,
             stage       = EXCLUDED.stage,
             paper_count = EXCLUDED.paper_count,
             updated_at  = EXCLUDED.updated_at,
@@ -219,14 +224,30 @@ def list_sessions(user_id: str) -> list[dict]:
 
 
 def get_session(session_id: str, user_id: str) -> Optional[dict]:
-    """Full session data for UI restore — only if owned by user_id. No LLM calls."""
+    """Full session data for UI restore — owned by user_id, OR filed under a
+    project this user collaborates on (a shared project's runs are visible to
+    every collaborator, not just whoever ran them — see core/project_sharing.py).
+    No LLM calls."""
     with _conn() as conn:
         row = conn.execute(
             f"SELECT * FROM sessions WHERE id = {_PH} AND user_id = {_PH}",
             (session_id, user_id),
         ).fetchone()
+        owned_directly = row is not None
+        if not row:
+            row = conn.execute(
+                f"SELECT * FROM sessions WHERE id = {_PH}", (session_id,),
+            ).fetchone()
     if not row:
         return None
     result = _row_to_dict(row)
+    if not owned_directly:
+        project_id = result.get("project_id")
+        allowed = False
+        if project_id:
+            from core.project_sharing import user_has_project_access
+            allowed = user_has_project_access(project_id, user_id)
+        if not allowed:
+            return None
     result["data"] = json.loads(result["data"])
     return result

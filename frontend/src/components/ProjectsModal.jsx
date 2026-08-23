@@ -5,9 +5,12 @@ import { api } from "../api/client.js";
  * Projects — a folder for a line of research: runs filed under it, a saved
  * paper library (manual or Zotero-imported), and free-form notes.
  *
- * `onOpenRun(runId)` restores that run in the main app and closes the modal.
+ * `onOpenRun(runId, project)` restores that run in the main app AND enters
+ * the project workspace (see App.jsx's `openProject`), then closes the modal.
+ * `onOpenProject(project)` enters the workspace without picking a specific
+ * run — App.jsx jumps to the most recently updated one, or a blank slate.
  */
-export default function ProjectsModal({ onClose, onOpenRun }) {
+export default function ProjectsModal({ onClose, onOpenRun, onOpenProject }) {
   const [projects, setProjects] = useState(null);
   const [openId, setOpenId] = useState(null);
   const [creating, setCreating] = useState(false);
@@ -50,6 +53,7 @@ export default function ProjectsModal({ onClose, onOpenRun }) {
             projectId={openId}
             onBack={() => { setOpenId(null); load(); }}
             onOpenRun={onOpenRun}
+            onOpenProject={onOpenProject}
             onDeleted={() => { setOpenId(null); load(); }}
           />
         ) : (
@@ -86,7 +90,10 @@ export default function ProjectsModal({ onClose, onOpenRun }) {
                 {projects.map((p) => (
                   <button key={p.id} style={S.projRow} onClick={() => setOpenId(p.id)}>
                     <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={S.projName}>{p.name}</div>
+                      <div style={S.projName}>
+                        {p.name}
+                        {p.role === "collaborator" && <span style={S.roleTag}>Shared with you</span>}
+                      </div>
                       {p.description && <div style={S.projDesc}>{p.description}</div>}
                     </div>
                     <div style={S.counts}>
@@ -105,7 +112,7 @@ export default function ProjectsModal({ onClose, onOpenRun }) {
   );
 }
 
-function ProjectDetail({ projectId, onBack, onOpenRun, onDeleted }) {
+function ProjectDetail({ projectId, onBack, onOpenRun, onOpenProject, onDeleted }) {
   const [proj, setProj] = useState(null);
   const [tab, setTab] = useState("runs");
   const [renaming, setRenaming] = useState(false);
@@ -129,6 +136,7 @@ function ProjectDetail({ projectId, onBack, onOpenRun, onDeleted }) {
   }
 
   if (!proj) return <div style={S.muted}>Loading…</div>;
+  const isOwner = proj.role !== "collaborator";
 
   return (
     <div>
@@ -141,34 +149,196 @@ function ProjectDetail({ projectId, onBack, onOpenRun, onDeleted }) {
         ) : (
           <h3 style={S.h3} onClick={() => setRenaming(true)} title="Click to rename">{proj.name}</h3>
         )}
+        {!isOwner && <span style={S.roleTag}>Shared with you</span>}
       </div>
       {proj.description && <div style={S.sub}>{proj.description}</div>}
+      {onOpenProject && (
+        <button style={S.smallBtn} onClick={() => onOpenProject(proj)}>Open project workspace →</button>
+      )}
 
       <div style={S.tabs}>
         {[["runs", `Runs (${proj.runs.length})`], ["papers", `Papers (${proj.papers.length})`],
-          ["notes", `Notes (${proj.notes.length})`], ["zotero", "Zotero import"]].map(([id, label]) => (
+          ["notes", `Notes (${proj.notes.length})`], ["zotero", "Zotero import"],
+          ["share", "Share"]].map(([id, label]) => (
           <button key={id} onClick={() => setTab(id)} style={{ ...S.tab, ...(tab === id ? S.tabOn : null) }}>
             {label}
           </button>
         ))}
       </div>
 
-      {tab === "runs" && <RunsTab runs={proj.runs} onOpenRun={onOpenRun} />}
+      {tab === "runs" && (
+        <RunsTab runs={proj.runs} onOpenRun={onOpenRun && ((runId) => onOpenRun(runId, proj))} />
+      )}
       {tab === "papers" && <PapersTab projectId={projectId} papers={proj.papers} onChange={load} />}
       {tab === "notes" && <NotesTab projectId={projectId} notes={proj.notes} onChange={load} />}
       {tab === "zotero" && <ZoteroTab projectId={projectId} onImported={load} />}
+      {tab === "share" && <ShareTab projectId={projectId} isOwner={isOwner} />}
 
-      <div style={{ marginTop: 22, paddingTop: 14, borderTop: "1px solid #f1f1f6" }}>
-        {confirmDelete ? (
-          <span style={{ fontSize: 12.5 }}>
-            Delete this project? Runs stay in your history, unfiled. &nbsp;
-            <button style={S.dangerBtn} onClick={del}>Yes, delete</button>{" "}
-            <button style={S.linkBtn} onClick={() => setConfirmDelete(false)}>Cancel</button>
-          </span>
+      {isOwner && (
+        <div style={{ marginTop: 22, paddingTop: 14, borderTop: "1px solid #f1f1f6" }}>
+          {confirmDelete ? (
+            <span style={{ fontSize: 12.5 }}>
+              Delete this project? Runs stay in your history, unfiled. &nbsp;
+              <button style={S.dangerBtn} onClick={del}>Yes, delete</button>{" "}
+              <button style={S.linkBtn} onClick={() => setConfirmDelete(false)}>Cancel</button>
+            </span>
+          ) : (
+            <button style={S.dangerLink} onClick={() => setConfirmDelete(true)}>Delete project</button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ShareTab({ projectId, isOwner }) {
+  const [collabs, setCollabs] = useState(null);
+  const [links, setLinks] = useState(null);
+  const [email, setEmail] = useState("");
+  const [addErr, setAddErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [linkEmails, setLinkEmails] = useState("");
+  const [linkErr, setLinkErr] = useState(null);
+  const [linkBusy, setLinkBusy] = useState(false);
+  const [copiedId, setCopiedId] = useState(null);
+
+  const load = useCallback(() => {
+    api.listCollaborators(projectId).then((d) => setCollabs(d.collaborators || [])).catch(() => setCollabs([]));
+    if (isOwner) {
+      api.listShareLinks(projectId).then((d) => setLinks(d.links || [])).catch(() => setLinks([]));
+    }
+  }, [projectId, isOwner]);
+  useEffect(() => { load(); }, [load]);
+
+  async function addCollaborator(e) {
+    e.preventDefault();
+    if (!email.trim()) return;
+    setBusy(true); setAddErr(null);
+    try {
+      await api.addCollaborator(projectId, email.trim());
+      setEmail("");
+      load();
+    } catch (e2) {
+      setAddErr(e2.message || "Could not add collaborator.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeCollaborator(userId) {
+    await api.removeCollaborator(projectId, userId);
+    load();
+  }
+
+  async function createLink(e) {
+    e.preventDefault();
+    const emails = linkEmails.split(",").map((s) => s.trim()).filter(Boolean);
+    if (emails.length === 0) return;
+    setLinkBusy(true); setLinkErr(null);
+    try {
+      await api.createShareLink(projectId, emails);
+      setLinkEmails("");
+      load();
+    } catch (e2) {
+      setLinkErr(e2.message || "Could not create share link.");
+    } finally {
+      setLinkBusy(false);
+    }
+  }
+
+  async function revokeLink(id) {
+    await api.revokeShareLink(projectId, id);
+    load();
+  }
+
+  function copyLink(link) {
+    const url = `${window.location.origin}/share/${link.token}`;
+    navigator.clipboard?.writeText(url);
+    setCopiedId(link.id);
+    setTimeout(() => setCopiedId((c) => (c === link.id ? null : c)), 1600);
+  }
+
+  return (
+    <div>
+      <div style={{ marginBottom: 20 }}>
+        <div style={S.shareHead}>Collaborators</div>
+        <div style={S.sub}>
+          Full access — anyone added here can view and edit everything in this project, the same
+          as you. They need a Sift account and must have signed in at least once.
+        </div>
+        {isOwner && (
+          <form onSubmit={addCollaborator} style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <input style={S.input} type="email" placeholder="teammate@lab.edu" value={email}
+              onChange={(e) => setEmail(e.target.value)} />
+            <button type="submit" disabled={busy} style={S.smallBtn}>{busy ? "Adding…" : "Add"}</button>
+          </form>
+        )}
+        {addErr && <div style={S.err}>{addErr}</div>}
+        {collabs == null ? (
+          <div style={S.muted}>Loading…</div>
+        ) : collabs.length === 0 ? (
+          <div style={S.muted}>No collaborators yet.</div>
         ) : (
-          <button style={S.dangerLink} onClick={() => setConfirmDelete(true)}>Delete project</button>
+          <div style={{ marginTop: 10 }}>
+            {collabs.map((c) => (
+              <div key={c.id} style={S.listRow}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={S.rowTitle}>{c.email}</div>
+                  <div style={S.rowMeta}>Full access</div>
+                </div>
+                {isOwner && (
+                  <button style={S.iconBtn} onClick={() => removeCollaborator(c.user_id)} title="Remove">×</button>
+                )}
+              </div>
+            ))}
+          </div>
         )}
       </div>
+
+      {isOwner && (
+        <div>
+          <div style={S.shareHead}>Read-only share links</div>
+          <div style={S.sub}>
+            Generate a link restricted to specific emails — for people without a Sift account.
+            They confirm their email once, then see the project read-only. Copy and send the link
+            yourself; Sift doesn't email it for you.
+          </div>
+          <form onSubmit={createLink} style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <input style={S.input} placeholder="one@ex.com, two@ex.com" value={linkEmails}
+              onChange={(e) => setLinkEmails(e.target.value)} />
+            <button type="submit" disabled={linkBusy} style={S.smallBtn}>
+              {linkBusy ? "Creating…" : "Create link"}
+            </button>
+          </form>
+          {linkErr && <div style={S.err}>{linkErr}</div>}
+          {links == null ? (
+            <div style={S.muted}>Loading…</div>
+          ) : links.length === 0 ? (
+            <div style={S.muted}>No share links yet.</div>
+          ) : (
+            <div style={{ marginTop: 10 }}>
+              {links.map((l) => (
+                <div key={l.id} style={S.noteCard}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={S.rowMeta}>{l.allowed_emails.join(", ")}</div>
+                      {l.revoked_at && <div style={{ ...S.rowMeta, color: "#c0392b" }}>Revoked</div>}
+                    </div>
+                    {!l.revoked_at && (
+                      <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                        <button style={S.smallBtn} onClick={() => copyLink(l)}>
+                          {copiedId === l.id ? "Copied!" : "Copy link"}
+                        </button>
+                        <button style={S.iconBtn} onClick={() => revokeLink(l.id)} title="Revoke">×</button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -411,6 +581,11 @@ const S = {
     marginBottom: 8, cursor: "pointer", fontFamily: "inherit", textAlign: "left",
   },
   projName: { fontSize: 14.5, fontWeight: 700, color: "#111" },
+  roleTag: {
+    display: "inline-block", marginLeft: 8, fontSize: 10, fontWeight: 700, letterSpacing: ".02em",
+    color: "#5b4ff0", background: "#efedfe", borderRadius: 5, padding: "2px 7px", verticalAlign: "middle",
+  },
+  shareHead: { fontSize: 13.5, fontWeight: 700, color: "#111", marginBottom: 2 },
   projDesc: { fontSize: 12.5, color: "#6b6b7b", marginTop: 2 },
   counts: { display: "flex", flexDirection: "column", gap: 2, fontSize: 11, color: "#8a8a9a", textAlign: "right", flexShrink: 0, marginLeft: 12 },
   back: { background: "none", border: "none", color: "#5b4ff0", fontSize: 12.5, fontWeight: 600, cursor: "pointer", padding: 0, fontFamily: "inherit" },

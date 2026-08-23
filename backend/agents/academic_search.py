@@ -12,7 +12,17 @@ Sources:
   - Semantic Scholar Graph API (200M+ papers; real abstract, DOI, OA PDF,
     citation count). Free but rate-limited without a key (S2_API_KEY).
   - arXiv API (keyless, reliable; abstract + PDF link for preprints).
- 
+  - OpenAlex, PubMed (see below), plus the widened portfolio added after
+    those: CrossRef (keyless — scholarly DOI metadata, catches works the
+    others miss), ClinicalTrials.gov (keyless — trial registrations, for
+    clinical/medical topics), IEEE Xplore (needs IEEE_API_KEY — engineering/
+    CS venues; silently skipped if no key is configured) and Google Patents
+    via SerpApi (needs SERPAPI_KEY — patent literature; silently skipped if
+    no key is configured). The two keyless additions are always on; the two
+    keyed ones degrade gracefully to "not included" rather than failing the
+    whole search when unconfigured — same pattern as the Gemini fallback in
+    core/llm_client.py.
+
 If both sources come up empty (offline / throttled), it falls back to the
 model's web search (the previous behaviour) so the pipeline never hard-fails.
  
@@ -32,13 +42,18 @@ from core.config import settings
  
 S2_SEARCH = "https://api.semanticscholar.org/graph/v1/paper/search"
 S2_FIELDS = "title,abstract,year,venue,authors,externalIds,openAccessPdf,citationCount,url"
-ARXIV_API = "http://export.arxiv.org/api/query"
+ARXIV_API = "https://export.arxiv.org/api/query"
 UA = {"User-Agent": "Sift-LitReview/1.0 (research assistant)"}
  
 PUBMED_ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
- 
+
 OPENALEX_API = "https://api.openalex.org/works"
+
+CROSSREF_API = "https://api.crossref.org/works"
+CLINICALTRIALS_API = "https://clinicaltrials.gov/api/v2/studies"
+IEEE_API = "https://ieeexploreapi.ieee.org/api/v1/search/articles"
+SERPAPI_API = "https://serpapi.com/search"
 
 
 # ── Relevance ranking ─────────────────────────────────────────────────────────
@@ -109,7 +124,8 @@ class AcademicSearchAgent(Agent):
         search_terms = _uniq([topic, *(queries or [])])[:3]
  
         merged: dict[str, dict] = {}
-        for source in (self._openalex, self._semantic_scholar, self._pubmed, self._arxiv):
+        for source in (self._openalex, self._semantic_scholar, self._pubmed, self._arxiv,
+                       self._crossref, self._clinicaltrials, self._ieee, self._patents):
             try:
                 for p in source(search_terms):
                     key = (p.get("title") or "").strip().lower()
@@ -179,7 +195,7 @@ class AcademicSearchAgent(Agent):
     def _resolve_arxiv(self, arxiv_id: str) -> list[dict]:
         arxiv_id = re.sub(r"v\d+$", "", arxiv_id.strip())
         ns = {"a": "http://www.w3.org/2005/Atom"}
-        with httpx.Client(timeout=25, headers=UA) as client:
+        with httpx.Client(timeout=25, headers=UA, follow_redirects=True) as client:
             r = client.get(ARXIV_API, params={"id_list": arxiv_id, "max_results": 1})
             if r.status_code != 200:
                 return []
@@ -209,7 +225,7 @@ class AcademicSearchAgent(Agent):
  
     def _resolve_doi(self, doi: str) -> list[dict]:
         doi = doi.strip().lower()
-        with httpx.Client(timeout=25, headers=UA) as client:
+        with httpx.Client(timeout=25, headers=UA, follow_redirects=True) as client:
             r = client.get(f"{OPENALEX_API}/doi:{doi}",
                            params={"mailto": _mailto()})
             if r.status_code != 200:
@@ -244,7 +260,7 @@ class AcademicSearchAgent(Agent):
  
     def _resolve_pmid(self, pmid: str) -> list[dict]:
         base = _pubmed_base()
-        with httpx.Client(timeout=25, headers=UA) as client:
+        with httpx.Client(timeout=25, headers=UA, follow_redirects=True) as client:
             r = client.get(PUBMED_EFETCH, params={
                 **base, "db": "pubmed", "id": pmid.strip(), "retmode": "xml"})
             if r.status_code != 200:
@@ -259,7 +275,7 @@ class AcademicSearchAgent(Agent):
  
     def _resolve_title(self, title: str) -> list[dict]:
         out = []
-        with httpx.Client(timeout=25, headers=UA) as client:
+        with httpx.Client(timeout=25, headers=UA, follow_redirects=True) as client:
             r = client.get(OPENALEX_API, params={
                 "search": title, "per_page": 6, "mailto": _mailto()})
             if r.status_code != 200:
@@ -272,7 +288,7 @@ class AcademicSearchAgent(Agent):
  
     def _openalex(self, terms: list[str]) -> list[dict]:
         out = []
-        with httpx.Client(timeout=25, headers=UA) as client:
+        with httpx.Client(timeout=25, headers=UA, follow_redirects=True) as client:
             for q in terms[:3]:
                 try:
                     r = client.get(OPENALEX_API, params={"search": q, "per_page": 30, "mailto": _mailto()})
@@ -292,7 +308,7 @@ class AcademicSearchAgent(Agent):
             headers["x-api-key"] = settings.s2_api_key
  
         out = []
-        with httpx.Client(timeout=25, headers=headers) as client:
+        with httpx.Client(timeout=25, headers=headers, follow_redirects=True) as client:
             for q in terms:
                 for p in self._s2_once(client, q):
                     if not p.get("title"):
@@ -325,7 +341,7 @@ class AcademicSearchAgent(Agent):
     def _arxiv(self, terms: list[str]) -> list[dict]:
         ns = {"a": "http://www.w3.org/2005/Atom"}
         out = []
-        with httpx.Client(timeout=25, headers=UA) as client:
+        with httpx.Client(timeout=25, headers=UA, follow_redirects=True) as client:
             for q in terms[:3]:
                 try:
                     r = client.get(ARXIV_API, params={"search_query": f"all:{q}", "start": 0, "max_results": 25})
@@ -364,7 +380,7 @@ class AcademicSearchAgent(Agent):
         base = _pubmed_base()
         pmids: list[str] = []
         out = []
-        with httpx.Client(timeout=25, headers=UA) as client:
+        with httpx.Client(timeout=25, headers=UA, follow_redirects=True) as client:
             for q in terms[:3]:
                 try:
                     r = client.get(PUBMED_ESEARCH, params={
@@ -392,6 +408,93 @@ class AcademicSearchAgent(Agent):
                 out.append(rec)
         return out
  
+    def _crossref(self, terms: list[str]) -> list[dict]:
+        """Keyless. Crossref indexes DOI metadata across nearly every
+        publisher — useful mainly as a safety net for works OpenAlex/S2
+        haven't picked up yet (they're both largely Crossref-derived anyway,
+        so overlap is expected and fine — de-duped by title upstream)."""
+        out = []
+        with httpx.Client(timeout=25, headers=UA, follow_redirects=True) as client:
+            for q in terms[:3]:
+                try:
+                    r = client.get(CROSSREF_API, params={
+                        "query.bibliographic": q, "rows": 25, "mailto": _mailto()})
+                    r.raise_for_status()
+                    items = (r.json().get("message") or {}).get("items") or []
+                except Exception:
+                    continue
+                for it in items:
+                    rec = _map_crossref(it)
+                    if rec:
+                        out.append(rec)
+        return out
+
+    def _clinicaltrials(self, terms: list[str]) -> list[dict]:
+        """Keyless. ClinicalTrials.gov v2 — trial registrations rather than
+        papers, but exactly what a clinical/medical review needs alongside
+        published literature (protocol, status, sponsor, enrollment)."""
+        out = []
+        with httpx.Client(timeout=25, headers=UA, follow_redirects=True) as client:
+            for q in terms[:3]:
+                try:
+                    r = client.get(CLINICALTRIALS_API, params={
+                        "query.term": q, "pageSize": 20, "format": "json"})
+                    r.raise_for_status()
+                    studies = r.json().get("studies") or []
+                except Exception:
+                    continue
+                for s in studies:
+                    rec = _map_clinicaltrials(s)
+                    if rec:
+                        out.append(rec)
+        return out
+
+    def _ieee(self, terms: list[str]) -> list[dict]:
+        """Needs IEEE_API_KEY (free registered key, ~200 calls/day). Skipped
+        silently — not an error — when unconfigured, so the rest of the
+        search still runs; see core/config.py."""
+        api_key = getattr(settings, "ieee_api_key", "")
+        if not api_key:
+            return []
+        out = []
+        with httpx.Client(timeout=25, headers=UA, follow_redirects=True) as client:
+            for q in terms[:3]:
+                try:
+                    r = client.get(IEEE_API, params={
+                        "apikey": api_key, "querytext": q, "max_records": 25, "format": "json"})
+                    r.raise_for_status()
+                    articles = r.json().get("articles") or []
+                except Exception:
+                    continue
+                for a in articles:
+                    rec = _map_ieee(a)
+                    if rec:
+                        out.append(rec)
+        return out
+
+    def _patents(self, terms: list[str]) -> list[dict]:
+        """Needs SERPAPI_KEY (third-party, paid beyond a small free trial
+        quota). Skipped silently when unconfigured. Google has no official
+        patent-search API — SerpApi actually queries Google Patents' index."""
+        api_key = getattr(settings, "serpapi_key", "")
+        if not api_key:
+            return []
+        out = []
+        with httpx.Client(timeout=25, headers=UA, follow_redirects=True) as client:
+            for q in terms[:2]:  # patents are the priciest call here — keep it tight
+                try:
+                    r = client.get(SERPAPI_API, params={
+                        "engine": "google_patents", "q": q, "num": 20, "api_key": api_key})
+                    r.raise_for_status()
+                    results = r.json().get("organic_results") or []
+                except Exception:
+                    continue
+                for p in results:
+                    rec = _map_patent(p)
+                    if rec:
+                        out.append(rec)
+        return out
+
     def _llm_fallback(self, topic: str, queries: list[str]) -> list[dict]:
         user_text = (
             "Search the web for real, recent academic papers on this topic, preferring "
@@ -425,7 +528,7 @@ def _classify_identifier(q: str) -> tuple[str, str]:
     s = q.strip()
     low = s.lower()
  
-    m = re.search(r"arxiv\.org/(?:abs|pdf)/([^\s?#]+)", low)
+    m = re.search(r"arxiv\.org/(?:abs|pdf|html)/([^\s?#]+)", low)
     if m:
         return "arxiv", m.group(1).replace(".pdf", "")
     m = re.match(r"arxiv:\s*(\S+)", low)
@@ -443,6 +546,17 @@ def _classify_identifier(q: str) -> tuple[str, str]:
     m = re.search(r"(10\.\d{4,9}/[^\s\"<>]+)", s)
     if m and ("doi" in low or s.startswith("10.") or low.startswith("http")):
         return "doi", m.group(1).rstrip(").,;")
+
+    # Some publishers' article URLs don't embed the literal DOI string, but
+    # their DOI is a fixed, derivable prefix + the URL's own article slug —
+    # e.g. nature.com/articles/s41586-026-10644-y is DOI
+    # 10.1038/s41586-026-10644-y for every Nature-portfolio journal (Nature,
+    # Nature Methods, Nature Communications, ...), not just the flagship.
+    # Without this, a pasted Nature link falls through to a free-text title
+    # search on the raw URL, which finds nothing relevant.
+    m = re.search(r"nature\.com/articles/([a-z0-9._\-]+)", low)
+    if m:
+        return "doi", f"10.1038/{m.group(1)}"
  
     m = re.search(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)", low)
     if m:
@@ -488,6 +602,100 @@ def _map_openalex(w: dict) -> dict | None:
     }
  
  
+def _map_crossref(it: dict) -> dict | None:
+    titles = it.get("title") or []
+    title = _clean(titles[0] if titles else "")
+    if not title:
+        return None
+    names = []
+    for a in (it.get("author") or []):
+        given, family = (a.get("given") or "").strip(), (a.get("family") or "").strip()
+        full = f"{given} {family}".strip()
+        if full:
+            names.append(full)
+    year = None
+    for key in ("published", "published-print", "published-online", "issued"):
+        parts = ((it.get(key) or {}).get("date-parts") or [[]])[0]
+        if parts:
+            year = parts[0]
+            break
+    venue = _clean((it.get("container-title") or [""])[0])
+    doi = it.get("DOI") or ""
+    return {
+        "title": title,
+        "authors": _fmt_authors(names),
+        "year": year,
+        "venue": venue,
+        "url": it.get("URL") or (f"https://doi.org/{doi}" if doi else ""),
+        "abstract": _clean(it.get("abstract") or ""),  # often JATS-tagged XML; _clean strips it
+        "cites": it.get("is-referenced-by-count") or 0,
+        "source": "crossref",
+    }
+
+
+def _map_clinicaltrials(s: dict) -> dict | None:
+    ident = (s.get("protocolSection") or {}).get("identificationModule") or {}
+    title = _clean(ident.get("briefTitle") or ident.get("officialTitle") or "")
+    if not title:
+        return None
+    nct_id = ident.get("nctId") or ""
+    status = (s.get("protocolSection") or {}).get("statusModule") or {}
+    start_date = ((status.get("startDateStruct") or {}).get("date") or "")
+    year = int(start_date[:4]) if start_date[:4].isdigit() else None
+    sponsor = (((s.get("protocolSection") or {}).get("sponsorCollaboratorsModule") or {})
+               .get("leadSponsor") or {}).get("name") or ""
+    desc = (s.get("protocolSection") or {}).get("descriptionModule") or {}
+    return {
+        "title": title,
+        "authors": sponsor,  # trials don't have "authors" — the lead sponsor fills that slot
+        "year": year,
+        "venue": "ClinicalTrials.gov",
+        "url": f"https://clinicaltrials.gov/study/{nct_id}" if nct_id else "",
+        "abstract": _clean(desc.get("briefSummary") or ""),
+        "cites": 0,
+        "source": "clinicaltrials",
+    }
+
+
+def _map_ieee(a: dict) -> dict | None:
+    title = _clean(a.get("title") or "")
+    if not title:
+        return None
+    names = [au.get("full_name") for au in ((a.get("authors") or {}).get("authors") or [])]
+    doi = a.get("doi") or ""
+    return {
+        "title": title,
+        "authors": _fmt_authors(names),
+        "year": a.get("publication_year"),
+        "venue": _clean(a.get("publication_title") or ""),
+        "url": a.get("pdf_url") or a.get("html_url") or (f"https://doi.org/{doi}" if doi else ""),
+        "abstract": _clean(a.get("abstract") or ""),
+        "cites": a.get("citing_paper_count") or 0,
+        "source": "ieee",
+    }
+
+
+def _map_patent(p: dict) -> dict | None:
+    title = _clean(p.get("title") or "")
+    if not title:
+        return None
+    inventors = p.get("inventor") or ""
+    names = [n.strip() for n in inventors.split(",") if n.strip()]
+    pub_date = p.get("publication_date") or p.get("filing_date") or ""
+    year = int(pub_date[:4]) if pub_date[:4].isdigit() else None
+    patent_id = p.get("patent_id") or ""
+    return {
+        "title": title,
+        "authors": _fmt_authors(names) or (p.get("assignee") or ""),
+        "year": year,
+        "venue": p.get("assignee") or "Google Patents",
+        "url": p.get("patent_link") or (f"https://patents.google.com/{patent_id}" if patent_id else ""),
+        "abstract": _clean(p.get("snippet") or ""),
+        "cites": 0,
+        "source": "patents",
+    }
+
+
 def _uniq(items: list[str]) -> list[str]:
     seen, out = set(), []
     for q in items:
@@ -498,7 +706,7 @@ def _uniq(items: list[str]) -> list[str]:
     return out
  
  
-_TAG_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]*(?:\s[^<>]*)?>")
+_TAG_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9:]*(?:\s[^<>]*)?>")
 
 
 def _clean(s: str) -> str:
@@ -506,7 +714,10 @@ def _clean(s: str) -> str:
     (OpenAlex/Crossref-derived records, Semantic Scholar) pass publisher
     metadata straight through with inline formatting tags still in it, e.g.
     "<scp>A</scp>lzheimer's disease" — those need to render as plain text
-    everywhere (the UI, and every export format)."""
+    everywhere (the UI, and every export format). CrossRef abstracts in
+    particular use JATS XML with namespaced tags (<jats:p>, <jats:italic>) —
+    the tag-name pattern allows a colon so those get stripped too, not just
+    plain HTML tags."""
     return " ".join(_TAG_RE.sub("", s or "").split())
  
  

@@ -8,9 +8,25 @@ import { api } from "../api/client.js";
  *
  * `tab` sets which one opens first (from the account dropdown).
  */
+// Full IANA zone list where supported (modern browsers); a short curated
+// fallback otherwise so the picker still works everywhere.
+const TIMEZONES = (() => {
+  try {
+    if (typeof Intl.supportedValuesOf === "function") return Intl.supportedValuesOf("timeZone");
+  } catch { /* fall through */ }
+  return [
+    "UTC", "America/Los_Angeles", "America/Denver", "America/Chicago", "America/New_York",
+    "America/Sao_Paulo", "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Moscow",
+    "Africa/Cairo", "Asia/Dubai", "Asia/Karachi", "Asia/Kolkata", "Asia/Kathmandu",
+    "Asia/Dhaka", "Asia/Bangkok", "Asia/Shanghai", "Asia/Tokyo", "Australia/Sydney",
+    "Pacific/Auckland",
+  ];
+})();
+const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
 export default function ProfileModal({ user, tab = "profile", onClose }) {
   const [active, setActive] = useState(tab);
-  const [form, setForm] = useState({ display_name: "", affiliation: "", orcid: "", scholar_url: "" });
+  const [form, setForm] = useState({ display_name: "", affiliation: "", orcid: "", scholar_url: "", timezone_pref: "" });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState(null);
@@ -76,6 +92,7 @@ export default function ProfileModal({ user, tab = "profile", onClose }) {
               <Row label="ORCID" value={form.orcid}
                 href={form.orcid ? `https://orcid.org/${form.orcid.replace(/^https?:\/\/orcid\.org\//, "")}` : null} />
               <Row label="Google Scholar" value={form.scholar_url} href={form.scholar_url || null} />
+              <Row label="Timezone" value={form.timezone_pref || `${BROWSER_TZ} (auto-detected)`} />
             </dl>
             <button style={S.linkBtn} onClick={() => setActive("settings")}>Edit in Settings →</button>
           </div>
@@ -89,6 +106,16 @@ export default function ProfileModal({ user, tab = "profile", onClose }) {
               placeholder="0000-0002-1825-0097" />
             <Field label="Google Scholar profile" value={form.scholar_url} onChange={set("scholar_url")}
               placeholder="https://scholar.google.com/citations?user=…" />
+            <label style={{ display: "block", marginBottom: 14 }}>
+              <span style={S.lbl}>Timezone</span>
+              <select value={form.timezone_pref} onChange={set("timezone_pref")} style={S.input}>
+                <option value="">Auto-detect ({BROWSER_TZ})</option>
+                {TIMEZONES.map((tz) => <option key={tz} value={tz}>{tz}</option>)}
+              </select>
+              <span style={{ ...S.muted, fontSize: 11.5, display: "block", marginTop: 5 }}>
+                Used to show absolute timestamps (e.g. run history) in your own timezone.
+              </span>
+            </label>
             <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 18 }}>
               <button type="submit" disabled={saving} style={S.save}>
                 {saving ? "Saving…" : "Save changes"}
@@ -109,7 +136,7 @@ export default function ProfileModal({ user, tab = "profile", onClose }) {
 
 function clean(p) {
   const out = {};
-  for (const k of ["display_name", "affiliation", "orcid", "scholar_url"]) out[k] = p?.[k] || "";
+  for (const k of ["display_name", "affiliation", "orcid", "scholar_url", "timezone_pref"]) out[k] = p?.[k] || "";
   return out;
 }
 

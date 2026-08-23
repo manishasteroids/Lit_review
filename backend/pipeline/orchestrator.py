@@ -24,7 +24,7 @@ from core.config import settings
 from core.config import settings
 from core.llm_client import LLMClient
 from pipeline.data_analysis import comparison_table, year_distribution
-from pipeline.knowledge_graph import build_knowledge_graph
+from pipeline.knowledge_graph import build_knowledge_graph, find_bridge_candidates
 
 from agents.experiment_designer import ExperimentDesignerAgent
 from agents.hypothesis_critic import HypothesisCriticAgent
@@ -45,6 +45,7 @@ class RunState:
     experiment_critique: Optional[dict] = None
     experiment_iterations: list[dict] = field(default_factory=list)  # refinement history, oldest first
     experiment_debate: dict = field(default_factory=dict)  # hypothesis index (str) -> list of {argument, stance, response}
+    experiment_kg_bridges: list[dict] = field(default_factory=list)  # see pipeline/knowledge_graph.find_bridge_candidates
     stage: str = "query"
     mode: Optional[str] = None      # search mode, so later stages reuse its models
     extract_stats: Optional[dict] = None   # full-text coverage for Deep runs
@@ -254,8 +255,14 @@ class SiftPipeline:
     def design_experiments(self, run: RunState) -> dict:
         self._attribute(run.run_id)
         self.mid.stage = "experiments"
+        # Mine this run's own concept graph for "bridge" candidates BEFORE
+        # designing — see knowledge_graph.find_bridge_candidates — so the
+        # designer can ground a hypothesis in a structural gap the corpus
+        # itself never states, not just the synthesizer's text summary of one.
+        run.experiment_kg_bridges = find_bridge_candidates(run.extractions)
         run.experiment_plan = self.experiment_designer.run(
-            run.topic, run.synthesis or {}, run.extractions
+            run.topic, run.synthesis or {}, run.extractions,
+            kg_bridges=run.experiment_kg_bridges,
         )
         # A fresh plan invalidates any prior critique/refinement history.
         run.experiment_critique = None
