@@ -66,6 +66,15 @@ class LLMClient:
         self.run_id = run_id
         self.stage = stage
 
+        # Set after every call() to "max_tokens" (Anthropic) or "MAX_TOKENS"
+        # (Gemini) when the response was cut off by the token budget rather
+        # than the model finishing naturally — e.g. a long structured Deep
+        # answer that runs out of room mid-sentence. Callers that care (chat
+        # endpoints, where a silently truncated answer just looks broken to
+        # the user) can check this right after call() and let the user know,
+        # rather than the response ending mid-thought with no explanation.
+        self.last_truncated = False
+
     def call(
         self,
         user_text: Optional[str] = None,
@@ -186,6 +195,7 @@ class LLMClient:
                 f"Anthropic returned an empty response (stop_reason={stop_reason}) "
                 "and no GEMINI_API_KEY is set to fall back to."
             )
+        self.last_truncated = getattr(resp, "stop_reason", None) == "max_tokens"
         return out
 
     def _call_gemini(self, user_text, system, max_tokens, content, model: str) -> str:
@@ -280,6 +290,9 @@ class LLMClient:
                 self.stage, model, finish_reason,
             )
             raise ValueError(f"Gemini returned an empty response (finish_reason={finish_reason}).")
+        candidates = getattr(resp, "candidates", None) or []
+        finish_reason = getattr(candidates[0], "finish_reason", None) if candidates else None
+        self.last_truncated = str(finish_reason) in ("MAX_TOKENS", "FinishReason.MAX_TOKENS")
         return out
 
     @staticmethod

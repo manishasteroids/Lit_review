@@ -43,7 +43,7 @@ export default function ReviewView({ topic, sections, citeOrder }) {
           {citeOrder.map((p, i) => (
             <div key={p.idx} className="r">
               <b>[{i + 1}]</b>
-              <span>{p.authors || "—"}, “{p.title},” {p.venue || "preprint"}, {p.year}.</span>
+              <span>{p.authors || "—"}, “{p.title},” {p.venue || "preprint"}, {p.year || "n.d."}.</span>
             </div>
           ))}
         </div>

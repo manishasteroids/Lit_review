@@ -31,7 +31,18 @@ async function renderMermaid(root) {
   }
 }
 
-const md = (t) => DOMPurify.sanitize(marked.parse(t || ""));
+// The backend asks the model to end its answer with a ///FOLLOWUPS/// marker
+// + a list of suggested next questions, then strips that block server-side
+// before returning `answer`. That split can miss: a truncated response can
+// end exactly at the marker with nothing after it, and history saved before
+// this stripping existed has the raw marker baked into stored content. Strip
+// it defensively here too so a marker never renders, regardless of where it
+// came from.
+function stripFollowups(t) {
+  const i = (t || "").indexOf("///FOLLOWUPS///");
+  return i === -1 ? t : t.slice(0, i).trimEnd();
+}
+const md = (t) => DOMPurify.sanitize(marked.parse(stripFollowups(t) || ""));
 
 const TOOLS = [
   ["report", "▤", "Report", "Structured research report across the selected sources"],

@@ -28,7 +28,13 @@ from api.routes import router
 from core.config import settings
 from core.db import init_db
 
-MAX_BODY_BYTES = 15 * 1024 * 1024  # 15 MB cap on request bodies
+MAX_BODY_BYTES = 27 * 1024 * 1024  # cap on request bodies
+# Was 15 MB, but /runs/{id}/upload_paper accepts files up to 25 MB (see
+# api/routes.py) and multipart form-data adds boundary/header overhead on
+# top of the raw file bytes — a 20-24 MB file was legitimately under the
+# route's own limit but still rejected here first with "Request too large",
+# since this middleware runs before the request body is even read. 27 MB
+# gives a 25 MB file enough headroom for that overhead.
 
 app = FastAPI(title="Sift — multi-agent literature review pipeline")
 

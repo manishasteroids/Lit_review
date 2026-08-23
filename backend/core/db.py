@@ -185,6 +185,7 @@ def save_session(
         INSERT INTO sessions (id, user_id, topic, stage, paper_count, created_at, updated_at, data)
         VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
         ON CONFLICT (id) DO UPDATE SET
+            topic       = EXCLUDED.topic,
             stage       = EXCLUDED.stage,
             paper_count = EXCLUDED.paper_count,
             updated_at  = EXCLUDED.updated_at,

@@ -583,8 +583,8 @@ export default function App() {
 
   // Same as addPaperToSources, but for a locally-uploaded PDF/DOCX instead of
   // a resolved search result — extraction happens server-side in one call.
-  async function uploadPaperToSources(file) {
-    const res = await api.uploadPaper(runId, file, apiKey || undefined, model, notes);
+  async function uploadPaperToSources(file, titleOverride) {
+    const res = await api.uploadPaper(runId, file, apiKey || undefined, model, notes, titleOverride);
     const np = { ...res.paper, added: true };
     setPapers((prev) => [...prev, np]);
     if (res.extraction) {

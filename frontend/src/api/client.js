@@ -357,12 +357,17 @@ export const api = {
 
   // Add a source from a local PDF/DOCX file — extraction runs server-side in
   // the same call, so this returns {paper, extraction} just like addPaper.
-  uploadPaper: (runId, file, apiKey, model, notes) => {
+  uploadPaper: (runId, file, apiKey, model, notes, titleOverride) => {
     const fd = new FormData();
     fd.append("file", file);
     if (apiKey) fd.append("api_key", apiKey);
     if (model) fd.append("model", model);
     if (notes) fd.append("notes", JSON.stringify(notes));
+    // Title is guessed from the extracted text when omitted — a heuristic
+    // that has no real notion of "title" vs. "author line" and can merge or
+    // truncate wrong. Letting the user type the real one skips the guess
+    // entirely instead of asking them to fix a wrong title after the fact.
+    if (titleOverride && titleOverride.trim()) fd.append("title", titleOverride.trim());
     return postForm(`/api/runs/${runId}/upload_paper`, fd, WRITE_TIMEOUT_MS);
   },
 
