@@ -216,13 +216,33 @@ export default function PdfViewer({ runId, paper, onClose }) {
 
       const canvas = canvasRef.current;
       if (canvas) {
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
+        // The canvas backing store was sized to `viewport.width/height`
+        // (CSS pixels) with no separate CSS size set, so on any HiDPI/Retina
+        // screen the browser was displaying it 1:1 in device pixels — i.e.
+        // rendering at roughly half the real screen resolution (a third on
+        // 3x displays) and then the browser stretched that up, which reads
+        // as visibly softer/blurrier text and figures than the same PDF
+        // open in a native viewer (which always renders at full device
+        // resolution). Render the backing store at devicePixelRatio and
+        // pin the CSS display size to the logical viewport size instead —
+        // pdf.js's own documented pattern for crisp HiDPI canvas output.
+        // Even on a standard (non-Retina) display, devicePixelRatio is 1 —
+        // rendering at exactly the CSS size then produces visibly soft text,
+        // since a browser's own native PDF viewer always rasterizes well
+        // above 1x. Floor the backing-store scale at 2x regardless of the
+        // display's actual pixel ratio, so quality doesn't regress to "blurry"
+        // on ordinary monitors.
+        const outputScale = Math.max(2, window.devicePixelRatio || 1);
+        canvas.width = Math.floor(viewport.width * outputScale);
+        canvas.height = Math.floor(viewport.height * outputScale);
+        canvas.style.width = `${viewport.width}px`;
+        canvas.style.height = `${viewport.height}px`;
         const ctx = canvas.getContext("2d");
         if (renderTaskRef.current) {
           try { renderTaskRef.current.cancel(); } catch (e) {}
         }
-        const task = pdfPage.render({ canvasContext: ctx, viewport });
+        const transform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null;
+        const task = pdfPage.render({ canvasContext: ctx, viewport, transform });
         renderTaskRef.current = task;
         try { await task.promise; } catch (e) { /* superseded by a newer render */ }
       }

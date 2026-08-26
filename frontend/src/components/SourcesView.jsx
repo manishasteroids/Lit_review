@@ -509,7 +509,7 @@ function AddPaperModal({ runId, busy, onClose, onAdd, onUpload, onUploadDone }) 
         <div style={{ marginTop: 18, paddingTop: 16, borderTop: "1px solid var(--line)" }}>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 3 }}>Or upload a file</div>
           <div className="muted tiny" style={{ marginBottom: 10 }}>
-            For material not indexed anywhere — unpublished drafts, a scan you already have, an internal report, a colleague's slide deck. PDF, Word, or PowerPoint, up to 25MB each. Select several at once to add them all.
+            For material not indexed anywhere — unpublished drafts, a scan you already have, an internal report, a colleague's slide deck. PDF, Word, or PowerPoint, up to 50MB each. Select several at once to add them all.
           </div>
           <input
             value={titleOverride}

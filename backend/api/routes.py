@@ -747,9 +747,9 @@ async def upload_paper(
     data = await file.read()
     if not data:
         raise HTTPException(400, "That file appears to be empty.")
-    max_bytes = 25_000_000
+    max_bytes = 50_000_000
     if len(data) > max_bytes:
-        raise HTTPException(400, "File is too large (25MB limit).")
+        raise HTTPException(400, "File is too large (50MB limit).")
 
     if ext == ".pdf":
         text = pdf_bytes_to_text(data)
@@ -840,7 +840,7 @@ async def upload_paper(
 
     # Persist the raw file to disk, named by this run + the idx add_paper()
     # just assigned, so paper_pdf() can serve it back for the PDF viewer.
-    safe_name = _re.sub(r"[^A-Za-z0-9_.-]+", "_", name)[-80:]
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name)[-80:]
     run_dir = os.path.join(settings.uploads_dir, run_id)
     os.makedirs(run_dir, exist_ok=True)
     stored_name = f"{new_idx}_{safe_name}"
