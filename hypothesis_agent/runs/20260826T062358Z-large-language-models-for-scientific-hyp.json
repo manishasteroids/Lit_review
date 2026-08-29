@@ -1,0 +1,35 @@
+{
+  "run_id": "hyp-standalone-1787725437",
+  "generated_at": "2026-08-26T06:23:58.139089+00:00",
+  "model": "gemini-2.5-flash",
+  "source": "session:25c4ca9a-d32a-492f-8376-f52e7af1cd0f",
+  "topic": "Large Language Models for Scientific Hypothesis Generation: Methods, Challenges, and Evaluation Frameworks",
+  "kg_bridges": [
+    {
+      "a": "Large Language Models",
+      "c": "LLMs",
+      "a_papers": [
+        0,
+        4,
+        8
+      ],
+      "c_papers": [
+        5,
+        7
+      ],
+      "bridges": [
+        "Hypothesis generation",
+        "Scientific discovery"
+      ],
+      "strength": 2
+    }
+  ],
+  "plan": {
+    "hypotheses": [],
+    "note": "Experiment designer error: 403 Forbidden"
+  },
+  "critique": {
+    "critiques": [],
+    "note": "No hypotheses to critique."
+  }
+}

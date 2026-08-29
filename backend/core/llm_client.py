@@ -83,12 +83,26 @@ class LLMClient:
         max_tokens: int = 1200,
         content: Optional[list] = None,
         cache_prefix: Optional[str] = None,
+        temperature: Optional[float] = None,
     ) -> str:
+        # `temperature` is opt-in and None by default -- omitting it keeps
+        # every existing caller (generation/writing stages, where run-to-run
+        # variety across the same corpus is fine or even desirable) exactly
+        # as it behaved before this parameter existed, using the provider's
+        # own default sampling. Callers that need a REPEATABLE judgment
+        # (scoring/ranking/verdict agents, not creative generation) pass a
+        # low value explicitly -- see agents/hypothesis_critic.py,
+        # hypothesis_ranker.py, hypothesis_meta_review.py,
+        # hypothesis_plausibility.py, and hypothesis_results_check.py, all of
+        # which apply a fixed rubric to given content rather than proposing
+        # new ideas, and were the specific source of run-to-run inconsistency
+        # in the Hypothesis Agent's final recommendation.
         if self.provider == "gemini":
             # Gemini uses a different caching API; just fold the prefix into the
             # prompt so the call still works (no Anthropic-style caching here).
             gem_text = f"{cache_prefix}\n{user_text or ''}" if cache_prefix else user_text
-            return self._call_gemini(gem_text, system, max_tokens, content, model=self._gemini_model)
+            return self._call_gemini(gem_text, system, max_tokens, content,
+                                      model=self._gemini_model, temperature=temperature)
 
         # `content` lets callers pass multimodal blocks (text + document/PDF +
         # image). `cache_prefix` marks a stable prefix for prompt caching —
@@ -112,6 +126,8 @@ class LLMClient:
             kwargs["system"] = system
         if tools:
             kwargs["tools"] = tools
+        if temperature is not None:
+            kwargs["temperature"] = temperature
 
         # Cap how long we'll wait on Anthropic before giving up on THIS call
         # and falling back — scaled to the output budget so a legitimately
@@ -140,7 +156,8 @@ class LLMClient:
             )
             fallback_model = settings.gemini_model or "gemini-2.5-flash"
             gem_text = f"{cache_prefix}\n{user_text or ''}" if cache_prefix else user_text
-            out = self._call_gemini(gem_text, system, max_tokens, content, model=fallback_model)
+            out = self._call_gemini(gem_text, system, max_tokens, content,
+                                     model=fallback_model, temperature=temperature)
             log.warning("Gemini fallback (%s) completed for stage=%s", fallback_model, self.stage)
             return out
         latency_ms = int((time.perf_counter() - t0) * 1000)
@@ -190,7 +207,8 @@ class LLMClient:
                 fallback_model = settings.gemini_model or "gemini-2.5-flash"
                 gem_text = f"{cache_prefix}\n{user_text or ''}" if cache_prefix else user_text
                 log.warning("Falling back to Gemini (%s) after empty Anthropic response", fallback_model)
-                return self._call_gemini(gem_text, system, max_tokens, content, model=fallback_model)
+                return self._call_gemini(gem_text, system, max_tokens, content,
+                                          model=fallback_model, temperature=temperature)
             raise ValueError(
                 f"Anthropic returned an empty response (stop_reason={stop_reason}) "
                 "and no GEMINI_API_KEY is set to fall back to."
@@ -198,7 +216,8 @@ class LLMClient:
         self.last_truncated = getattr(resp, "stop_reason", None) == "max_tokens"
         return out
 
-    def _call_gemini(self, user_text, system, max_tokens, content, model: str) -> str:
+    def _call_gemini(self, user_text, system, max_tokens, content, model: str,
+                      temperature: Optional[float] = None) -> str:
         """Route the same request to Google Gemini, converting Anthropic-style
         content blocks (text / document / image) into google-genai Parts.
         `model` is explicit (rather than always self._gemini_model) so this
@@ -231,6 +250,8 @@ class LLMClient:
             max_output_tokens=max_tokens,
             system_instruction=system or None,
         )
+        if temperature is not None:
+            cfg_kwargs["temperature"] = temperature
         # Gemini 2.5 models "think" by default, which eats the output-token
         # budget and can return truncated/empty JSON (blank extractions).
         # Disable it so the whole budget goes to the actual answer.

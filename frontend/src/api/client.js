@@ -649,6 +649,70 @@ export const api = {
     return data;
   },
 
+  // ── Hypothesis Agent: its own tool, its own table (core/hypothesis_db.py),
+  // reads a completed Sift run once via source_run_id and never writes back
+  // to it — see backend/api/hypothesis_routes.py. Phase 1 scope: Generation
+  // + Critique only (no ranking/meta-review yet).
+  createHypothesisRun: (sourceRunId, apiKey, model) =>
+    request("/api/hypothesis/runs", { source_run_id: sourceRunId, api_key: apiKey, model },
+      REFINE_TIMEOUT_MS),
+
+  // SSE variant — streams {type:"progress", stage, status} events as the
+  // pipeline moves through fetch -> designer -> critic, then a final
+  // {type:"done", run} event, so the UI can show live stage-by-stage
+  // progress (see HypothesisPipelineRail) instead of one opaque spinner.
+  createHypothesisRunStream: (sourceRunId, apiKey, model, onEvent) =>
+    streamPost("/api/hypothesis/runs/stream",
+      { source_run_id: sourceRunId, api_key: apiKey, model }, onEvent),
+
+  getHypothesisRun: (hypRunId) =>
+    getJSON(`/api/hypothesis/runs/${hypRunId}`),
+
+  listHypothesisRuns: (sourceRunId) =>
+    getJSON("/api/hypothesis/runs" + (sourceRunId ? "?source_run_id=" + encodeURIComponent(sourceRunId) : "")),
+
+  // User-supplied results: the human-in-the-loop counterpart to the
+  // automatic literature-only plausibility check — paste in what actually
+  // happened when you ran (a version of) the experiment, get a verdict
+  // specific to the hypothesis's own claim, and (unless it was fully
+  // supported) a revised hypothesis. Returns the updated hypothesis run
+  // (its data.user_validations now includes this check) — never mutates
+  // the hypothesis text itself; see applyHypothesisRefinement for that.
+  // REFINE_TIMEOUT_MS since this is one substantial LLM call, same
+  // headroom class as the other single-but-heavy hypothesis calls.
+  checkHypothesisResults: (hypRunId, hypothesisIndex, resultsText, apiKey, model) =>
+    request(`/api/hypothesis/runs/${hypRunId}/check-results`,
+      { hypothesis_index: hypothesisIndex, results_text: resultsText, api_key: apiKey, model },
+      REFINE_TIMEOUT_MS),
+
+  // Explicit, human-triggered only: swaps a hypothesis's text for one
+  // validation's refined_hypothesis. Returns the updated run.
+  applyHypothesisRefinement: (hypRunId, validationId) =>
+    request(`/api/hypothesis/runs/${hypRunId}/apply-refinement`, { validation_id: validationId }),
+
+  // Closing the loop (hypothesis_agent_architecture.md §7): once a
+  // refinement is applied, this gives it a real shot at the champion slot
+  // instead of just sitting at its old bracket position — a fresh Critic
+  // score plus up to two head-to-head matches (vs champion, then vs
+  // runner-up only if it lost the first). Returns the updated run; its
+  // data.reverifications gets one more entry, and champion_index/
+  // runner_up_index may change. REFINE_TIMEOUT_MS since this can be up to
+  // three LLM calls back to back.
+  reverifyHypothesisRefinement: (hypRunId, validationId, apiKey, model) =>
+    request(`/api/hypothesis/runs/${hypRunId}/reverify-refinement`,
+      { validation_id: validationId, api_key: apiKey, model }, REFINE_TIMEOUT_MS),
+
+  // Argument/dispute flow (hypothesis_agent_architecture.md §6, v1 scope:
+  // Meta-Review only) — argue with the closing recommendation itself, not a
+  // new result. Returns the updated run; a "revised" dispute needs a
+  // separate applyHypothesisDispute call to actually change anything.
+  disputeMetaReview: (hypRunId, objection, apiKey, model) =>
+    request(`/api/hypothesis/runs/${hypRunId}/dispute-meta-review`,
+      { objection, api_key: apiKey, model }, REFINE_TIMEOUT_MS),
+
+  applyHypothesisDispute: (hypRunId, disputeId) =>
+    request(`/api/hypothesis/runs/${hypRunId}/apply-dispute`, { dispute_id: disputeId }),
+
   // Session history — no LLM calls
   listSessions: async () =>
     fetch(BASE + "/api/sessions", { headers: await authHeaders() }).then((r) => r.json()),

@@ -42,6 +42,7 @@ function Ic({ name, size = 16, color, className, style }) {
     case "type": return <svg {...c}><polyline points="4 7 4 4 20 4 20 7" /><line x1="12" y1="4" x2="12" y2="20" /><line x1="9" y1="20" x2="15" y2="20" /></svg>;
     case "square": return <svg {...c}><rect x="4" y="4" width="16" height="16" rx="2" /></svg>;
     case "circle-shape": return <svg {...c}><circle cx="12" cy="12" r="8.5" /></svg>;
+    case "lightbulb": return <svg {...c}><path d="M9 18h6" /><path d="M10 22h4" /><path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.3 1 2.1V17h6v-.2c0-.8.4-1.6 1-2.1A7 7 0 0 0 12 2z" /></svg>;
     default: return <svg {...c}><circle cx="12" cy="12" r="9" /></svg>;
   }
 }
@@ -81,3 +82,4 @@ export const Eraser = (p) => <Ic name="eraser" {...p} />;
 export const TypeIcon = (p) => <Ic name="type" {...p} />;
 export const Square = (p) => <Ic name="square" {...p} />;
 export const CircleShape = (p) => <Ic name="circle-shape" {...p} />;
+export const Lightbulb = (p) => <Ic name="lightbulb" {...p} />;
