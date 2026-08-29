@@ -371,6 +371,15 @@ export const api = {
     return postForm(`/api/runs/${runId}/upload_paper`, fd, WRITE_TIMEOUT_MS);
   },
 
+  // Authoritative snapshot of a run's current state — used to reconcile the
+  // UI after an upload that reports "Failed to fetch": that's a raw network
+  // failure (the connection dropped), not an application error, and the
+  // request can easily have finished server-side anyway (the paper added and
+  // persisted) even though the response never made it back. Without this,
+  // the source is invisible in the UI until a hard refresh, and a retry just
+  // reports "already in your sources" against a paper you can't see or undo.
+  getRunState: (runId) => getJSON(`/api/runs/${runId}`),
+
   reanalyze: (runId, includedIndices, apiKey, model, notes) =>
     request(`/api/runs/${runId}/reanalyze`, {
       included_indices: includedIndices, api_key: apiKey, model, notes,

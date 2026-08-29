@@ -584,16 +584,43 @@ export default function App() {
   // Same as addPaperToSources, but for a locally-uploaded PDF/DOCX instead of
   // a resolved search result — extraction happens server-side in one call.
   async function uploadPaperToSources(file, titleOverride) {
-    const res = await api.uploadPaper(runId, file, apiKey || undefined, model, notes, titleOverride);
-    const np = { ...res.paper, added: true };
-    setPapers((prev) => [...prev, np]);
-    if (res.extraction) {
-      setExtractions((prev) => [...prev.filter((e) => e.idx !== np.idx), res.extraction]);
+    try {
+      const res = await api.uploadPaper(runId, file, apiKey || undefined, model, notes, titleOverride);
+      const np = { ...res.paper, added: true };
+      setPapers((prev) => [...prev, np]);
+      if (res.extraction) {
+        setExtractions((prev) => [...prev.filter((e) => e.idx !== np.idx), res.extraction]);
+      }
+      setIncluded((prev) => ({ ...prev, [np.idx]: true }));
+      setAnalysisStale(true);
+      refreshSessions();
+      return np;
+    } catch (e) {
+      // "Failed to fetch" is a dropped connection, not an application
+      // error — the upload can easily have finished server-side (paper
+      // added + persisted) even though the response never arrived here
+      // (most commonly a backend restart mid-request). Without reconciling,
+      // the paper is invisible in this tab until a hard refresh, and a retry
+      // just reports "already in your sources" against a source the user
+      // can't see or remove. Check the server's authoritative state before
+      // giving up on it as a real failure.
+      if (String(e.message || "").toLowerCase().includes("failed to fetch")) {
+        try {
+          const fresh = await api.getRunState(runId);
+          const knownIdx = new Set(papers.map((p) => p.idx));
+          const arrived = (fresh.papers || []).find((p) => !knownIdx.has(p.idx));
+          if (arrived) {
+            setPapers(fresh.papers || []);
+            setExtractions(fresh.extractions || []);
+            setIncluded((prev) => ({ ...prev, [arrived.idx]: true }));
+            setAnalysisStale(true);
+            refreshSessions();
+            return arrived;   // it actually went through
+          }
+        } catch { /* reconciliation failed too — fall through to the real error */ }
+      }
+      throw e;
     }
-    setIncluded((prev) => ({ ...prev, [np.idx]: true }));
-    setAnalysisStale(true);
-    refreshSessions();
-    return np;
   }
 
   async function reanalyzeSources() {
