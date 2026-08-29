@@ -1,0 +1,68 @@
+{
+  "topic": "Gut microbiome dysbiosis and cardiovascular disease risk",
+  "synth": {
+    "themes": [
+      "Microbiome composition shifts under metabolic stress",
+      "Systemic inflammation as a shared downstream pathway",
+      "Cardiovascular risk stratification via inflammatory markers"
+    ],
+    "consensus": "Dysbiosis and elevated inflammatory markers are each independently associated with worse outcomes in their respective literatures.",
+    "tensions": "The microbiome literature and the cardiovascular-risk literature rarely cite each other directly; inflammation appears in both but is rarely treated as the connecting mechanism.",
+    "gaps": [
+      "No study directly measures whether correcting dysbiosis changes cardiovascular risk markers",
+      "Cytokine-panel differences across dysbiosis subtypes are unreported"
+    ],
+    "biases": ["Most cohorts are single-site, limiting generalizability"],
+    "ranked": []
+  },
+  "extractions": [
+    {
+      "idx": 0,
+      "method": "16S rRNA sequencing of stool samples, n=142 metabolic-syndrome patients vs matched controls",
+      "finding": "Dysbiosis (reduced Firmicutes/Bacteroidetes ratio) correlates with lower short-chain fatty acid production and elevated serum IL-6.",
+      "data": "Cross-sectional cohort, single site",
+      "metrics": "IL-6 (pg/mL), SCFA concentration (mmol/L)",
+      "limitation": "No longitudinal follow-up; cannot establish causal direction",
+      "contribution": "First to jointly quantify SCFA depletion and IL-6 elevation in the same dysbiotic cohort",
+      "excerpt": "Reduced SCFA-producing taxa were associated with a 1.8x increase in circulating IL-6 (p<0.01).",
+      "relevance": "Establishes microbiome -> inflammation link",
+      "concepts": ["gut microbiome", "dysbiosis", "short-chain fatty acids", "inflammation"]
+    },
+    {
+      "idx": 1,
+      "method": "Germ-free mouse colonization with dysbiotic vs healthy human donor microbiota",
+      "finding": "Colonization with dysbiotic microbiota increased intestinal permeability and downstream innate immune activation.",
+      "data": "Animal model, n=24 mice per arm",
+      "metrics": "Serum LPS, intestinal permeability (FITC-dextran assay)",
+      "limitation": "Mouse model may not translate directly to human immune signaling",
+      "contribution": "Mechanistic evidence for a gut-barrier route from dysbiosis to systemic immune activation",
+      "excerpt": "FITC-dextran permeability was 2.3x higher in dysbiotic-colonized mice (p<0.001).",
+      "relevance": "Mechanistic link between dysbiosis and immune/inflammatory signaling",
+      "concepts": ["gut microbiome", "dysbiosis", "immune signaling", "inflammation"]
+    },
+    {
+      "idx": 2,
+      "method": "Prospective cohort, n=3,400, 8-year follow-up, serum inflammatory markers vs incident cardiovascular events",
+      "finding": "Elevated IL-6 and CRP at baseline independently predicted incident atherosclerotic cardiovascular events.",
+      "data": "Multi-site prospective cohort",
+      "metrics": "Hazard ratio per SD increase in IL-6/CRP",
+      "limitation": "Residual confounding from diet and physical activity not fully captured",
+      "contribution": "Large prospective evidence tying systemic inflammation to cardiovascular outcomes",
+      "excerpt": "Each SD increase in IL-6 was associated with a hazard ratio of 1.31 (95% CI 1.18-1.46) for incident cardiovascular events.",
+      "relevance": "Establishes inflammation -> cardiovascular risk link",
+      "concepts": ["inflammation", "cardiovascular risk", "atherosclerosis"]
+    },
+    {
+      "idx": 3,
+      "method": "Case-control study of atherosclerotic plaque composition, n=210",
+      "finding": "Plaques from patients with elevated systemic cytokines showed more unstable, lipid-rich cores than low-cytokine patients.",
+      "data": "Case-control, histological plaque analysis",
+      "metrics": "Plaque instability index, cytokine panel (IL-6, TNF-alpha, IL-1beta)",
+      "limitation": "Cross-sectional; cannot show whether cytokines caused plaque instability or resulted from it",
+      "contribution": "Links cytokine elevation to a specific structural cardiovascular risk marker (plaque instability), not just event incidence",
+      "excerpt": "High-cytokine patients had a 2.1x higher plaque instability index (p=0.003).",
+      "relevance": "Mechanistic detail on inflammation -> cardiovascular risk pathway",
+      "concepts": ["inflammation", "cytokines", "cardiovascular risk"]
+    }
+  ]
+}

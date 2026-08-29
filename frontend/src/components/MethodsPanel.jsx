@@ -154,10 +154,22 @@ function HelpTip({ label, children }) {
 // that open that paper's URL in a new tab. A number with no matching paper,
 // or a matching paper with no URL, degrades to plain text (or a title-only
 // hover) rather than a dead link.
-function CiteLink({ idx, papers, label }) {
+//
+// `idx` is the paper's raw internal index (0-based — the first paper added
+// to a run is idx 0), which is what every citation in this file has always
+// looked up a paper BY. Left as the raw number, that reads as "paper 0" to
+// a human, which is confusing (nothing else a person reads is 0-indexed) —
+// so `citeNum`, an optional {idx: displayNumber} map, lets a caller show a
+// friendlier number without touching how the citation is looked up. Pass
+// one built the same way App.jsx's own `citeNum` already is for the Review
+// tab (1-based, by position: `citeNum[p.idx] = i + 1`) to get "paper 1" for
+// the first paper instead of "paper 0". Omitting it keeps every existing
+// call site's exact current behavior — this is purely additive.
+export function CiteLink({ idx, papers, label, citeNum }) {
   const p = papers.find((pp) => pp.idx === idx);
-  if (!p) return <>{label}</>;
-  if (!p.url) return <span title={p.title}>{label}</span>;
+  const shown = citeNum && citeNum[idx] != null ? citeNum[idx] : label;
+  if (!p) return <>{shown}</>;
+  if (!p.url) return <span title={p.title}>{shown}</span>;
   return (
     <a
       href={p.url}
@@ -166,14 +178,25 @@ function CiteLink({ idx, papers, label }) {
       title={p.title}
       style={{ color: "var(--accent,#6c5ce7)" }}
     >
-      {label}
+      {shown}
     </a>
   );
 }
 
-const CITATION_RE = /\[(\d+(?:\s*,\s*\d+)*)\]|\b([Pp]aper)\s+(\d+)\b/g;
+// Matches "[1,13,27]", "(paper 38)"/"paper 38", and now also the plural,
+// non-bracket phrasing a model sometimes writes instead of a clean bracket
+// list — "papers 0 and 1", "papers 0, 1", "papers 0/1" — which used to fall
+// through this regex entirely and render as bare, unlinked digits with no
+// visual distinction from ordinary prose (worse than the bracket case,
+// since at least "[0]" LOOKS like a citation even when it's confusingly
+// 0-indexed).
+const CITATION_RE = /\[(\d+(?:\s*,\s*\d+)*)\]|\b([Pp]apers?)\s+(\d+(?:\s*(?:,|\/|and)\s*\d+)*)\b/g;
 
-function CitedText({ text, papers = [], style }) {
+function splitNums(raw) {
+  return raw.split(/\s*(?:,|\/|and)\s*/i).map((s) => s.trim()).filter(Boolean);
+}
+
+export function CitedText({ text, papers = [], style, citeNum }) {
   if (!text) return null;
   const nodes = [];
   let last = 0, m, key = 0;
@@ -182,15 +205,17 @@ function CitedText({ text, papers = [], style }) {
     if (m.index > last) nodes.push(text.slice(last, m.index));
     if (m[1] != null) {
       nodes.push("[");
-      m[1].split(",").forEach((n, j) => {
-        const num = n.trim();
+      splitNums(m[1]).forEach((num, j) => {
         if (j > 0) nodes.push(",");
-        nodes.push(<CiteLink key={`c${key++}`} idx={Number(num)} papers={papers} label={num} />);
+        nodes.push(<CiteLink key={`c${key++}`} idx={Number(num)} papers={papers} label={num} citeNum={citeNum} />);
       });
       nodes.push("]");
     } else {
       nodes.push(`${m[2]} `);
-      nodes.push(<CiteLink key={`c${key++}`} idx={Number(m[3])} papers={papers} label={m[3]} />);
+      splitNums(m[3]).forEach((num, j) => {
+        if (j > 0) nodes.push(", ");
+        nodes.push(<CiteLink key={`c${key++}`} idx={Number(num)} papers={papers} label={num} citeNum={citeNum} />);
+      });
     }
     last = CITATION_RE.lastIndex;
   }
@@ -206,7 +231,7 @@ function CitedText({ text, papers = [], style }) {
 // Shown collapsed by default (it's the "how did it think of this" layer, not
 // the headline), and only when the designer actually had bridges to work
 // with — an empty corpus produces none, and that's not worth a callout.
-function KgBridgePanel({ bridges, papers }) {
+export function KgBridgePanel({ bridges, papers }) {
   const [open, setOpen] = useState(false);
   const muted = { color: "var(--muted, #667)" };
 
@@ -286,7 +311,7 @@ function statusFor(score) {
   return STATUS.critical;
 }
 
-function ScoreLegend() {
+export function ScoreLegend() {
   const muted = { color: "var(--muted, #667)" };
   return (
     <div style={{ ...muted, fontSize: 12, margin: "0 0 12px" }}>
@@ -301,7 +326,7 @@ function ScoreLegend() {
   );
 }
 
-function ScoreBars({ critique, papers = [] }) {
+export function ScoreBars({ critique, papers = [] }) {
   const muted = { color: "var(--muted, #667)" };
   if (!critique) return null;
   const rows = [

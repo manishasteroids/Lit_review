@@ -173,7 +173,7 @@ class ExperimentDesignerAgent(Agent):
                     "hypothesis": hypothesis}
 
     def run(self, topic: str, synthesis: dict, extractions: list[dict],
-            kg_bridges: list[dict] | None = None) -> dict:
+            kg_bridges: list[dict] | None = None, max_hypotheses: int = 2) -> dict:
         # Give the model the gaps/tensions (what to target) plus a compact view
         # of each paper (what to build on / cite), keyed by idx — same compaction
         # the synthesizer uses, so the citation idxs line up across stages.
@@ -200,10 +200,29 @@ class ExperimentDesignerAgent(Agent):
                 "shared bridging concept — see system prompt):\n"
                 f"{json.dumps(kg_bridges)}"
             )
+        # Methods (the Sift-embedded panel) always calls this with the default
+        # max_hypotheses=2 -- that behavior is unchanged. The standalone
+        # Hypothesis Agent tool (hypothesis_agent/pipeline.py) is the only
+        # caller that raises this, for its "best-outcome" pipeline (raise the
+        # cap, then rank the field with a bracket + meta-review) -- see
+        # hypothesis_agent_architecture.md SS5. A plain .replace() on the one
+        # sentence in SYSTEM that pins the cap keeps every other instruction
+        # (domain framing, grounding rules, JSON shape) identical either way.
+        system = self.SYSTEM
+        if max_hypotheses != 2:
+            system = system.replace(
+                "Produce AT MOST 2 hypotheses, each concise.",
+                f"Produce AT MOST {max_hypotheses} hypotheses, each concise. "
+                "Make them genuinely distinct approaches to the topic (different "
+                "mechanisms, methods, or angles) rather than small variations on "
+                "the same idea -- a later ranking stage needs real alternatives "
+                "to compare, not near-duplicates.",
+            )
+            max_tokens = max(max_tokens, 900 + 900 * max_hypotheses)
         try:
             out = self.llm.call(
                 user_text=user_text,
-                system=self.SYSTEM,
+                system=system,
                 max_tokens=max_tokens,
             )
             plan = self.llm.parse_json(out)

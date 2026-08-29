@@ -164,6 +164,8 @@ def init_db() -> None:
     init_known_users_table()
     from core.project_sharing import init_sharing_tables
     init_sharing_tables()
+    from core.hypothesis_db import init_hypothesis_table
+    init_hypothesis_table()
 
 
 # ── Write ───────────────────────────────────────────────────────────────────

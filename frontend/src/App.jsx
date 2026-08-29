@@ -24,9 +24,12 @@ import {
   RotateCw, AlertTriangle, Sparkles, PenTool,
   BookOpen, Layers, Brain, Network, BarChart3, FlaskConical,
   Plus, Trash2, Coins, MessageSquare, ArrowLeft, Folder, ChevronDown,
+  Lightbulb,
 } from "./components/icons.jsx";
 
 import MethodsPanel from "./components/MethodsPanel.jsx";
+import HypothesisAgentPanel from "./components/HypothesisAgentPanel.jsx";
+import HypothesisPipelineRail from "./components/HypothesisPipelineRail.jsx";
 
 // Source icons shown in the progress feed
 const SOURCE_ICON = {
@@ -49,6 +52,7 @@ const TOOLS = [
   ["data", BarChart3, "Data analysis"],
   ["eval", FlaskConical, "Evaluation"],
   ["methods", FlaskConical, "Methods"],
+  ["hypothesis", Lightbulb, "Hypothesis"],
   ["usage", Coins, "Token usage"],
 ];
 
@@ -273,6 +277,41 @@ export default function App() {
   const [experimentIterations, setExperimentIterations] = useState(0);
   const [experimentDebate, setExperimentDebate] = useState({});  // hypothesis index -> [{argument,stance,response}]
   const [experimentKgBridges, setExperimentKgBridges] = useState([]);  // see backend pipeline/knowledge_graph.find_bridge_candidates
+
+  // Hypothesis Agent — its OWN pipeline/table (backend/hypothesis_agent/,
+  // core/hypothesis_db.py), separate from Methods' experimentPlan/critique
+  // above even though it reuses the same underlying agent classes for now.
+  // Read-only display; not persisted into the Sift session's own `data`
+  // blob (restoreSession below re-fetches it from /api/hypothesis/runs
+  // instead) since it lives in its own table.
+  const [hypothesisRun, setHypothesisRun] = useState(null);
+  const [hypothesisBusy, setHypothesisBusy] = useState(false);
+  const [hypothesisError, setHypothesisError] = useState(null);
+  // Live progress for the Hypothesis pipeline's own rail (HypothesisPipelineRail) —
+  // hypothesisStage is the stage currently in flight ("fetch"|"designer"|"critic"),
+  // hypothesisStageDone marks which stages have finished this run.
+  const [hypothesisStage, setHypothesisStage] = useState(null);
+  const [hypothesisStageDone, setHypothesisStageDone] = useState({});
+  // Sub-stage detail for the two slowest stages (critic: one big scoring
+  // call; ranking: matches run one at a time) — see HypothesisPipelineRail's
+  // CriticLiveDetail/RankingLiveDetail and pipeline.py's on_progress
+  // docstring for exactly what each event carries.
+  const [hypothesisLive, setHypothesisLive] = useState({});
+  // User-supplied-results check (agents/hypothesis_results_check.py) — the
+  // human-in-the-loop counterpart to the automatic plausibility check.
+  // Separate busy/error from the main pipeline run since this is a small,
+  // independent action a person can take against an already-saved run.
+  const [resultsCheckBusy, setResultsCheckBusy] = useState(false);
+  const [resultsCheckError, setResultsCheckError] = useState(null);
+  // Argument/dispute flow (hypothesis_agent_architecture.md §6, v1: Meta-
+  // Review dispute only) — separate busy/error, same reasoning as above.
+  const [disputeBusy, setDisputeBusy] = useState(false);
+  const [disputeError, setDisputeError] = useState(null);
+  // Closing the loop (§7): re-verify an applied refinement against the
+  // current champion/runner-up. Separate busy/error, same reasoning again.
+  const [reverifyBusy, setReverifyBusy] = useState(false);
+  const [reverifyError, setReverifyError] = useState(null);
+
   const [tab, setTab] = useState("review");
   const [prevTab, setPrevTab] = useState("review"); // Studio opens full-screen — Back returns here
   const reviewRef = useRef(null);
@@ -313,12 +352,196 @@ export default function App() {
     api.getModes().then((r) => setModes(r.modes || [])).catch(() => {});
   }, []);
 
+  // Load the most recent Hypothesis Agent run for this Sift session, if any
+  // — its own table (core/hypothesis_db.py), so it isn't in the session's
+  // own `data` blob and has to be fetched separately whenever the active
+  // run changes (fresh run, restored session, etc).
+  useEffect(() => {
+    if (!runId || !isDone) { setHypothesisRun(null); setHypothesisStageDone({}); return; }
+    // Don't clobber a live run's rail with a stale saved snapshot — this
+    // effect can re-fire (e.g. a re-render triggered by something else
+    // touching runId/isDone) while runHypothesisPipeline() is still
+    // streaming, and overwriting hypothesisStageDone mid-run is what caused
+    // the rail to show a stale "Novelty check" spinner even after a NEWER
+    // run's result had already rendered (the two writers were racing on the
+    // same state with no ordering guarantee). runHypothesisPipeline()
+    // reloads this same data itself once it finishes, via the "done" event.
+    if (hypothesisBusy) return;
+    let cancelled = false;
+    api.listHypothesisRuns(runId)
+      .then((r) => {
+        if (cancelled) return;
+        const latest = (r.runs || [])[0];
+        if (!latest) { setHypothesisRun(null); setHypothesisStageDone({}); return; }
+        return api.getHypothesisRun(latest.id).then((full) => {
+          if (cancelled) return;
+          setHypothesisRun(full);
+          // A previously-saved run: show its rail as complete for whatever
+          // stages it actually reached — novelty/ranking/meta_review only
+          // ran if the Designer produced hypotheses to check (see pipeline.py).
+          const d = full?.data || {};
+          setHypothesisStageDone({
+            fetch: true, designer: true, critic: true,
+            novelty: !!(d.novelty_checks && Object.keys(d.novelty_checks).length > 0),
+            ranking: !!d.bracket, meta_review: !!d.meta_review,
+            plausibility: !!d.plausibility_check,
+          });
+        });
+      })
+      .catch(() => { if (!cancelled) { setHypothesisRun(null); setHypothesisStageDone({}); } });
+    return () => { cancelled = true; };
+  }, [runId, isDone, hypothesisBusy]);
+
+  async function runHypothesisPipeline() {
+    if (!runId) return;
+    setHypothesisBusy(true); setHypothesisError(null);
+    setHypothesisStage(null); setHypothesisStageDone({}); setHypothesisLive({});
+    try {
+      const final = await api.createHypothesisRunStream(runId, apiKey || undefined, model, (e) => {
+        if (e.type === "progress") {
+          setHypothesisStage(e.stage);
+          if (e.status === "done") {
+            setHypothesisStageDone((d) => ({ ...d, [e.stage]: true }));
+          } else if (e.status === "start") {
+            // critic's "start" carries {hypotheses}; ranking's carries
+            // {total} — stash the whole event so CriticLiveDetail/
+            // RankingLiveDetail can read whichever fields apply.
+            setHypothesisLive((d) => ({ ...d, [e.stage]: { ...e } }));
+          } else if (e.status === "match_start") {
+            setHypothesisLive((d) => ({
+              ...d,
+              ranking: { ...(d.ranking || {}), current: { a: e.a, b: e.b } },
+            }));
+          } else if (e.status === "match_done") {
+            setHypothesisLive((d) => ({
+              ...d,
+              ranking: {
+                ...(d.ranking || {}),
+                current: null,
+                matches: [...((d.ranking || {}).matches || []), { a: e.a, b: e.b, winner: e.winner, reason: e.reason }],
+              },
+            }));
+          }
+        }
+      });
+      setHypothesisRun(final.run);
+      // Recompute the rail's done-state straight from the final saved data
+      // (same derivation the "restore a saved run" effect above uses),
+      // rather than trusting only the accumulated per-event flags — this is
+      // what actually guarantees the rail can't show a stage as still
+      // in-progress once its real result is on screen, regardless of how
+      // any individual progress event was raced or dropped in transit.
+      const d = final.run?.data || {};
+      setHypothesisStageDone({
+        fetch: true, designer: true, critic: true,
+        novelty: !!(d.novelty_checks && Object.keys(d.novelty_checks).length > 0),
+        ranking: !!d.bracket, meta_review: !!d.meta_review,
+        plausibility: !!d.plausibility_check,
+      });
+    } catch (e) {
+      setHypothesisError(e.message);
+    } finally {
+      setHypothesisBusy(false);
+      setHypothesisStage(null);
+    }
+  }
+
+  // Checks one hypothesis (usually the champion) against results the
+  // researcher actually ran — appends the verdict to the saved run's
+  // data.user_validations; never touches the hypothesis text itself. See
+  // agents/hypothesis_results_check.py and hypothesis_routes.py's
+  // /check-results.
+  async function checkHypothesisResults(hypothesisIndex, resultsText) {
+    if (!hypothesisRun?.id) return;
+    setResultsCheckBusy(true); setResultsCheckError(null);
+    try {
+      const updated = await api.checkHypothesisResults(
+        hypothesisRun.id, hypothesisIndex, resultsText, apiKey || undefined, model,
+      );
+      setHypothesisRun(updated);
+    } catch (e) {
+      setResultsCheckError(e.message);
+    } finally {
+      setResultsCheckBusy(false);
+    }
+  }
+
+  // Explicit, human-triggered only: swaps a hypothesis's text for one
+  // validation's refined_hypothesis. See hypothesis_routes.py's
+  // /apply-refinement for why this never happens automatically.
+  async function applyHypothesisRefinement(validationId) {
+    if (!hypothesisRun?.id) return;
+    setResultsCheckBusy(true); setResultsCheckError(null);
+    try {
+      const updated = await api.applyHypothesisRefinement(hypothesisRun.id, validationId);
+      setHypothesisRun(updated);
+    } catch (e) {
+      setResultsCheckError(e.message);
+    } finally {
+      setResultsCheckBusy(false);
+    }
+  }
+
+  // Closing the loop (§7): give an already-applied refinement a real shot
+  // at the champion slot — a fresh Critic score plus up to two head-to-head
+  // matches against the current champion/runner-up. Only enabled once the
+  // refinement is applied (see hypothesis_routes.py's /reverify-refinement).
+  async function reverifyHypothesisRefinement(validationId) {
+    if (!hypothesisRun?.id) return;
+    setReverifyBusy(true); setReverifyError(null);
+    try {
+      const updated = await api.reverifyHypothesisRefinement(
+        hypothesisRun.id, validationId, apiKey || undefined, model,
+      );
+      setHypothesisRun(updated);
+    } catch (e) {
+      setReverifyError(e.message);
+    } finally {
+      setReverifyBusy(false);
+    }
+  }
+
+  // Argument/dispute flow (§6): argue with the Meta-Review's recommendation
+  // itself. Always returns a response; nothing changes until Apply.
+  async function disputeMetaReview(objection) {
+    if (!hypothesisRun?.id) return;
+    setDisputeBusy(true); setDisputeError(null);
+    try {
+      const updated = await api.disputeMetaReview(
+        hypothesisRun.id, objection, apiKey || undefined, model,
+      );
+      setHypothesisRun(updated);
+    } catch (e) {
+      setDisputeError(e.message);
+    } finally {
+      setDisputeBusy(false);
+    }
+  }
+
+  async function applyHypothesisDispute(disputeId) {
+    if (!hypothesisRun?.id) return;
+    setDisputeBusy(true); setDisputeError(null);
+    try {
+      const updated = await api.applyHypothesisDispute(hypothesisRun.id, disputeId);
+      setHypothesisRun(updated);
+    } catch (e) {
+      setDisputeError(e.message);
+    } finally {
+      setDisputeBusy(false);
+    }
+  }
+
   function reset() {
     setRunId(null); setReform(null); setPapers([]); setApproved({});
     setExtractions([]); setExtractStats(null); setSynth(null); setSections({}); setSideModules(null);
     setEvalRes(null); setError(null); setDone({}); setStage("query");
     setExperimentPlan(null); setExperimentCritique(null); setExperimentIterations(0); setExperimentDebate({});
     setExperimentKgBridges([]);
+    setHypothesisRun(null); setHypothesisBusy(false); setHypothesisError(null);
+    setHypothesisStage(null); setHypothesisStageDone({}); setHypothesisLive({});
+    setResultsCheckBusy(false); setResultsCheckError(null);
+    setDisputeBusy(false); setDisputeError(null);
+    setReverifyBusy(false); setReverifyError(null);
     setTab("review"); setProgressMsgs([]); setNotes({});
     setIncluded({}); setAnalysisStale(false);
   }
@@ -569,23 +792,8 @@ export default function App() {
   }
 
   async function addPaperToSources(paper) {
-    const res = await api.addPaper(runId, paper, apiKey || undefined, model, notes);
-    const np = { ...res.paper, added: true };
-    setPapers((prev) => [...prev, np]);
-    if (res.extraction) {
-      setExtractions((prev) => [...prev.filter((e) => e.idx !== np.idx), res.extraction]);
-    }
-    setIncluded((prev) => ({ ...prev, [np.idx]: true }));
-    setAnalysisStale(true);
-    refreshSessions();
-    return np;
-  }
-
-  // Same as addPaperToSources, but for a locally-uploaded PDF/DOCX instead of
-  // a resolved search result — extraction happens server-side in one call.
-  async function uploadPaperToSources(file, titleOverride) {
     try {
-      const res = await api.uploadPaper(runId, file, apiKey || undefined, model, notes, titleOverride);
+      const res = await api.addPaper(runId, paper, apiKey || undefined, model, notes);
       const np = { ...res.paper, added: true };
       setPapers((prev) => [...prev, np]);
       if (res.extraction) {
@@ -596,15 +804,11 @@ export default function App() {
       refreshSessions();
       return np;
     } catch (e) {
-      // "Failed to fetch" is a dropped connection, not an application
-      // error — the upload can easily have finished server-side (paper
-      // added + persisted) even though the response never arrived here
-      // (most commonly a backend restart mid-request). Without reconciling,
-      // the paper is invisible in this tab until a hard refresh, and a retry
-      // just reports "already in your sources" against a source the user
-      // can't see or remove. Check the server's authoritative state before
-      // giving up on it as a real failure.
-      if (String(e.message || "").toLowerCase().includes("failed to fetch")) {
+      // Same reconciliation as uploadPaperToSources below — a dropped
+      // connection or a retry-after-drop can both leave a paper actually
+      // persisted server-side while this tab still thinks it's missing.
+      const msg = String(e.message || "").toLowerCase();
+      if (msg.includes("failed to fetch") || msg.includes("already in your sources")) {
         try {
           const fresh = await api.getRunState(runId);
           const knownIdx = new Set(papers.map((p) => p.idx));
@@ -615,12 +819,27 @@ export default function App() {
             setIncluded((prev) => ({ ...prev, [arrived.idx]: true }));
             setAnalysisStale(true);
             refreshSessions();
-            return arrived;   // it actually went through
+            return arrived;
           }
         } catch { /* reconciliation failed too — fall through to the real error */ }
       }
       throw e;
     }
+  }
+
+  // Same as addPaperToSources, but for a locally-uploaded PDF/DOCX instead of
+  // a resolved search result — extraction happens server-side in one call.
+  async function uploadPaperToSources(file, titleOverride) {
+    const res = await api.uploadPaper(runId, file, apiKey || undefined, model, notes, titleOverride);
+    const np = { ...res.paper, added: true };
+    setPapers((prev) => [...prev, np]);
+    if (res.extraction) {
+      setExtractions((prev) => [...prev.filter((e) => e.idx !== np.idx), res.extraction]);
+    }
+    setIncluded((prev) => ({ ...prev, [np.idx]: true }));
+    setAnalysisStale(true);
+    refreshSessions();
+    return np;
   }
 
   async function reanalyzeSources() {
@@ -1451,6 +1670,28 @@ export default function App() {
                       extractions={extractions}
                     />
                   )}
+                  {tab === "hypothesis" && (
+                    <HypothesisAgentPanel
+                      runId={runId}
+                      busy={hypothesisBusy}
+                      result={hypothesisRun}
+                      error={hypothesisError}
+                      onRun={runHypothesisPipeline}
+                      papers={papers}
+                      extractions={extractions}
+                      onCheckResults={checkHypothesisResults}
+                      onApplyRefinement={applyHypothesisRefinement}
+                      resultsCheckBusy={resultsCheckBusy}
+                      resultsCheckError={resultsCheckError}
+                      onReverifyRefinement={reverifyHypothesisRefinement}
+                      reverifyBusy={reverifyBusy}
+                      reverifyError={reverifyError}
+                      onDisputeMetaReview={disputeMetaReview}
+                      onApplyDispute={applyHypothesisDispute}
+                      disputeBusy={disputeBusy}
+                      disputeError={disputeError}
+                    />
+                  )}
                 </div>
 
                 <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -1480,19 +1721,31 @@ export default function App() {
 
           </div>
 
-          {/* Agent Pipeline status */}
+          {/* Agent Pipeline status — swaps to the Hypothesis Agent's own
+              rail while that tab is open, since a Hypothesis pipeline run
+              is a separate agent run from Sift's and deserves its own
+              visible progress rather than the Sift rail sitting frozen. */}
           <div className="rcol">
-            <PipelineRail
-              stage={stage}
-              busy={busy}
-              done={done}
-              kg={sideModules?.knowledge_graph}
-              ranked={synth?.ranked?.length}
-              dataReady={!!sideModules}
-              models={pipelineModels}
-              showMemory={false}
-              hasPlan={!!experimentPlan}
-            />
+            {tab === "hypothesis" ? (
+              <HypothesisPipelineRail
+                stage={hypothesisStage}
+                busy={hypothesisBusy}
+                done={hypothesisStageDone}
+                live={hypothesisLive}
+              />
+            ) : (
+              <PipelineRail
+                stage={stage}
+                busy={busy}
+                done={done}
+                kg={sideModules?.knowledge_graph}
+                ranked={synth?.ranked?.length}
+                dataReady={!!sideModules}
+                models={pipelineModels}
+                showMemory={false}
+                hasPlan={!!experimentPlan}
+              />
+            )}
           </div>
         </div>
       </div>

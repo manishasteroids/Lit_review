@@ -81,6 +81,12 @@ class HypothesisCriticAgent(Agent):
                 ),
                 system=self.SYSTEM,
                 max_tokens=max_tokens,
+                # Low temperature: this is a rubric applied to given content,
+                # not creative generation -- the same hypotheses should get
+                # roughly the same scores on a re-run, not a different champion
+                # every time purely from scoring noise cascading through the
+                # bracket. See core/llm_client.py's `call()` docstring note.
+                temperature=0.0,
             )
             result = self.llm.parse_json(out)
             if not isinstance(result, dict) or "critiques" not in result:

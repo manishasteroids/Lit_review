@@ -25,6 +25,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
 from api.routes import router
+from api.hypothesis_routes import router as hypothesis_router
 from core.config import settings
 from core.db import init_db
 
@@ -67,6 +68,7 @@ app.add_middleware(
 )
 
 app.include_router(router)
+app.include_router(hypothesis_router)
 
 
 @app.get("/api/health")
