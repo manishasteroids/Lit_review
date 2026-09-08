@@ -119,9 +119,22 @@ class AcademicSearchAgent(Agent):
     def run(self, topic: str, queries: list[str], limit: int = 50,
             terms: list[str] | None = None, scope: str | None = None,
             domain: str | None = None) -> list[dict]:
-        # `search_terms` selects the candidate POOL (topic + first 2 queries);
-        # the reformulator's `terms`/`scope` are used only to RANK.
-        search_terms = _uniq([topic, *(queries or [])])[:3]
+        # `search_terms` selects the candidate POOL; the reformulator's
+        # `terms`/`scope` are used only to RANK. A long, run-on, multi-sentence
+        # topic (users often paste a whole paragraph of context) makes a
+        # terrible literal query against keyword/BM25 academic search APIs —
+        # it tokenizes into a bag of generic words ("power", "regulate",
+        # "monitor", "gradient") that coincidentally match wildly off-topic
+        # papers sharing none of the actual subject matter. Only use the raw
+        # topic verbatim as a search string when it's already short/query-like;
+        # otherwise trust the reformulator's queries (written to be searchable
+        # phrases) and use more of them instead of burning a pool slot on the
+        # unusable raw paragraph.
+        topic_is_query_like = len(topic.split()) <= 12
+        search_terms = _uniq([topic, *(queries or [])])[:4] if topic_is_query_like \
+            else _uniq(list(queries or []))[:4]
+        if not search_terms:
+            search_terms = [topic]
  
         merged: dict[str, dict] = {}
         for source in (self._openalex, self._semantic_scholar, self._pubmed, self._arxiv,
@@ -145,8 +158,19 @@ class AcademicSearchAgent(Agent):
         # merely share a stopword don't fill the shortlist.
         kw = _relevance_keywords(topic, terms or queries, scope)
         scored = [(p, *_score(p, kw)) for p in papers]        # (paper, score, hits)
-        on_topic = [t for t in scored if t[2] > 0]
-        pool = on_topic if len(on_topic) >= min(limit, 10) else scored
+        # Require overlap on at least 2 distinct topic/term words, not just 1 —
+        # a single shared generic word ("power", "regulate", "gradient") is
+        # coincidence, not evidence of relevance, and was letting completely
+        # unrelated papers (e.g. a biomedical ionotronic-battery paper matching
+        # only on "power"/"gradient") through as "on-topic". Two independent
+        # hits is a much stronger signal the paper is actually about the topic.
+        on_topic = [t for t in scored if t[2] >= 2]
+        # Only fall back to the full unranked pool when the topic-filtered set
+        # is completely empty — previously this also fired whenever on_topic
+        # was merely thin (< limit/10), which defeated the filter exactly when
+        # the search results were weakest and padded the shortlist with
+        # zero-relevance junk instead of just returning fewer, better results.
+        pool = on_topic if on_topic else scored
         pool.sort(key=lambda t: t[1], reverse=True)
 
         papers = [t[0] for t in pool[:limit]]

@@ -21,7 +21,18 @@ class Settings:
     # Gemini
     gemini_api_key: str = os.environ.get("GEMINI_API_KEY", os.environ.get("GOOGLE_API_KEY", ""))
     gemini_model: str = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-    
+
+    # OpenRouter — the third backbone (see core/llm_client.py's provider
+    # docstring). One key gives access to open-weight models (DeepSeek/Qwen/
+    # Llama and their many variants) through the same OpenAI-compatible
+    # /v1/chat/completions shape every self-hosted serving stack (vLLM,
+    # SGLang, Ollama) also speaks — chosen deliberately so swapping this key
+    # for a self-hosted endpoint later is a base_url change, not a rewrite.
+    openrouter_api_key: str = os.environ.get("OPENROUTER_API_KEY", "")
+    # Overridable so a self-hosted vLLM/SGLang endpoint can be swapped in
+    # later without touching any code — same OpenAI-compatible shape either way.
+    openrouter_base_url: str = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+
     # ── Pipeline routing & limits ────────────────────────────────────────
     # Defaults live in the version-controlled core/model_policy.py (so they
     # survive .env resets); .env vars below override them per-environment.

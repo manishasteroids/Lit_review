@@ -5,6 +5,7 @@ pydantic>=2.7
 python-dotenv>=1.0
 pypdf>=4.0
 google-genai>=0.3
+openai>=1.50                 # OpenAI-compatible client, reused to reach OpenRouter (open-weight models: DeepSeek/Qwen/Llama) — same SDK, different base_url, no OpenAI account needed
 slowapi>=0.1.9
 pyjwt>=2.8
 cryptography>=42.0        # required by pyjwt to verify ES256/RS256 (asymmetric) Supabase JWTs

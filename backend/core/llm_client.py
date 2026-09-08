@@ -1,10 +1,28 @@
 """
 Thin wrapper around the model providers shared by every agent.
-Supports two backbones, chosen by the selected model id:
+Supports three backbones, chosen by the selected model id:
   - Anthropic (Claude)  — default
   - Google Gemini       — when the model id contains "gemini"
-Both accept the same multimodal `content` blocks (text + document/PDF + image);
-the Gemini path converts them to google-genai Parts.
+  - OpenRouter          — when the model id contains "/" (OpenRouter's own
+                          naming convention for every model it hosts, e.g.
+                          "deepseek/deepseek-v3.2", "qwen/qwen3-coder",
+                          "meta-llama/llama-4-maverick" — never true of an
+                          Anthropic or Gemini model id, so this is unambiguous)
+Claude and Gemini accept the same multimodal `content` blocks (text +
+document/PDF + image); the Gemini path converts them to google-genai Parts.
+OpenRouter is text-only for now (no agent in this codebase sends it images/
+PDFs yet) — see _call_openrouter's docstring if that's ever needed.
+
+OpenRouter is deliberately the integration point for open-weight models
+(DeepSeek/Qwen/Llama and friends) rather than each vendor's own API: it
+speaks the same OpenAI-compatible /v1/chat/completions shape as every
+self-hosted serving stack (vLLM, SGLang, Ollama) and as several other
+hosted providers (Together, Fireworks). That means switching from "hosted
+via OpenRouter" to "self-hosted on our own GPU" later is a `base_url`
+change (core/config.py's `openrouter_base_url`) plus a model-id change —
+never a rewrite of this file, and removing the whole open-weight
+experiment (if it doesn't pan out) is deleting one branch below plus one
+config value, since no agent file anywhere references a vendor name.
 """
 import base64
 import json
@@ -19,6 +37,15 @@ from .config import settings
 from .usage import record_call
 
 log = logging.getLogger("samhita.llm")
+
+
+def _build_openrouter_client():
+    """OpenRouter speaks the OpenAI wire protocol, so the `openai` SDK works
+    unmodified — just pointed at a different base_url and a different key.
+    Swapping to a self-hosted vLLM/SGLang endpoint later needs nothing more
+    than changing settings.openrouter_base_url; this function doesn't change."""
+    from openai import OpenAI
+    return OpenAI(api_key=settings.openrouter_api_key, base_url=settings.openrouter_base_url)
 
 
 def _build_gemini_client():
@@ -45,11 +72,18 @@ class LLMClient:
         stage: str = "misc",
     ):
         self.model = model or settings.model
-        self.provider = "gemini" if "gemini" in self.model.lower() else "anthropic"
+        if "gemini" in self.model.lower():
+            self.provider = "gemini"
+        elif "/" in self.model:
+            self.provider = "openrouter"
+        else:
+            self.provider = "anthropic"
 
         if self.provider == "gemini":
             self._gclient = _build_gemini_client()  # lazy import so Claude-only setups don't need it
             self._gemini_model = settings.gemini_model if self.model == "gemini" else self.model
+        elif self.provider == "openrouter":
+            self._orclient = _build_openrouter_client()  # lazy import so non-OpenRouter setups don't need `openai`
         else:
             # max_retries=1 (down from the SDK's default of 2): the SDK's own
             # retry/backoff on 429/5xx is exactly what can silently turn one
@@ -103,6 +137,15 @@ class LLMClient:
             gem_text = f"{cache_prefix}\n{user_text or ''}" if cache_prefix else user_text
             return self._call_gemini(gem_text, system, max_tokens, content,
                                       model=self._gemini_model, temperature=temperature)
+
+        if self.provider == "openrouter":
+            # No cross-provider fallback here (unlike the Anthropic path
+            # below) — this is a new, still-being-evaluated backbone, and
+            # silently falling back to Claude/Gemini on a failure would hide
+            # exactly the reliability signal that matters while evaluating
+            # whether an open-weight model is good enough to keep using.
+            or_text = f"{cache_prefix}\n{user_text or ''}" if cache_prefix else user_text
+            return self._call_openrouter(or_text, system, max_tokens, temperature=temperature)
 
         # `content` lets callers pass multimodal blocks (text + document/PDF +
         # image). `cache_prefix` marks a stable prefix for prompt caching —
@@ -316,6 +359,72 @@ class LLMClient:
         self.last_truncated = str(finish_reason) in ("MAX_TOKENS", "FinishReason.MAX_TOKENS")
         return out
 
+    def _call_openrouter(self, user_text, system, max_tokens, temperature: Optional[float] = None) -> str:
+        """OpenRouter's own API is the OpenAI chat-completions shape exactly
+        — this is the one path in this file that doesn't need a bespoke
+        request/response translation the way Gemini's does. Text-only for
+        now (see this module's docstring); a `content`/multimodal parameter
+        can be added here the same way Gemini's is, if some future agent
+        needs it.
+
+        Reasoning models on OpenRouter (DeepSeek R1, Qwen's "-thinking"
+        variants) often emit a visible chain-of-thought before the actual
+        answer, either as a separate `reasoning` field on the response or as
+        an inline `<think>...</think>` block in the content itself,
+        depending on the model. The inline case is handled by
+        `parse_json()` stripping a leading `<think>` block before parsing —
+        this method deliberately does NOT strip it here, so the full
+        reasoning trace (a genuinely useful audit artifact — see this
+        session's own discussion of it) still reaches whatever records
+        `call()`'s raw return value (e.g. hypothesis_agent/pipeline.py's
+        audit log)."""
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": user_text or ""})
+
+        t0 = time.perf_counter()
+        kwargs: dict[str, Any] = {"model": self.model, "messages": messages, "max_tokens": max_tokens}
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        resp = self._orclient.chat.completions.create(**kwargs)
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        if latency_ms > 20_000:
+            log.warning(
+                "slow OpenRouter call: stage=%s model=%s latency=%.1fs",
+                self.stage, self.model, latency_ms / 1000,
+            )
+
+        usage = getattr(resp, "usage", None)
+        in_tok = getattr(usage, "prompt_tokens", 0) or 0
+        out_tok = getattr(usage, "completion_tokens", 0) or 0
+        record_call(self.run_id, self.stage, self.model, in_tok, out_tok, latency_ms)
+
+        choice = resp.choices[0] if getattr(resp, "choices", None) else None
+        out = ((choice.message.content if choice else None) or "").strip()
+        # A "-thinking"/R1-style model can put its entire chain-of-thought in
+        # a separate `reasoning` field and leave `content` empty until the
+        # final answer — some OpenRouter routes surface this as
+        # message.reasoning. Fold it back in front of the content (rather
+        # than discard it) so the audit log still captures it, and so an
+        # empty `content` with a non-empty `reasoning` doesn't look like a
+        # silent failure below.
+        reasoning = getattr(choice.message, "reasoning", None) if choice else None
+        if reasoning and not out:
+            out = f"<think>{reasoning}</think>"
+        elif reasoning:
+            out = f"<think>{reasoning}</think>\n{out}"
+        if not out:
+            finish_reason = getattr(choice, "finish_reason", None) if choice else None
+            log.warning(
+                "OpenRouter call returned empty text (stage=%s model=%s finish_reason=%s)",
+                self.stage, self.model, finish_reason,
+            )
+            raise ValueError(f"OpenRouter returned an empty response (finish_reason={finish_reason}).")
+        finish_reason = getattr(choice, "finish_reason", None) if choice else None
+        self.last_truncated = finish_reason == "length"
+        return out
+
     @staticmethod
     def parse_json(text: str) -> Any:
         """Models occasionally wrap JSON in prose or code fences, or append
@@ -327,7 +436,20 @@ class LLMClient:
         'JSONDecodeError: Extra data' whenever the model appended any
         trailing text that itself contained a brace/bracket — raw_decode()
         can't hit that failure mode since it never looks past the first
-        complete value."""
+        complete value.
+
+        A reasoning-style open-weight model (DeepSeek R1, Qwen's
+        "-thinking" variants, via the OpenRouter backbone) puts a visible
+        chain-of-thought in front of its actual answer, as a literal
+        `<think>...</think>` block in the text — see _call_openrouter's
+        docstring. Strip it first: everything after the LAST `</think>` is
+        the real answer. Without this, the fallback below (find the first
+        `[`/`{` in the whole text) would seize on any brace the model's own
+        reasoning happens to mention before reaching the real JSON — a
+        realistic failure mode, since reasoning about "what JSON to produce"
+        often mentions JSON syntax inline."""
+        if "</think>" in text.lower():
+            text = re.split(r"</think>", text, flags=re.I)[-1]
         t = re.sub(r"```json", "", text, flags=re.I).replace("```", "").strip()
         start = next((i for i, c in enumerate(t) if c in "[{"), 0)
         body = t[start:]

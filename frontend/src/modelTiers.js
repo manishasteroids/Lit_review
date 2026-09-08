@@ -18,6 +18,9 @@ export function shortModel(model = "") {
   if (m.includes("haiku")) return "Haiku";
   if (m.includes("gemini") || m.includes("flash")) return "Gemini Flash";
   if (m.includes("gpt")) return "GPT-5";
+  if (m.includes("deepseek")) return m.includes("r1") ? "DeepSeek R1" : "DeepSeek";
+  if (m.includes("qwen")) return m.includes("coder") ? "Qwen Coder" : m.includes("thinking") ? "Qwen Thinking" : "Qwen";
+  if (m.includes("llama")) return "Llama";
   return model || "—";
 }
 
@@ -27,5 +30,12 @@ export function tierOf(model = "") {
   if (m.includes("opus")) return "deep";
   if (m.includes("sonnet") || m.includes("gpt5") || m.includes("gpt-5")) return "standard";
   if (m.includes("haiku") || m.includes("gemini") || m.includes("flash")) return "light";
+  // Open-weight backbones (OpenRouter, "vendor/model" ids): reasoning/
+  // "-thinking"/"r1" variants run deep chain-of-thought passes and cost like
+  // a heavy model; coder/general variants are comparable to a mid model.
+  if (m.includes("deepseek") || m.includes("qwen") || m.includes("llama")) {
+    if (m.includes("r1") || m.includes("thinking")) return "deep";
+    return "standard";
+  }
   return "standard";
 }

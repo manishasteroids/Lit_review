@@ -1920,6 +1920,151 @@ def projects_zotero_import(project_id: str, body: ZoteroImportBody, user_id: str
     return {"imported": len(items)}
 
 
+class CollaboratorBody(BaseModel):
+    email: str
+
+
+class ShareLinkBody(BaseModel):
+    emails: list[str]
+
+
+class ShareVerifyBody(BaseModel):
+    email: str
+
+
+@router.get("/projects/{project_id}/collaborators")
+def list_project_collaborators(project_id: str, user_id: str = Depends(require_user)):
+    from core.project_sharing import list_collaborators, user_has_project_access
+    if not user_has_project_access(project_id, user_id):
+        raise HTTPException(404, "Project not found.")
+    return {"collaborators": list_collaborators(project_id)}
+
+
+@router.post("/projects/{project_id}/collaborators")
+def add_project_collaborator(project_id: str, body: CollaboratorBody, user_id: str = Depends(require_user)):
+    from core.project_sharing import add_collaborator, is_project_owner
+    if not is_project_owner(project_id, user_id):
+        raise HTTPException(404, "Project not found.")
+    try:
+        return add_collaborator(project_id, user_id, body.email)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.delete("/projects/{project_id}/collaborators/{collab_user_id}")
+def remove_project_collaborator(project_id: str, collab_user_id: str, user_id: str = Depends(require_user)):
+    from core.project_sharing import remove_collaborator, is_project_owner
+    if not is_project_owner(project_id, user_id):
+        raise HTTPException(404, "Project not found.")
+    remove_collaborator(project_id, collab_user_id)
+    return {"ok": True}
+
+
+@router.get("/projects/{project_id}/share-links")
+def list_project_share_links(project_id: str, user_id: str = Depends(require_user)):
+    from core.project_sharing import list_share_links, is_project_owner
+    if not is_project_owner(project_id, user_id):
+        raise HTTPException(404, "Project not found.")
+    return {"share_links": list_share_links(project_id)}
+
+
+@router.post("/projects/{project_id}/share-links")
+def create_project_share_link(project_id: str, body: ShareLinkBody, user_id: str = Depends(require_user)):
+    from core.project_sharing import create_share_link, is_project_owner
+    if not is_project_owner(project_id, user_id):
+        raise HTTPException(404, "Project not found.")
+    try:
+        return create_share_link(project_id, user_id, body.emails)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.delete("/projects/{project_id}/share-links/{link_id}")
+def revoke_project_share_link(project_id: str, link_id: str, user_id: str = Depends(require_user)):
+    from core.project_sharing import revoke_share_link, is_project_owner
+    if not is_project_owner(project_id, user_id):
+        raise HTTPException(404, "Project not found.")
+    revoke_share_link(project_id, link_id)
+    return {"ok": True}
+
+
+# ── Public share viewer — no Sift account, no auth headers. A visitor holds
+# a token (from the link the owner copied/sent) and confirms an email that's
+# on the link's allowlist; every read below re-verifies that pair before
+# returning anything, so a bad token or wrong email gets a flat 403/404. ────
+
+@router.post("/share/{token}/verify")
+def share_verify(token: str, body: ShareVerifyBody):
+    from core.project_sharing import verify_share_access
+    link = verify_share_access(token, body.email)
+    if not link:
+        raise HTTPException(403, "This link doesn't grant access to that email.")
+    return {"ok": True, "project_id": link["project_id"]}
+
+
+@router.get("/share/{token}/project")
+def share_get_project(token: str, email: str):
+    from core.project_sharing import verify_share_access
+    link = verify_share_access(token, email)
+    if not link:
+        raise HTTPException(403, "This link doesn't grant access to that email.")
+    from core.db import _conn, _PH
+    import json as _json
+    with _conn() as conn:
+        row = conn.execute(f"SELECT * FROM projects WHERE id = {_PH}", (link["project_id"],)).fetchone()
+        if not row:
+            raise HTTPException(404, "Project not found.")
+        proj = dict(row)
+        runs = conn.execute(
+            "SELECT id, topic, stage, paper_count, created_at, updated_at "
+            f"FROM sessions WHERE project_id = {_PH} ORDER BY updated_at DESC",
+            (link["project_id"],),
+        ).fetchall()
+        papers = conn.execute(
+            f"SELECT * FROM project_papers WHERE project_id = {_PH} ORDER BY added_at DESC",
+            (link["project_id"],),
+        ).fetchall()
+        notes = conn.execute(
+            f"SELECT * FROM project_notes WHERE project_id = {_PH} ORDER BY updated_at DESC",
+            (link["project_id"],),
+        ).fetchall()
+    proj["runs"] = [dict(r) for r in runs]
+    proj["papers"] = [{**dict(r), "paper": _json.loads(r["paper"])} for r in papers]
+    proj["notes"] = [dict(r) for r in notes]
+    # Read-only viewer: never leak the owner's raw user_id or who else has access.
+    proj.pop("user_id", None)
+    return proj
+
+
+@router.get("/share/{token}/runs/{run_id}")
+def share_get_run(token: str, run_id: str, email: str):
+    from core.project_sharing import verify_share_access
+    from core.db import _conn, _PH
+    link = verify_share_access(token, email)
+    if not link:
+        raise HTTPException(403, "This link doesn't grant access to that email.")
+    with _conn() as conn:
+        row = conn.execute(f"SELECT * FROM sessions WHERE id = {_PH}", (run_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Run not found.")
+    session = dict(row)
+    if session.get("project_id") != link["project_id"]:
+        raise HTTPException(404, "Run not found.")
+    d = json.loads(session["data"]) if isinstance(session.get("data"), str) else (session.get("data") or {})
+    pipeline = SiftPipeline()
+    run = RunState(
+        run_id=run_id, topic=d.get("topic", ""), reform=d.get("reform"),
+        papers=d.get("papers") or [], approved_papers=[], extractions=d.get("extractions") or [],
+        synthesis=d.get("synth"), sections=d.get("sections") or {}, stage=session.get("stage", "done"),
+    )
+    return {
+        "run_id": run.run_id, "topic": run.topic, "reform": run.reform,
+        "papers": run.papers, "extractions": run.extractions, "synthesis": run.synthesis,
+        "sections": run.sections, "stage": run.stage,
+        "side_modules": pipeline.side_modules(run) if run.synthesis else None,
+    }
+
+
 @router.get("/usage/trend")
 def usage_trend(days: int = 30, tz_offset: int = 0, user_id: str = Depends(require_user)):
     """Per-day token + cost totals for the signed-in user, plus an all-time
