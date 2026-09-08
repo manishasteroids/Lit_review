@@ -2,12 +2,28 @@ import React from "react";
 import { Sparkles, Cpu, Play, ChevronRight, Brain, FileText } from "./icons.jsx";
 import { tierOf, TIER_META } from "../modelTiers.js";
 
+// Open-weight models, reached through OpenRouter (core/llm_client.py's third
+// backbone) rather than each vendor's own API — one key, one OpenAI-
+// compatible endpoint. Model ids use OpenRouter's own "vendor/model" naming,
+// which is also how LLMClient tells this backbone apart from Claude/Gemini
+// (see its provider-detection docstring). `live: false` until
+// OPENROUTER_API_KEY is actually set server-side; flip to `true` once a run
+// against one of these has actually been tried.
+const OPEN_WEIGHT_BACKBONES = [
+  { id: "deepseek/deepseek-v3.2", label: "DeepSeek V3.2 (open-weight)", live: true },
+  { id: "deepseek/deepseek-r1", label: "DeepSeek R1 — reasoning (open-weight)", live: true },
+  { id: "qwen/qwen3-max-thinking", label: "Qwen3 Max Thinking (open-weight)", live: true },
+  { id: "qwen/qwen3-coder", label: "Qwen3 Coder (open-weight)", live: true },
+  { id: "meta-llama/llama-4-maverick", label: "Llama 4 Maverick (open-weight)", live: true },
+];
+
 const BACKBONES = [
   { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", live: true },
   { id: "claude-opus-4-8", label: "Claude Opus 4.8", live: true },
   { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5", live: true },
   { id: "gpt5", label: "OpenAI GPT-5", live: false },
   { id: "gemini", label: "Gemini 2.5 flash", live: true },
+  ...OPEN_WEIGHT_BACKBONES,
 ];
 
 const EXAMPLES = [

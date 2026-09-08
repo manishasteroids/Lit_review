@@ -1,6 +1,6 @@
 # Hypothesis Agent — System Architecture
 
-*Working document, v7 — architecture only, no code, per §6 below. v6 was the pre-build plan; §§1–5 are now built (best-outcome pipeline: raised cap, novelty check, ranking bracket, meta-review, plausibility check, audit log, and a first human-in-the-loop mechanism — the user-supplied-results check, §6.0). §6 is new: the design for a second, distinct human-in-the-loop mechanism — arguing with a judgment the pipeline already made, not reporting a new result.*
+*Working document, v8 — architecture only where marked, no code yet for §8. v6 was the pre-build plan; §§1–5 are now built (best-outcome pipeline: raised cap, novelty check, ranking bracket, meta-review, plausibility check, audit log, and a first human-in-the-loop mechanism — the user-supplied-results check, §6.0). §6 (Meta-Review dispute) and §7 (champion-challenge re-verification after a refinement) are both now built too. §8 is new: architecture for the three dispute targets §6.1 deferred — Novelty, Plausibility, Critic, and a ranking-bracket match — not yet built.*
 
 ---
 
@@ -188,6 +188,55 @@ Same propose-then-apply shape as everything else in §6 — nothing re-verifies 
 - Result renders as a small challenge-history card: the two (or one) matches with their reasoning, and the outcome (`new_champion` / `new_runner_up` / `no_change`), same visual language as bracket match cards already use.
 - If the champion changed, the existing "stale" pill (already shown for plausibility after a dispute) appears on the Plausibility section, and the Meta-Review card gets a "recommendation may be outdated — re-run to confirm" note rather than silently keeping the old text on screen next to a different champion.
 
-### 7.4 Decision needed
+### 7.4 Decision (resolved)
 
-The one real open question: should re-verification apply to *any* changed hypothesis (refinement or dispute), or only to results-check refinements — since a dispute-driven champion swap already updates `champion_index` directly via `apply-dispute` (§6.5), re-verifying it again may be redundant with the swap that already happened. Recommendation: scope v1 to results-check refinements only, since that's the case with the real gap (a refined hypothesis today never competes for the champion slot at all); a Meta-Review dispute that already swapped the champion doesn't need a second re-verification pass on top of the swap it just did.
+Scoped to results-check refinements only, not disputes — a dispute-driven champion swap already updates `champion_index` directly via `apply-dispute`, so re-verifying it again would be redundant with the swap that just happened. Built and shipped on this basis.
+
+---
+
+## 8. Deeper disputes: the three targets §6.1 deferred
+
+§6 shipped Meta-Review dispute only, v1. §6.1's table named five other candidate targets and deferred four of them "until real usage shows researchers actually want" them. That evidence has arrived — this section designs the three that are worth building next (a bracket match, Critic's score, Novelty's verdict, Plausibility's verdict — four targets, three of which share one shape and one, the bracket match, needs real new infrastructure).
+
+### 8.0 Same shape, different depth
+
+Every dispute in this tool (Methods' `respond_to_challenge`, the results-check, §6's Meta-Review dispute) follows one pattern: submit an objection, get back a `{stance: "defended"|"revised", response, ...revised_verdict}`, and nothing about the saved run changes until an explicit Apply. All four new targets keep that pattern exactly — the only thing that varies is what Apply has to do downstream, which is why they split into "cheap" (Novelty, Plausibility), "medium" (Critic), and "expensive" (a bracket match) below rather than being one uniform effort.
+
+### 8.1 Novelty dispute — cheapest, build first
+
+"That IS/ISN'T prior art, I know the field better than a keyword search does."
+
+- **New method**: `HypothesisNoveltyAgent.dispute(topic, hypothesis, current_verdict, objection, extractions) -> {"stance": "revised"|"defended", "response": str, "verdict": {...same shape as a normal novelty_checks entry}}`.
+- **Apply**: swap `novelty_checks[idx]` for the revised verdict. Novelty is a leaf — nothing else in the pipeline reads it (it's a badge on the hypothesis card, not an input to Critic/Ranker/Meta-Review) — so applying has zero cascade. No staleness to track, no downstream re-run to price. This is the cheapest of the four to ship: one new agent method, one route, one small UI addition (an "Argue with this" link on `NoveltyBadge`, same treatment `MatchReasoning`'s link already gets in §6.4).
+
+### 8.2 Plausibility dispute — same shape as Novelty
+
+"You're comparing my target against the wrong baseline paper."
+
+- **New method**: `HypothesisPlausibilityAgent.dispute(topic, hypothesis, current_verdict, objection, extractions) -> {"stance": "revised"|"defended", "response": str, "verdict": {...same shape as plausibility_check}}`.
+- **Apply**: swap `plausibility_check`; clear `plausibility_stale` if it was set. Also a leaf (nothing downstream reads it), also zero cascade. Same cost class as Novelty — build alongside it.
+
+### 8.3 Critic score dispute — medium: one hypothesis, no replay, but real staleness
+
+"This novelty score is too harsh — you're penalizing it for restating a paper it actually extends."
+
+- **New method**: `HypothesisCriticAgent.dispute(topic, hypothesis, current_critique, objection, extractions) -> {"stance": "revised"|"defended", "response": str, "critique": {...same shape as one entry in critique.critiques}}`.
+- **Apply**: swap `critique.critiques[idx]` for the revised one. Unlike Novelty/Plausibility, the Critic's score for a hypothesis IS an input the Ranker read when judging every match that hypothesis played — so applying a revised score makes every match involving this hypothesis's index stale in the same sense §7's `meta_review_stale` already models: not wrong, just computed against information that has since changed. Mark it with a per-match `critic_stale: true` flag (matches `bracket.matches` where `a === idx || b === idx`) rather than forcing a replay — same restraint §7.1 argued for champion-challenge over full bracket replay: showing "this match's context changed" is honest and cheap; automatically re-judging every affected match is the expensive, not-yet-justified move. If a researcher wants to go further than the stale flag, §8.4's replay mechanism is sitting right there to reuse.
+
+### 8.4 Ranker-match dispute — the one that needs real new infrastructure
+
+"H3 should have beaten H5 in that match" — the target §6.1 originally flagged as needing genuine bracket-replay logic, and the reason it was deferred past v1.
+
+- **New method** (already speced in §6.2, not yet built): `HypothesisRankerAgent.dispute(topic, hyp_a, hyp_b, current_winner, current_reason, objection, extractions) -> {"stance": "revised"|"defended", "response": str, "winner": "a"|"b", "reason": str}`.
+- **Apply — the actual new capability**: `bracket.matches` is a flat list with a fixed shape per single-elimination seeding (`{round, a, b, winner, reason, bye}`) — the pairing structure for round 2+ is determined by round 1's winners, but WHO plays whom in a given slot is fixed by the seeding, not by any particular outcome. Flipping one match's winner only needs to ripple forward, never sideways or backward:
+  1. Force `matches[M].winner` to the disputed result.
+  2. Walk forward round by round. For each subsequent match, recompute its two participants from the (possibly just-changed) winners of the matches that feed into it.
+  3. If a match's participants are unchanged from the original bracket, keep its stored `winner`/`reason` as-is — don't re-judge it, it's still deciding the same two hypotheses it always was.
+  4. If a match's participants DID change (the flipped hypothesis, or a hypothesis further down the tree that only exists in this branch because of the flip, now plays someone new), re-judge it for real with `HypothesisRankerAgent.run()` — a genuine new LLM call, not reused from before.
+  5. Continue until the final round. Whatever comes out is the new champion/runner-up — by construction, `meta_review_stale` and (if the champion changed) `plausibility_stale` get set exactly like every other champion-changing event in this doc.
+- **Cost, shown up front** (§6.3 already flagged this): worst case is every match from the flipped one to the final gets re-judged — for a 6-hypothesis/5-match bracket, flipping an early match could mean re-judging 2-3 downstream matches plus Meta-Review plus Plausibility. The UI must say this before the click, not after: "Applying this may change the champion — up to N more matches will be re-judged, and the closing recommendation will be re-run."
+- Genuinely the most valuable of the four to a power user who's read the bracket closely enough to disagree with a specific call, and genuinely the most expensive to build (new `_run_bracket`-adjacent replay function, careful testing of the "which matches actually changed" logic) and to run. Build it last, once the three cheaper ones are live and actually being used — real dispute volume on Critic/Novelty/Plausibility will also be the evidence for whether match-level disputes are worth their cost at all, the same "concrete case first" bar §6.1 originally set.
+
+### 8.5 Suggested build order
+
+Novelty + Plausibility together first (§8.1/§8.2 — same shape, zero cascade, smallest possible slice); Critic next (§8.3 — same propose/apply shape, but introduces the "stale match" concept that's genuinely new); Ranker-match last (§8.4 — the only one that needs new replay infrastructure, and the one where usage data from the first three should inform whether it's worth building at all).
