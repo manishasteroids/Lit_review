@@ -60,9 +60,19 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(BodySizeLimitMiddleware)
+_extra_origins = [o.strip() for o in settings.cors_origin.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.cors_origin, "http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        *_extra_origins,
+        "https://orcusintelligencelab.com",
+        "https://www.orcusintelligencelab.com",
+        "https://samhita-503314.web.app",
+        "https://samhita-503314.firebaseapp.com",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
