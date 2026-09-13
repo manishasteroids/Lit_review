@@ -40,24 +40,43 @@ def init_hypothesis_table() -> None:
             "CREATE INDEX IF NOT EXISTS idx_hypothesis_runs_source "
             "ON hypothesis_runs (source_run_id)"
         )
+        # project_id -- snapshotted from the source Sift session at creation
+        # time (core/projects.py's unified Project model). Lets a hypothesis
+        # run be tied to a *project*, not just the one Sift session it was
+        # generated from, so get_staleness() below can notice ANY newer
+        # completed Lit Review session filed under the same project -- not
+        # only edits to the exact session it was built from.
+        from core.db import _add_column
+        _add_column(conn, "hypothesis_runs", "project_id", "TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_hypothesis_runs_project "
+            "ON hypothesis_runs (project_id)"
+        )
 
 
 def create_hypothesis_run(
     user_id: str, source_run_id: str, source_topic: str, status: str, data: dict,
+    project_id: Optional[str] = None,
 ) -> dict:
+    """project_id is a snapshot of the source Sift session's project at the
+    moment this run was created (looked up by the caller via core.db.get_session
+    -- this module doesn't reach into sessions itself, same one-directional-read
+    boundary the rest of this file already keeps). None if that session wasn't
+    filed under a project. See get_staleness() for what this unlocks."""
     run_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     ph = _PH
     with _conn() as conn:
         conn.execute(
             f"INSERT INTO hypothesis_runs "
-            f"(id, user_id, source_run_id, source_topic, status, created_at, data) "
-            f"VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})",
-            (run_id, user_id, source_run_id, source_topic, status, now, json.dumps(data)),
+            f"(id, user_id, source_run_id, source_topic, status, created_at, data, project_id) "
+            f"VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})",
+            (run_id, user_id, source_run_id, source_topic, status, now, json.dumps(data), project_id),
         )
     return {
         "id": run_id, "user_id": user_id, "source_run_id": source_run_id,
         "source_topic": source_topic, "status": status, "created_at": now, "data": data,
+        "project_id": project_id,
     }
 
 
@@ -93,22 +112,73 @@ def update_hypothesis_run_data(run_id: str, user_id: str, data: dict) -> Optiona
     return get_hypothesis_run(run_id, user_id)
 
 
-def list_hypothesis_runs(user_id: str, source_run_id: Optional[str] = None) -> list[dict]:
+def list_hypothesis_runs(
+    user_id: str, source_run_id: Optional[str] = None, project_id: Optional[str] = None,
+) -> list[dict]:
     """Summary rows only (no `data` blob) -- for the run picker / history
-    list. Newest first."""
+    list. Newest first. `project_id` is the Flow-B sidebar picker's filter:
+    every hypothesis run ever generated from ANY Lit Review session filed
+    under that project, regardless of which specific session each one used
+    -- source_run_id narrows to one exact session instead, when the caller
+    already knows which one."""
     ph = _PH
     with _conn() as conn:
-        if source_run_id:
+        if project_id:
             rows = conn.execute(
-                f"SELECT id, source_run_id, source_topic, status, created_at "
+                f"SELECT id, source_run_id, source_topic, status, created_at, project_id "
+                f"FROM hypothesis_runs WHERE user_id = {ph} AND project_id = {ph} "
+                f"ORDER BY created_at DESC",
+                (user_id, project_id),
+            ).fetchall()
+        elif source_run_id:
+            rows = conn.execute(
+                f"SELECT id, source_run_id, source_topic, status, created_at, project_id "
                 f"FROM hypothesis_runs WHERE user_id = {ph} AND source_run_id = {ph} "
                 f"ORDER BY created_at DESC",
                 (user_id, source_run_id),
             ).fetchall()
         else:
             rows = conn.execute(
-                f"SELECT id, source_run_id, source_topic, status, created_at "
+                f"SELECT id, source_run_id, source_topic, status, created_at, project_id "
                 f"FROM hypothesis_runs WHERE user_id = {ph} ORDER BY created_at DESC",
                 (user_id,),
             ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_staleness(hyp_run: dict) -> dict:
+    """Is there a more-recently-completed Literature Review this hypothesis
+    run should probably be regenerated from?
+
+    - If the run has a project_id: staleness looks at the WHOLE project --
+      any Sift session filed under it (stage='done') with updated_at newer
+      than this run's created_at counts, whether that's the exact session
+      this run was built from being edited/re-run, or a different session
+      in the same project finishing later.
+    - If the run has no project_id (its source session was never filed under
+      a project): falls back to just that one source session.
+
+    Returns {"stale": bool, "latest_source_updated_at": str | None} -- the
+    route layer decides what UI message to show; this module only computes
+    the comparison, per its own "no LLM calls, plain persistence" boundary.
+    """
+    ph = _PH
+    created_at = hyp_run["created_at"]
+    project_id = hyp_run.get("project_id")
+    with _conn() as conn:
+        if project_id:
+            row = conn.execute(
+                f"SELECT MAX(updated_at) AS latest FROM sessions "
+                f"WHERE project_id = {ph} AND stage = 'done'",
+                (project_id,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                f"SELECT updated_at AS latest FROM sessions WHERE id = {ph}",
+                (hyp_run["source_run_id"],),
+            ).fetchone()
+    latest = dict(row)["latest"] if row else None
+    return {
+        "stale": bool(latest and latest > created_at),
+        "latest_source_updated_at": latest,
+    }

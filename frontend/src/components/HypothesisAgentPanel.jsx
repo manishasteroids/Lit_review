@@ -57,6 +57,12 @@ export default function HypothesisAgentPanel({
   const reverifications = data?.reverifications || [];
   const metaReviewStale = !!data?.meta_review_stale;
   const [showAbout, setShowAbout] = useState(false);
+  // Hypothesis card layout: "grid" (side-by-side, good for comparing at a
+  // glance) or "sequential" (one at a time with Prev/Next, easier to read
+  // a single hypothesis's full detail without the eye jumping columns).
+  // Grid stays the default; this is a display-only toggle, no data changes.
+  const [hypLayout, setHypLayout] = useState("grid");
+  const [hypCursor, setHypCursor] = useState(0);
   const critiqueByIndex = Object.fromEntries(
     (critique?.critiques || []).map((c) => [c.index, c])
   );
@@ -94,7 +100,6 @@ export default function HypothesisAgentPanel({
             {plan.domain}
           </span>
         )}
-        {data?.model && <span style={{ ...muted, fontSize: 12, marginLeft: "auto" }}>model: {data.model}</span>}
       </div>
 
       {showAbout && (
@@ -212,6 +217,31 @@ export default function HypothesisAgentPanel({
       {(plan?.hypotheses || []).some((_, i) => critiqueByIndex[i]) && <ScoreLegend />}
 
       {(plan?.hypotheses || []).length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "4px 0 12px" }}>
+          <div style={{
+            display: "inline-flex", border: "1px solid var(--border,#e5e7eb)",
+            borderRadius: 8, overflow: "hidden",
+          }}>
+            {[["grid", "Side by side"], ["sequential", "One at a time"]].map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setHypLayout(id)}
+                style={{
+                  border: "none", cursor: "pointer", padding: "6px 12px", fontSize: 12.5,
+                  fontWeight: 600, fontFamily: "inherit",
+                  background: hypLayout === id ? "var(--accent,#6c5ce7)" : "transparent",
+                  color: hypLayout === id ? "#fff" : "var(--muted,#667)",
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(plan?.hypotheses || []).length > 0 && hypLayout === "grid" && (
         <div style={{
           display: "grid", gap: 16, marginTop: 4,
           gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))",
@@ -233,6 +263,87 @@ export default function HypothesisAgentPanel({
           ))}
         </div>
       )}
+
+      {(plan?.hypotheses || []).length > 0 && hypLayout === "sequential" && (() => {
+        const total = plan.hypotheses.length;
+        const cursor = Math.min(hypCursor, total - 1);
+        const h = plan.hypotheses[cursor];
+        return (
+          <div style={{ marginTop: 4 }}>
+            <div style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              marginBottom: 10, width: "100%",
+            }}>
+              <button
+                type="button"
+                onClick={() => setHypCursor((c) => Math.max(0, Math.min(c, total - 1) - 1))}
+                disabled={cursor === 0}
+                style={{
+                  border: "1px solid var(--border,#e5e7eb)", borderRadius: 7, background: "none",
+                  padding: "6px 12px", fontSize: 13, fontWeight: 600, fontFamily: "inherit",
+                  cursor: cursor === 0 ? "default" : "pointer", opacity: cursor === 0 ? 0.4 : 1,
+                }}
+              >
+                ← Prev
+              </button>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ ...muted, fontSize: 12.5 }}>
+                  Hypothesis {cursor + 1} of {total}
+                </span>
+                <div style={{ display: "flex", gap: 5 }}>
+                  {plan.hypotheses.map((_, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => setHypCursor(i)}
+                      aria-label={`Go to hypothesis ${i + 1}`}
+                      title={`H${i + 1}${i === championIndex ? " (champion)" : ""}`}
+                      style={{
+                        width: 8, height: 8, borderRadius: "50%", border: "none", padding: 0,
+                        cursor: "pointer",
+                        background: i === cursor ? ACCENTS[i % ACCENTS.length] : "var(--border,#d8dbe6)",
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setHypCursor((c) => Math.min(total - 1, Math.min(c, total - 1) + 1))}
+                disabled={cursor === total - 1}
+                style={{
+                  border: "1px solid var(--border,#e5e7eb)", borderRadius: 7, background: "none",
+                  padding: "6px 12px", fontSize: 13, fontWeight: 600, fontFamily: "inherit",
+                  cursor: cursor === total - 1 ? "default" : "pointer",
+                  opacity: cursor === total - 1 ? 0.4 : 1,
+                }}
+              >
+                Next →
+              </button>
+            </div>
+            {/* Sequential mode's whole point is legibility with the extra
+                room a single card gets vs. the grid -- no artificial width
+                cap here (unlike READING_WIDTH-capped prose elsewhere in
+                this file); this fills whatever the workspace column
+                actually gives it. */}
+            <div style={{ width: "100%" }}>
+              <ReadOnlyHypothesisCard
+                key={cursor}
+                h={h}
+                i={cursor}
+                papers={papers}
+                extractions={extractions}
+                critique={critiqueByIndex[cursor]}
+                noveltyCheck={noveltyChecks[cursor]}
+                isChampion={cursor === championIndex}
+                isRunnerUp={cursor === runnerUpIndex}
+                accent={ACCENTS[cursor % ACCENTS.length]}
+                citeNum={citeNum}
+              />
+            </div>
+          </div>
+        );
+      })()}
 
       {plan && (plan.hypotheses || []).length === 0 && (
         <div style={muted}>No hypotheses generated for this run.</div>

@@ -33,6 +33,14 @@ class Settings:
     # later without touching any code — same OpenAI-compatible shape either way.
     openrouter_base_url: str = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
+    # The Home page's "Discuss with Sift AI" lite agent (api/routes.py's
+    # /api/quick-ask, "projects" scope) — an open-weight model via OpenRouter
+    # by design, so moving it to a self-hosted GPU later is just changing
+    # openrouter_base_url above plus this one model id, nothing else.
+    # Verify the exact current slug on openrouter.ai/models before relying on
+    # it — model ids there get renamed/retired over time.
+    quick_ask_model: str = os.environ.get("QUICK_ASK_MODEL", "deepseek/deepseek-chat")
+
     # ── Pipeline routing & limits ────────────────────────────────────────
     # Defaults live in the version-controlled core/model_policy.py (so they
     # survive .env resets); .env vars below override them per-environment.

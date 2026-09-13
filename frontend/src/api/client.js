@@ -255,6 +255,20 @@ function streamRun(topic, apiKey, model, mode, onEvent, projectId) {
 export const api = {
   createRunStream: streamRun,
 
+  // Home page's "Discuss with Sift AI" box -- one cheap LLM call, not the
+  // Literature Review pipeline (see api/quick-ask on the backend). No run
+  // is created and nothing is filed under a project. scope="projects" also
+  // searches the user's own projects/notes/runs and does a brief live web
+  // lookup, then answers on the open-weight model instead of Gemini.
+  quickAsk: (question, { apiKey, scope } = {}) =>
+    request("/api/quick-ask", { question, api_key: apiKey || undefined, scope: scope || "general" }),
+
+  // Last few days of this user's Home-page quick-ask searches (auto-expires
+  // on the backend -- see core/quick_ask_history.py), so they can reopen one
+  // instead of retyping it.
+  quickAskHistory: () => getJSON("/api/quick-ask/history"),
+  deleteQuickAskHistory: (id) => del(`/api/quick-ask/history/${id}`),
+
   // Studio-only entry: a run with no search — just a place to upload your
   // own PDFs/DOCX/PPTX and use Studio (chat/report/deck) directly, without
   // the reformulate -> search -> filter -> write pipeline.
@@ -668,8 +682,18 @@ export const api = {
   getHypothesisRun: (hypRunId) =>
     getJSON(`/api/hypothesis/runs/${hypRunId}`),
 
-  listHypothesisRuns: (sourceRunId) =>
-    getJSON("/api/hypothesis/runs" + (sourceRunId ? "?source_run_id=" + encodeURIComponent(sourceRunId) : "")),
+  // `project_id` is the sidebar/project-picker filter (Flow B in the
+  // dashboard-upgrade architecture doc): every hypothesis run ever
+  // generated from ANY Lit Review session filed under that project, each
+  // one flagged with `staleness` by the backend. `sourceRunId` narrows to
+  // one exact Sift session instead, when the caller already knows which.
+  // Pass at most one of the two.
+  listHypothesisRuns: (sourceRunId, projectId) =>
+    getJSON("/api/hypothesis/runs" + (
+      projectId ? "?project_id=" + encodeURIComponent(projectId)
+      : sourceRunId ? "?source_run_id=" + encodeURIComponent(sourceRunId)
+      : ""
+    )),
 
   // User-supplied results: the human-in-the-loop counterpart to the
   // automatic literature-only plausibility check — paste in what actually
@@ -722,4 +746,81 @@ export const api = {
     fetch(BASE + "/api/sessions/" + id, { method: "DELETE", headers: await authHeaders() }).then((r) => r.json()),
   deleteAllSessions: async () =>
     fetch(BASE + "/api/sessions", { method: "DELETE", headers: await authHeaders() }).then((r) => r.json()),
+  // ── Data Analysis Agent (Phase 1a — manual plotting, no LLM calls) ──────
+  // See data_analysis_agent_architecture.md: upload a CSV/XLSX, get a
+  // profile back, pick columns + chart type by hand, render. Standalone by
+  // default — project_id is optional, same as Sift/Hypothesis Agent runs.
+  uploadDataset: (file, projectId) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    return postForm(`/api/data-analysis/upload${qs}`, fd);
+  },
+
+  listDataAnalysisRuns: (projectId) =>
+    getJSON(`/api/data-analysis/runs${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`),
+
+  getDataAnalysisRun: (runId) => getJSON(`/api/data-analysis/runs/${runId}`),
+
+  // spec: {chart_type, x, y, group, agg, title} — see core/plot_models.py's
+  // PlotSpec. Renders through the deterministic matplotlib renderer, never
+  // executed as code.
+  renderPlot: (runId, spec) => request(`/api/data-analysis/runs/${runId}/render`, spec),
+
+  deleteDataAnalysisRun: (runId) => del(`/api/data-analysis/runs/${runId}`),
+
+  // Remove one rendered figure from a run (keeps the run and its other
+  // figures) -- filename is either the PNG or SVG name from that figure's
+  // png_url/svg_url, both resolve to the same stored figure server-side.
+  deleteFigure: (runId, filename) => del(`/api/data-analysis/runs/${runId}/figures/${filename}`),
+
+  // Standalone pandas+matplotlib .py script that reproduces one figure --
+  // the "use real matplotlib" escape hatch for fonts/axes/anything the
+  // render form doesn't expose (core/script_export.py).
+  getFigureScript: async (runId, filename) => {
+    const res = await fetch(`${BASE}/api/data-analysis/runs/${runId}/figures/${filename}/script`, {
+      headers: await authHeaders(),
+    });
+    if (!res.ok) throw new Error(`Failed to get script (${res.status})`);
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  },
+
+  // Raw column data for the interactive on-screen chart (GET, not a
+  // render) -- y is one or more columns to overlay in one chart.
+  getDataAnalysisSeries: async (runId, xCol, yCols) => {
+    const params = new URLSearchParams();
+    if (xCol) params.set("x", xCol);
+    (yCols || []).forEach((c) => params.append("y", c));
+    return getJSON(`/api/data-analysis/runs/${runId}/series?${params.toString()}`);
+  },
+
+  // Descriptive statistics (mean/median/std/quartiles/skew, or top values
+  // for categorical columns) for the Statistics panel -- columns=[] (the
+  // default) means every column in the dataset.
+  getDataAnalysisStats: async (runId, columns) => {
+    const params = new URLSearchParams();
+    (columns || []).forEach((c) => params.append("columns", c));
+    const qs = params.toString();
+    return getJSON(`/api/data-analysis/runs/${runId}/stats${qs ? `?${qs}` : ""}`);
+  },
+
+  // Link (or unlink, with projectId=null) an already-uploaded run to a
+  // project after the fact -- lets a researcher start standalone and
+  // decide later, mirroring assignRunProject for Sift/Hypothesis runs.
+  assignDataAnalysisRunProject: (runId, projectId) =>
+    request(`/api/data-analysis/runs/${runId}/project`, { project_id: projectId || null }),
+
+  // The figures route requires auth, so a plain <img src> can't reach it —
+  // same fetch-blob-then-createObjectURL pattern as downloadExperimentsExport
+  // above, just returning the URL to display inline instead of saving it.
+  getFigureUrl: async (runId, filename) => {
+    const res = await fetch(`${BASE}/api/data-analysis/runs/${runId}/figures/${filename}`, {
+      headers: await authHeaders(),
+    });
+    if (!res.ok) throw new Error(`Failed to load figure (${res.status})`);
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  },
+
 };

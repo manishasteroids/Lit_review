@@ -61,12 +61,12 @@ export function AuthButtons({ extraItems = [] }) {
 }
  
 /** Display name: Google full name -> metadata name -> email local-part. */
-function displayName(user) {
+export function displayName(user) {
   const m = user?.user_metadata || {};
   return m.full_name || m.name || (user?.email || "").split("@")[0] || "Account";
 }
  
-function initials(name) {
+export function initials(name) {
   const parts = String(name).trim().split(/\s+/).slice(0, 2);
   return parts.map((p) => p[0]?.toUpperCase() || "").join("") || "?";
 }
@@ -140,7 +140,7 @@ function AccountMenu({ session, extraItems }) {
   );
 }
  
-function Avatar({ name, url, size = 26 }) {
+export function Avatar({ name, url, size = 26 }) {
   if (url) {
     return <img src={url} alt="" style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }} />;
   }

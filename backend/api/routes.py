@@ -5,6 +5,7 @@ frontend's pipeline rail can light up node by node as each call returns.
 import asyncio
 import base64
 import json
+import logging
 import re
 from datetime import datetime, timezone
  
@@ -22,6 +23,7 @@ from core.usage import get_usage
 from pipeline.orchestrator import RUNS, RunState, SiftPipeline
  
 router = APIRouter(prefix="/api")
+log = logging.getLogger("sift.routes")
  
  
 def get_run(run_id: str, user_id: str):
@@ -69,6 +71,16 @@ class CreateRunBody(BaseModel):
     model: str | None = None
     mode: str | None = None      # lite | medium | deep (drives papers + models + depth)
     project_id: str | None = None  # optionally file this run under a project
+
+
+class QuickAskBody(BaseModel):
+    question: str
+    api_key: str | None = None
+    # "general" -- plain quick answer, cheap Gemini model, no user data touched.
+    # "projects" -- also searches the user's own projects/notes/runs and does
+    # a brief live web-search lookup, then answers on the open-weight model
+    # (see settings.quick_ask_model) instead of Gemini.
+    scope: str = "general"
 
 
 class FilterBody(BaseModel):
@@ -1094,6 +1106,115 @@ CHAT_FORMAT = (
 )
 
 
+def _quick_ask_web_leg(question: str) -> str:
+    """Brief live web lookup for the "projects" scope of quick-ask, using
+    Claude's server-side web_search tool (Anthropic runs the search itself
+    and returns the finished text -- no client-side tool loop needed here).
+    Best-effort: any failure (no key, tool unavailable, etc.) just means no
+    web context gets added, not a broken answer. run_id=None like the rest
+    of quick-ask, so this call's cost isn't in the per-session usage ledger."""
+    if not settings.anthropic_api_key:
+        return ""
+    try:
+        web_llm = LLMClient(model="claude-haiku-4-5-20251001", run_id=None, stage="quick_ask_web")
+        return web_llm.call(
+            user_text=(
+                "Briefly research this and summarize the most relevant, up-to-date "
+                f"findings in 3-5 sentences: {question}"
+            ),
+            system="You are doing a quick web lookup for someone else's answer. Be concise and factual.",
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+            max_tokens=500,
+        ).strip()
+    except Exception as e:
+        log.warning("quick-ask web-search leg failed (continuing without it): %s", e)
+        return ""
+
+
+@router.post("/quick-ask")
+def quick_ask(body: QuickAskBody, user_id: str = Depends(require_user)):
+    """The Home page's 'Discuss with Sift AI' box.
+
+    scope="general": a single cheap LLM call (Gemini), grounded only in a
+    static description of this product (core/product_info.py) so it doesn't
+    hallucinate that "Sift"/"Hypothesis Agent" don't exist.
+
+    scope="projects": also searches the signed-in user's own projects/notes/
+    runs (core/project_search.py) and does a brief live web-search lookup,
+    then answers on settings.quick_ask_model -- an open-weight model via
+    OpenRouter today, swappable to a self-hosted endpoint later by changing
+    only openrouter_base_url + this model id (see core/llm_client.py).
+
+    Neither scope is the Literature Review pipeline (reformulate -> search ->
+    extract -> synthesize) -- no run/session is created and nothing is filed
+    under a project; for that, the user runs a real Literature Review."""
+    from core.product_info import PRODUCT_SYSTEM_PROMPT
+
+    q = (body.question or "").strip()
+    if not q:
+        raise HTTPException(400, "Question is required.")
+
+    context_blocks = []
+    sources = []
+
+    if body.scope == "projects":
+        from core.project_search import search_user_projects
+        hits = search_user_projects(user_id, q, limit=6)
+        if hits:
+            lines = [f"- [{h['project_name']}] {h['title']}: {h['snippet']}" for h in hits if h.get("snippet") or h["type"] == "project"]
+            if lines:
+                context_blocks.append("Matches from the user's own projects:\n" + "\n".join(lines))
+            sources = [
+                {"type": h["type"], "project_id": h["project_id"], "project_name": h["project_name"], "title": h["title"]}
+                for h in hits
+            ]
+
+        if sources:
+            context_blocks.append(
+                "The project matches above are already shown to the user as clickable "
+                "links under your answer -- just confirm what you found by name (e.g. "
+                "the project's title) so they know which link to click. Do not tell them "
+                "to search their own file system, Git, or cloud storage for it -- you "
+                "already found it in their account."
+            )
+
+        web_text = _quick_ask_web_leg(q)
+        if web_text:
+            context_blocks.append("Web search findings:\n" + web_text)
+
+    model = settings.quick_ask_model if body.scope == "projects" else (settings.gemini_model or "gemini-2.5-flash")
+    llm = LLMClient(api_key=body.api_key, model=model, run_id=None, stage="quick_ask")
+    system = PRODUCT_SYSTEM_PROMPT
+    if context_blocks:
+        system += "\n\n" + "\n\n".join(context_blocks)
+
+    try:
+        answer = llm.call(user_text=q, system=system, max_tokens=700)
+    except Exception as e:
+        raise HTTPException(502, f"Couldn't get an answer: {e}")
+
+    from core.quick_ask_history import record_quick_ask
+    record_quick_ask(user_id, body.scope, q, answer, sources)
+
+    return {"answer": answer, "model": model, "sources": sources}
+
+
+@router.get("/quick-ask/history")
+def quick_ask_history(user_id: str = Depends(require_user)):
+    """Last few days of this user's Home-page quick-ask searches, newest
+    first, so they can reopen one instead of retyping it. Auto-expires after
+    a few days (core/quick_ask_history.py) -- not a permanent chat log."""
+    from core.quick_ask_history import list_recent
+    return {"items": list_recent(user_id)}
+
+
+@router.delete("/quick-ask/history/{entry_id}")
+def quick_ask_history_delete(entry_id: str, user_id: str = Depends(require_user)):
+    from core.quick_ask_history import delete_entry
+    delete_entry(user_id, entry_id)
+    return {"ok": True}
+
+
 @router.post("/runs/{run_id}/chat")
 def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require_user)):
     """Answer questions about a single paper, grounded in what we know about it
@@ -1965,7 +2086,7 @@ def list_project_share_links(project_id: str, user_id: str = Depends(require_use
     from core.project_sharing import list_share_links, is_project_owner
     if not is_project_owner(project_id, user_id):
         raise HTTPException(404, "Project not found.")
-    return {"share_links": list_share_links(project_id)}
+    return {"links": list_share_links(project_id)}
 
 
 @router.post("/projects/{project_id}/share-links")

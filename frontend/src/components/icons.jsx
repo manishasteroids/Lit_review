@@ -43,6 +43,9 @@ function Ic({ name, size = 16, color, className, style }) {
     case "square": return <svg {...c}><rect x="4" y="4" width="16" height="16" rx="2" /></svg>;
     case "circle-shape": return <svg {...c}><circle cx="12" cy="12" r="8.5" /></svg>;
     case "lightbulb": return <svg {...c}><path d="M9 18h6" /><path d="M10 22h4" /><path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.3 1 2.1V17h6v-.2c0-.8.4-1.6 1-2.1A7 7 0 0 0 12 2z" /></svg>;
+    case "maximize": return <svg {...c}><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3" /></svg>;
+    case "external-link": return <svg {...c}><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>;
+    case "sigma": return <svg {...c}><path d="M18 6V4H6l6 8-6 8h12v-2" /></svg>;
     default: return <svg {...c}><circle cx="12" cy="12" r="9" /></svg>;
   }
 }
@@ -83,3 +86,6 @@ export const TypeIcon = (p) => <Ic name="type" {...p} />;
 export const Square = (p) => <Ic name="square" {...p} />;
 export const CircleShape = (p) => <Ic name="circle-shape" {...p} />;
 export const Lightbulb = (p) => <Ic name="lightbulb" {...p} />;
+export const Maximize = (p) => <Ic name="maximize" {...p} />;
+export const ExternalLink = (p) => <Ic name="external-link" {...p} />;
+export const Sigma = (p) => <Ic name="sigma" {...p} />;

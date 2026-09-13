@@ -136,7 +136,7 @@ function TopBar({ page, setPage, login }) {
       <div className="lp-bar-in">
         <div className="lp-logo" onClick={() => setPage("home")}>
           <LogoMark />
-          <span>Sift</span>
+          <span>Orcus Intelligence Lab</span>
         </div>
 
         <nav className="lp-nav">
@@ -462,7 +462,7 @@ function HeroVisual() {
         {/* pipeline hub */}
         <circle cx={hub.cx} cy={hub.cy} r="46" fill="#fff" stroke="#5b4ff0" strokeWidth="1.6" />
         <circle className="lp-hv-pulse" cx={hub.cx} cy={hub.cy} r="46" fill="#5b4ff0" />
-        <text x={hub.cx} y={hub.cy - 4} textAnchor="middle" className="lp-hv-hub-t">Sift</text>
+        <text x={hub.cx} y={hub.cy - 4} textAnchor="middle" className="lp-hv-hub-t">Orcus</text>
         <text x={hub.cx} y={hub.cy + 13} textAnchor="middle" className="lp-hv-hub-s">agent pipeline</text>
 
         {/* six pipeline-stage nodes orbiting the hub, each breathing gently
@@ -604,7 +604,7 @@ function SiteFooter({ setPage }) {
         <div>
           <div className="lp-logo" style={{ cursor: setPage ? "pointer" : "default" }}
             onClick={() => setPage?.("home")}>
-            <LogoMark /><span>Sift</span>
+            <LogoMark /><span>Orcus Intelligence Lab</span>
           </div>
           <div className="lp-foot-tag">Interactive Scientific AI Research Assistant</div>
           {setPage && (
@@ -638,7 +638,7 @@ function SiteFooter({ setPage }) {
         </div>
       </div>
       <div className="lp-foot-legal">
-        © {new Date().getFullYear()} Sift · Built for researchers
+        © {new Date().getFullYear()} Orcus Intelligence Lab · Built for researchers
       </div>
     </footer>
   );
@@ -1143,10 +1143,110 @@ const WHY_SIFT = [
   { t: "Move at research speed", d: "We ship weekly. Ideas go from a conversation to something a researcher can use in days." },
 ];
 
+// Open roles — hardcoded for now; the plan is to move this to an admin
+// dashboard (so vacancies/blog posts can be added without a code change),
+// but until that exists, adding a role here is a one-line edit to this array.
+const OPEN_ROLES = [
+  {
+    id: "agentic-ai-research-intern",
+    title: "Agentic AI Research Intern (Literature Review & Discovery Systems)",
+    meta: "Internship · Remote",
+    salary: "NPR 20,000 – 30,000 / month",
+    contract: "3-month initial contract",
+    contractNote: "Possibility of converting to a full-time role with startup equity after the initial contract.",
+    applyEmail: "hr@orcusintelligencelab.com",
+    blurb: "At Orcus Intelligence Labs, we are building next-generation multi-agent systems " +
+      "designed to automate academic literature discovery, semantic synthesis, and hypothesis " +
+      "generation. We are seeking a fast-learning, engineering-minded intern to work at the " +
+      "intersection of agentic workflows and production full-stack systems. You will play a " +
+      "direct role in turning experimental agent architectures into reliable research tools.",
+    sections: [
+      {
+        heading: "Key responsibilities",
+        items: [
+          "Agentic workflows & data pipelines — build and optimize automated pipelines for " +
+            "scientific paper extraction, document parsing, chunking, and semantic embedding; " +
+            "assist in designing directed acyclic graph (DAG) agent structures for literature " +
+            "mapping and hypothesis evaluation.",
+          "Full-stack tooling & dashboards — develop functional, lightweight web portals and " +
+            "interactive research interfaces (Next.js/TypeScript/React) allowing users to " +
+            "query, trace, and interact with agent reasoning paths and paper graphs.",
+          "Evaluation & benchmarking — design evaluation frameworks to measure output " +
+            "accuracy, hallucination rates, and semantic relevance across paper summarizations " +
+            "and generated hypotheses.",
+        ],
+      },
+      {
+        heading: "Required qualifications",
+        items: [
+          "Strong proficiency in Python (async programming, API integration, data " +
+            "manipulation) and fluency in TypeScript/JavaScript or Go.",
+          "Hands-on experience working with LLM APIs (OpenAI, Anthropic, or open-source " +
+            "models) and familiarity with core RAG concepts (vector databases, embeddings, " +
+            "chunking strategies).",
+          "Solid foundation in Git, REST APIs, and core computer science fundamentals (data " +
+            "structures and graph representations).",
+        ],
+      },
+      {
+        heading: "Preferred qualifications",
+        items: [
+          "Experience with agentic frameworks (e.g., LangChain, LlamaIndex, AutoGen, or " +
+            "custom graph-based agents) and function calling.",
+          "Experience with document processing libraries (e.g., PyMuPDF, Unstructured, OCR " +
+            "tools) and web scraping tools.",
+          "Familiarity with vector search engines (Chroma, Qdrant, Pinecone, or PGVector) and " +
+            "relational databases.",
+          "Familiarity with how CI/CD pipelines work.",
+        ],
+      },
+    ],
+    notes: "Please submit your CV and cover letter in English to hr@orcusintelligencelab.com. " +
+      "If you have a GitHub profile, personal portfolio, or previous projects involving LLMs " +
+      "or agentic systems, please include those links.",
+  },
+];
+
+function RoleCard({ role }) {
+  const applyEmail = role.applyEmail || CONTACT_EMAIL;
+  const subject = encodeURIComponent(`Application: ${role.title}`);
+  const body = encodeURIComponent(
+    `Hi Orcus Intelligence Lab team,\n\nI'm interested in the ${role.title} role. My CV and cover letter are attached.\n\n`
+  );
+  return (
+    <div className="lp-role-card">
+      <div className="lp-role-head">
+        <div>
+          <div className="lp-role-title">{role.title}</div>
+          <div className="lp-role-meta">
+            {role.meta}{role.salary ? ` · ${role.salary}` : ""}{role.contract ? ` · ${role.contract}` : ""}
+          </div>
+          {role.contractNote && <div className="lp-role-meta">{role.contractNote}</div>}
+        </div>
+        {applyEmail && (
+          <a className="lp-cta" href={`mailto:${applyEmail}?subject=${subject}&body=${body}`}>
+            Apply →
+          </a>
+        )}
+      </div>
+      {role.blurb && <p className="lp-role-blurb">{role.blurb}</p>}
+      {role.sections.map((s) => (
+        <div key={s.heading} className="lp-role-section">
+          <div className="lp-role-section-h">{s.heading}</div>
+          <ul className="lp-role-list">
+            {s.items.map((it, i) => <li key={i}>{it}</li>)}
+          </ul>
+        </div>
+      ))}
+      {role.notes && <p className="lp-role-notes">{role.notes}</p>}
+    </div>
+  );
+}
+
 function CareersPage() {
   return (
     <section className="lp-pricing">
-      <h1 className="lp-p-title">Careers at Sift</h1>
+      <h1 className="lp-p-title">Careers at Orcus Intelligence Lab</h1>
       <p className="lp-p-sub">
         We're building the tools we wish existed when we were doing research ourselves —
         and we're just getting started.
@@ -1163,16 +1263,22 @@ function CareersPage() {
 
       <div className="lp-openroles">
         <h2 className="lp-cat" style={{ textAlign: "left" }}>Open roles</h2>
-        <div className="lp-empty-card">
-          <p>
-            No open roles posted right now — Sift is a small team and we hire deliberately.
-            If you're a researcher or engineer who cares about making science move faster,
-            we'd still like to hear from you.
-          </p>
-          {CONTACT_EMAIL
-            ? <a className="lp-cta" href={`mailto:${CONTACT_EMAIL}?subject=Interested in Sift`}>Say hello →</a>
-            : <span className="lp-pub-soon">Set VITE_CONTACT_EMAIL to enable this link</span>}
-        </div>
+        {OPEN_ROLES.length > 0 ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+            {OPEN_ROLES.map((r) => <RoleCard role={r} key={r.id} />)}
+          </div>
+        ) : (
+          <div className="lp-empty-card">
+            <p>
+              No open roles posted right now — Orcus Intelligence Lab is a small team and we hire deliberately.
+              If you're a researcher or engineer who cares about making science move faster,
+              we'd still like to hear from you.
+            </p>
+            {CONTACT_EMAIL
+              ? <a className="lp-cta" href={`mailto:${CONTACT_EMAIL}?subject=Interested in Orcus Intelligence Lab`}>Say hello →</a>
+              : <span className="lp-pub-soon">Set VITE_CONTACT_EMAIL to enable this link</span>}
+          </div>
+        )}
       </div>
     </section>
   );
@@ -1657,6 +1763,22 @@ function LandingStyles() {
         text-align: left; background: var(--lp-bg2); }
       .lp-empty-card p { color: var(--lp-muted); font-size: 14.5px; line-height: 1.65; margin: 0 0 18px; }
       .lp-contact-row { display: flex; gap: 12px; flex-wrap: wrap; }
+
+      .lp-role-card { border: 1px solid var(--lp-line); border-radius: 14px; padding: 26px 28px;
+        text-align: left; background: #fff; }
+      .lp-role-head { display: flex; align-items: flex-start; justify-content: space-between;
+        gap: 16px; flex-wrap: wrap; }
+      .lp-role-title { font-size: 19px; font-weight: 700; color: var(--lp-ink); }
+      .lp-role-meta { font-size: 13px; color: var(--lp-muted2); margin-top: 3px; }
+      .lp-role-blurb { color: var(--lp-muted); font-size: 14.5px; line-height: 1.65; margin: 16px 0 0; }
+      .lp-role-section { margin-top: 18px; }
+      .lp-role-section-h { font-size: 13px; font-weight: 700; color: var(--lp-ink);
+        text-transform: uppercase; letter-spacing: .03em; margin-bottom: 8px; }
+      .lp-role-list { margin: 0; padding-left: 20px; color: var(--lp-muted); font-size: 14px;
+        line-height: 1.6; }
+      .lp-role-list li { margin-bottom: 8px; }
+      .lp-role-list li:last-child { margin-bottom: 0; }
+      .lp-role-notes { margin: 18px 0 0; font-size: 13px; color: var(--lp-muted2); font-style: italic; }
     `}</style>
   );
 }
