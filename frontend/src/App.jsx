@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { api } from "./api/client.js";
-import { ensureAuth, AuthButtons, useSession } from "./Auth.jsx";
+import { ensureAuth, useSession } from "./Auth.jsx";
 import { authEnabled } from "./supabase.js";
 
 import PipelineRail from "./components/PipelineRail.jsx";
@@ -19,6 +19,11 @@ import ProfileModal from "./components/ProfileModal.jsx";
 import ProjectsModal from "./components/ProjectsModal.jsx";
 import ExportBar from "./components/ExportBar.jsx";
 import StudioView from "./components/StudioView.jsx";
+import Sidebar from "./components/Sidebar.jsx";
+import HomePage from "./components/HomePage.jsx";
+import PhysicalAIView from "./components/PhysicalAIView.jsx";
+import DataAnalysisPlaceholder from "./components/DataAnalysisPlaceholder.jsx";
+import DataAnalysisAgentView from "./components/DataAnalysisAgentView.jsx";
 import { useConfirm } from "./components/ConfirmModal.jsx";
 import {
   RotateCw, AlertTriangle, Sparkles, PenTool,
@@ -54,6 +59,18 @@ const TOOLS = [
   ["methods", FlaskConical, "Methods"],
   ["hypothesis", Lightbulb, "Hypothesis"],
   ["usage", Coins, "Token usage"],
+];
+
+// The standalone Hypothesis workspace (Flow B, sidebar's "Hypothesis
+// Generation" entry) gets its own small Tools list rather than Sift's full
+// one -- only the companion views that make sense while reading/critiquing
+// hypotheses for an already-completed Literature Review. Same underlying
+// components as Sift's own tabs (same session data), just a narrower menu.
+const HYP_TOOLS = [
+  ["hypothesis", Lightbulb, "Hypothesis"],
+  ["review", BookOpen, "Review"],
+  ["sources", Layers, "Sources"],
+  ["graph", Network, "Knowledge graph"],
 ];
 
 // ── History helpers ──────────────────────────────────────────────
@@ -197,6 +214,21 @@ export default function App() {
   const [pickerNewName, setPickerNewName] = useState("");
   const [pickerBusy, setPickerBusy] = useState(false);
 
+  // Dashboard shell (architecture doc: claude/architecture-dashboard-upgrade.md,
+  // Phase 1). "home" is the post-login landing page; "workspace" is the
+  // existing Sift single-page layout below, unchanged; the other two are
+  // placeholders per the doc's phased plan.
+  const [view, setView] = useState("home");
+  const [dataAnalysisWhich, setDataAnalysisWhich] = useState("dataviz");
+  // Home's "Discuss with Sift AI" box sets topic + flips this, so the actual
+  // runStart() call happens once we've switched into the workspace view
+  // (avoids calling it against stale/mid-transition state).
+  const [autoStartTopic, setAutoStartTopic] = useState(false);
+  // "create" when the sidebar's "Create new project" button opened
+  // ProjectsModal (so it lands straight in the create-project form); null
+  // for the normal "browse my projects" open.
+  const [projectsInitialMode, setProjectsInitialMode] = useState(null);
+
   const refreshProjects = useCallback(() => {
     if (signedOut) { setProjects([]); return; }
     api.listProjects().then((d) => setProjects(d.projects || [])).catch(() => {});
@@ -286,6 +318,30 @@ export default function App() {
   // instead) since it lives in its own table.
   const [hypothesisRun, setHypothesisRun] = useState(null);
   const [hypothesisBusy, setHypothesisBusy] = useState(false);
+  // Which companion view is open inside the standalone Hypothesis workspace
+  // (Flow B) -- "hypothesis" | "review" | "sources" | "graph". Reset to
+  // "hypothesis" every time a project/run is (re)opened via that flow so a
+  // stale tab from a previous project never lingers.
+  const [hypTab, setHypTab] = useState("hypothesis");
+  // Every hypothesis run ever generated for the CURRENT project (not just
+  // the current Sift session) -- the Flow-B sidebar's own run history, so
+  // switching projects/runs doesn't mean leaving the page (see
+  // core/hypothesis_db.py's list_hypothesis_runs, project_id filter).
+  const [hypProjectRuns, setHypProjectRuns] = useState([]);
+  // When set, the hypothesis-run-loader effect below shows THIS exact run
+  // instead of "the latest run for the current session" -- lets the
+  // sidebar's "Recent hypotheses" list open any of the last few runs
+  // (not just whichever happens to be newest) without them all collapsing
+  // to the same result. Cleared whenever a fresh pipeline run starts or a
+  // new project/run is opened, so "latest" is the default everywhere else.
+  const [pinnedHypRunId, setPinnedHypRunId] = useState(null);
+  // Inline "Change project" switcher in the Hypothesis workspace sidebar --
+  // a dropdown right there instead of navigating away to the full picker
+  // page (which meant Home -> Hypothesis Generation again to get back in).
+  const [switchProjectOpen, setSwitchProjectOpen] = useState(false);
+  const [switchProjectId, setSwitchProjectId] = useState("");
+  const [switchProjectBusy, setSwitchProjectBusy] = useState(false);
+  const [switchProjectErr, setSwitchProjectErr] = useState(null);
   const [hypothesisError, setHypothesisError] = useState(null);
   // Live progress for the Hypothesis pipeline's own rail (HypothesisPipelineRail) —
   // hypothesisStage is the stage currently in flight ("fetch"|"designer"|"critic"),
@@ -352,10 +408,13 @@ export default function App() {
     api.getModes().then((r) => setModes(r.modes || [])).catch(() => {});
   }, []);
 
-  // Load the most recent Hypothesis Agent run for this Sift session, if any
-  // — its own table (core/hypothesis_db.py), so it isn't in the session's
-  // own `data` blob and has to be fetched separately whenever the active
-  // run changes (fresh run, restored session, etc).
+  // Load a Hypothesis Agent run for this Sift session, if any — its own
+  // table (core/hypothesis_db.py), so it isn't in the session's own `data`
+  // blob and has to be fetched separately whenever the active run changes
+  // (fresh run, restored session, etc). Normally shows the LATEST run for
+  // the session; when pinnedHypRunId is set (the sidebar's "Recent
+  // hypotheses" list), shows that exact run instead, so opening an older
+  // one doesn't just collapse back to the newest.
   useEffect(() => {
     if (!runId || !isDone) { setHypothesisRun(null); setHypothesisStageDone({}); return; }
     // Don't clobber a live run's rail with a stale saved snapshot — this
@@ -368,34 +427,53 @@ export default function App() {
     // reloads this same data itself once it finishes, via the "done" event.
     if (hypothesisBusy) return;
     let cancelled = false;
-    api.listHypothesisRuns(runId)
-      .then((r) => {
+    const chosen = pinnedHypRunId
+      ? api.getHypothesisRun(pinnedHypRunId)
+      : api.listHypothesisRuns(runId).then((r) => {
+          const latest = (r.runs || [])[0];
+          return latest ? api.getHypothesisRun(latest.id) : null;
+        });
+    chosen
+      .then((full) => {
         if (cancelled) return;
-        const latest = (r.runs || [])[0];
-        if (!latest) { setHypothesisRun(null); setHypothesisStageDone({}); return; }
-        return api.getHypothesisRun(latest.id).then((full) => {
-          if (cancelled) return;
-          setHypothesisRun(full);
-          // A previously-saved run: show its rail as complete for whatever
-          // stages it actually reached — novelty/ranking/meta_review only
-          // ran if the Designer produced hypotheses to check (see pipeline.py).
-          const d = full?.data || {};
-          setHypothesisStageDone({
-            fetch: true, designer: true, critic: true,
-            novelty: !!(d.novelty_checks && Object.keys(d.novelty_checks).length > 0),
-            ranking: !!d.bracket, meta_review: !!d.meta_review,
-            plausibility: !!d.plausibility_check,
-          });
+        if (!full) { setHypothesisRun(null); setHypothesisStageDone({}); return; }
+        setHypothesisRun(full);
+        // A previously-saved run: show its rail as complete for whatever
+        // stages it actually reached — novelty/ranking/meta_review only
+        // ran if the Designer produced hypotheses to check (see pipeline.py).
+        const d = full?.data || {};
+        setHypothesisStageDone({
+          fetch: true, designer: true, critic: true,
+          novelty: !!(d.novelty_checks && Object.keys(d.novelty_checks).length > 0),
+          ranking: !!d.bracket, meta_review: !!d.meta_review,
+          plausibility: !!d.plausibility_check,
         });
       })
       .catch(() => { if (!cancelled) { setHypothesisRun(null); setHypothesisStageDone({}); } });
     return () => { cancelled = true; };
-  }, [runId, isDone, hypothesisBusy]);
+  }, [runId, isDone, hypothesisBusy, pinnedHypRunId]);
+
+  // Flow B's own run history: every hypothesis run ever generated for the
+  // CURRENT PROJECT (across all its Lit Review sessions), so the Hypothesis
+  // workspace's sidebar can offer "switch to a past run" without leaving
+  // the page or going back through the picker. Re-fetches whenever the
+  // displayed run's id changes (a fresh pipeline run just finished, or the
+  // user pinned a different past run) so a brand-new run shows up in the
+  // list right away instead of only after leaving and reopening the page.
+  useEffect(() => {
+    if (view !== "hypothesis-workspace" || !currentProject?.id) { setHypProjectRuns([]); return; }
+    let cancelled = false;
+    api.listHypothesisRuns(undefined, currentProject.id)
+      .then((r) => { if (!cancelled) setHypProjectRuns(r.runs || []); })
+      .catch(() => { if (!cancelled) setHypProjectRuns([]); });
+    return () => { cancelled = true; };
+  }, [view, currentProject?.id, hypothesisRun?.id]);
 
   async function runHypothesisPipeline() {
     if (!runId) return;
     setHypothesisBusy(true); setHypothesisError(null);
     setHypothesisStage(null); setHypothesisStageDone({}); setHypothesisLive({});
+    setPinnedHypRunId(null); // a fresh run always becomes "latest" — never stay pinned to an older one
     try {
       const final = await api.createHypothesisRunStream(runId, apiKey || undefined, model, (e) => {
         if (e.type === "progress") {
@@ -558,19 +636,126 @@ export default function App() {
   // (selectedProject), the header shows its name, and we jump straight to
   // its most recently updated run (or, optionally, a specific one) so
   // opening a project always resumes prior work instead of a blank slate.
-  function openProject(proj, runIdToOpen) {
+  // `landOnTab` (optional) -- Flow A of pipeline-wiring-architecture.md: the
+  // ProjectsModal "Generate Hypotheses from this" button restores the run
+  // like a normal open, but then wants to land on the Hypothesis tab
+  // instead of Review/Sources. restoreSession() sets its own tab once the
+  // session data resolves (Review or Sources, see below) -- awaiting it
+  // here and overriding tab afterward avoids a race where our override
+  // would get stomped by restoreSession's own setTab.
+  async function openProject(proj, runIdToOpen, landOnTab) {
     setShowProjects(false);
     setCurrentProject(proj);
     setSelectedProject(proj.id);
     const target = runIdToOpen || (proj.runs || [])[0]?.id;
-    if (target) restoreSession(target);
-    else { reset(); setTopic(""); }
+    if (target) {
+      await restoreSession(target);
+      if (landOnTab) setTab(landOnTab);
+    } else {
+      reset(); setTopic("");
+    }
   }
 
   function exitProject() {
     setCurrentProject(null);
     setSelectedProject("");
   }
+
+  // Entry point for the sidebar/Home "Hypothesis Generation" action --
+  // lands straight in the Hypothesis workspace with its own project
+  // selector already open, instead of a separate picker page first
+  // (the workspace's "Change project" switcher below does the same
+  // project-with-a-completed-review lookup switchHypothesisProject already
+  // does, so this just starts blank with that control expanded).
+  function openHypothesisWorkspaceBlank() {
+    startNewChat();
+    setHypTab("hypothesis");
+    setPinnedHypRunId(null);
+    setSwitchProjectErr(null);
+    setSwitchProjectId("");
+    setSwitchProjectOpen(true);
+    setView("hypothesis-workspace");
+  }
+
+  // Sidebar's "Recent hypotheses" list: open one exact past run. If it came
+  // from a different Sift session than the one currently loaded, restore
+  // that session first (papers/extractions/sections need to match), THEN
+  // pin the exact run id -- otherwise the auto-loader effect would just
+  // show whatever's "latest" for that session, which isn't necessarily the
+  // one that was clicked when a session has more than one hypothesis run.
+  async function openHypothesisRunEntry(r) {
+    if (busy) return;
+    if (r.source_run_id !== runId) {
+      await restoreSession(r.source_run_id);
+      setHypTab("hypothesis");
+    }
+    setPinnedHypRunId(r.id);
+  }
+
+  // Switch WITHIN the current project to a specific completed review --
+  // previously the workspace always silently used whichever review was
+  // most recently updated (switchHypothesisProject's `latest` pick below),
+  // with no way to deliberately choose a different one of the project's
+  // own reviews without leaving the page. Same restoreSession() mechanism
+  // the plain Sift sidebar's project run list already uses (App.jsx's
+  // main "Project" panel) -- this is that same action, just reachable
+  // from inside the Hypothesis workspace too.
+  async function switchHypothesisRun(run) {
+    if (!run || busy || run.id === runId) return;
+    await restoreSession(run.id);
+    setHypTab("hypothesis");
+    setPinnedHypRunId(null); // new source review -> show ITS latest hypothesis run, not a stale pin
+  }
+
+  // The Hypothesis workspace's inline "Change project" switcher (same
+  // pick-a-project-with-a-completed-review logic as HypothesisPicker.jsx's
+  // own `open()`, just triggered from a dropdown in the sidebar instead of
+  // navigating to a separate page).
+  async function switchHypothesisProject(projectId) {
+    if (!projectId) return;
+    setSwitchProjectErr(null);
+    setSwitchProjectBusy(true);
+    try {
+      const full = await api.getProject(projectId);
+      const doneRuns = (full.runs || []).filter((r) => r.stage === "done");
+      if (doneRuns.length === 0) {
+        setSwitchProjectErr(`"${full.name}" doesn't have a completed Literature Review yet.`);
+        return;
+      }
+      const latest = [...doneRuns].sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""))[0];
+      await openProject(full, latest.id, "hypothesis");
+      setHypTab("hypothesis");
+      setPinnedHypRunId(null); // new project -> show ITS latest, not a pin left over from the last one
+      setSwitchProjectOpen(false);
+    } catch (e) {
+      setSwitchProjectErr(e.message || "Couldn't load that project.");
+    } finally {
+      setSwitchProjectBusy(false);
+    }
+  }
+
+  async function deleteAllData() {
+    const ok = await confirmAsync("Permanently delete all your saved runs? This cannot be undone.",
+      { title: "Delete all data?", danger: true, confirmLabel: "Delete everything" });
+    if (!ok) return;
+    try {
+      await api.deleteAllSessions();
+      reset(); setTopic("");
+      refreshSessions();
+    } catch (e) {
+      setError({ stage: "Delete data", msg: e.message });
+    }
+  }
+
+  // Fires once, after Home's search box has set `topic` and switched the
+  // shell into "workspace" — kicks off the same runStart() the existing
+  // "+ New" flow uses, just triggered from the dashboard Home page instead.
+  useEffect(() => {
+    if (autoStartTopic && view === "workspace" && topic.trim() && !busy) {
+      setAutoStartTopic(false);
+      runStart();
+    }
+  }, [autoStartTopic, view, topic, busy]);
 
   // Restore a session — zero LLM calls
   async function restoreSession(sessionId) {
@@ -1088,14 +1273,364 @@ export default function App() {
 
       {showProjects && (
         <ProjectsModal
-          onClose={() => { setShowProjects(false); refreshProjects(); }}
-          onOpenRun={(id, proj) => openProject(proj, id)}
-          onOpenProject={(proj) => openProject(proj)}
+          initialMode={projectsInitialMode}
+          onClose={() => { setShowProjects(false); setProjectsInitialMode(null); refreshProjects(); }}
+          onOpenRun={(id, proj) => { openProject(proj, id); setView("workspace"); }}
+          onGenerateHypotheses={(id, proj) => { openProject(proj, id, "hypothesis"); setHypTab("hypothesis"); setPinnedHypRunId(null); setSwitchProjectOpen(false); setView("hypothesis-workspace"); }}
+          onOpenProject={(proj) => { openProject(proj); setView("workspace"); }}
         />
       )}
+      <div style={{ display: "flex" }}>
+        {view === "home" && (
+          <Sidebar
+            activeView={view}
+            onNewProject={() => { setProjectsInitialMode("create"); setShowProjects(true); }}
+            onGoHome={() => setView("home")}
+            onLiteratureReview={() => setView("workspace")}
+            onHypothesisGeneration={openHypothesisWorkspaceBlank}
+            onPhysicalAI={() => setView("physical-ai")}
+            onDataAnalysis={(which) => { setDataAnalysisWhich(which); setView("data-analysis"); }}
+            onOpenBilling={() => setView("billing")}
+            onOpenProfile={() => setAccountTab("profile")}
+            onOpenSettings={() => setAccountTab("settings")}
+            onDeleteAllData={deleteAllData}
+          />
+        )}
+        <div style={{ flex: 1, minWidth: 0 }}>
+        {view === "home" && (
+          <HomePage
+            userName={session?.user?.user_metadata?.full_name || session?.user?.email || ""}
+            projects={projects}
+            onStartTopic={(t) => { startNewChat(); setTopic(t); setAutoStartTopic(true); setView("workspace"); }}
+            onOpenLitReview={() => setView("workspace")}
+            onOpenHypothesisPicker={openHypothesisWorkspaceBlank}
+            onOpenDataAnalysis={(which) => { setDataAnalysisWhich(which); setView("data-analysis"); }}
+            onOpenProject={async (proj) => { await openProject(proj); setView("workspace"); }}
+            onStartLiteReview={(t) => { startNewChat(); setMode("lite"); setTopic(t); setAutoStartTopic(true); setView("workspace"); }}
+          />
+        )}
+        {view === "physical-ai" && <PhysicalAIView onBack={() => setView("home")} />}
+        {view === "data-analysis" && (
+          dataAnalysisWhich === "timeseries" ? (
+            <DataAnalysisPlaceholder which={dataAnalysisWhich} onBack={() => setView("home")} />
+          ) : (
+            <DataAnalysisAgentView
+              which={dataAnalysisWhich}
+              projectId={currentProject?.id}
+              projects={projects}
+              onBack={() => setView("home")}
+            />
+          )
+        )}
+        {view === "hypothesis-workspace" && (
+          <div className="sm-wrap wide">
+            <div className="sm-head" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 20 }}>
+              <div>
+                <button
+                  type="button" onClick={() => setView("home")}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 6, background: "none", border: "none",
+                    color: "var(--muted)", fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+                    padding: 0, marginBottom: 10, fontFamily: "inherit",
+                  }}
+                >
+                  <ArrowLeft size={13} /> Home
+                </button>
+                <div className="eyebrow" style={{ marginBottom: 8 }}>Hypothesis workspace</div>
+                <div className="sm-title">
+                  <b>Hypothesis Agent</b>
+                  {currentProject && (
+                    <span style={{ color: "var(--muted)", fontWeight: 400 }}>
+                      {" "}/ {currentProject.name}
+                    </span>
+                  )}
+                </div>
+                <div className="sm-gloss">
+                  {currentProject
+                    ? "Reads this project's Literature Review findings and generates, critiques, and ranks hypotheses."
+                    : "Pick a project with a completed Literature Review on the left to generate, critique, and rank hypotheses from its findings."}
+                </div>
+                {/* Which of the project's (possibly several) completed
+                    reviews is actually feeding this run -- previously only
+                    the project name showed here, so with >1 review in a
+                    project there was no way to tell which one was in use
+                    without opening the project modal and comparing
+                    timestamps. Mirrors `topic`, the same state the search
+                    box itself uses, kept in sync by restoreSession(). */}
+                {currentProject && topic && (
+                  <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 6 }}>
+                    Based on: <span style={{ color: "var(--txt)", fontWeight: 600 }}>{topic}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="grid3">
+              {/* LEFT: a small Tools list scoped to what's useful while
+                  reading/critiquing hypotheses (see HYP_TOOLS above), plus
+                  a way to switch project/run without leaving this page --
+                  the picker (Home > Hypothesis Generation) is one way in,
+                  but "back" from here shouldn't have to go all the way home
+                  just to pick a different project. */}
+              <div className="lcol">
+                <div className="panel">
+                  <div className="panel-head-label" style={{ marginBottom: 12 }}>Tools</div>
+                  {HYP_TOOLS.map(([k, Ic, lab]) => (
+                    <button
+                      key={k}
+                      className={"tool-item" + (hypTab === k ? " on" : "")}
+                      onClick={() => setHypTab(k)}
+                    >
+                      <Ic size={14} /> {lab}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="panel">
+                  <div className="panel-head-label" style={{ marginBottom: 10 }}>Project</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--txt)", marginBottom: 8 }}>
+                    {currentProject ? currentProject.name : "—"}
+                  </div>
+
+                  {!switchProjectOpen ? (
+                    <button
+                      type="button"
+                      className="btn ghost sm"
+                      style={{ width: "100%", justifyContent: "center" }}
+                      onClick={() => {
+                        setSwitchProjectErr(null);
+                        setSwitchProjectId("");
+                        setSwitchProjectOpen(true);
+                      }}
+                    >
+                      Change project
+                    </button>
+                  ) : (
+                    <div>
+                      <select
+                        value={switchProjectId}
+                        onChange={(e) => setSwitchProjectId(e.target.value)}
+                        disabled={switchProjectBusy}
+                        style={{
+                          width: "100%", border: "1px solid var(--line, #e4e7ef)", borderRadius: 8,
+                          padding: "7px 8px", fontSize: 12.5, fontFamily: "inherit", marginBottom: 6,
+                          background: "var(--panel, #fff)", color: "var(--txt, #1c2128)",
+                        }}
+                      >
+                        <option value="">Pick a project…</option>
+                        {(projects || [])
+                          .filter((p) => (p.run_count || 0) > 0 && p.id !== currentProject?.id)
+                          .map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.name} — {p.run_count} run{p.run_count === 1 ? "" : "s"}
+                            </option>
+                          ))}
+                      </select>
+                      {switchProjectErr && (
+                        <div style={{ color: "#c0392b", fontSize: 11.5, marginBottom: 6 }}>{switchProjectErr}</div>
+                      )}
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          type="button"
+                          className="btn sm"
+                          style={{ flex: 1, justifyContent: "center" }}
+                          disabled={!switchProjectId || switchProjectBusy}
+                          onClick={() => switchHypothesisProject(switchProjectId)}
+                        >
+                          {switchProjectBusy ? "Opening…" : "Open"}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn ghost sm"
+                          onClick={() => { setSwitchProjectOpen(false); setSwitchProjectErr(null); }}
+                          disabled={switchProjectBusy}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Which completed review, of possibly several in this
+                    project, is the source for hypothesis generation --
+                    previously the project always silently used whichever
+                    review was most recently updated with no way to pick a
+                    different one. Only shown when there's more than one
+                    completed review to actually choose between. */}
+                {currentProject && (currentProject.runs || []).filter((r) => r.stage === "done").length > 1 && (
+                  <div className="panel">
+                    <div className="panel-head-label" style={{ marginBottom: 10 }}>
+                      Literature review used
+                    </div>
+                    <div style={{ ...H.scroll, maxHeight: 200 }}>
+                      {currentProject.runs
+                        .filter((r) => r.stage === "done")
+                        .map((r) => (
+                          <div
+                            key={r.id}
+                            style={{ ...H.item, ...(r.id === runId ? H.itemActive : {}) }}
+                            onClick={() => switchHypothesisRun(r)}
+                            title={r.topic}
+                          >
+                            <div style={H.itemTopic}>{r.topic || "Untitled review"}</div>
+                            <div style={H.meta}>
+                              {r.id === runId
+                                ? <span style={{ ...H.badge, ...H.badgeDone }}>in use</span>
+                                : <span>{r.paper_count}p</span>}
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                )}
+
+                {hypProjectRuns.length > 0 && (
+                  <div className="panel">
+                    <div className="panel-head-label" style={{ marginBottom: 10 }}>
+                      Recent hypotheses
+                    </div>
+                    {hypProjectRuns.slice(0, 3).map((r) => {
+                      const isShown = pinnedHypRunId ? r.id === pinnedHypRunId : r.id === hypProjectRuns[0]?.id && r.source_run_id === runId;
+                      return (
+                        <div
+                          key={r.id}
+                          style={{ ...H.item, ...(isShown ? H.itemActive : {}) }}
+                          onClick={() => openHypothesisRunEntry(r)}
+                          title={r.source_topic}
+                        >
+                          <div style={H.itemTopic}>{r.source_topic || "Untitled review"}</div>
+                          <div style={H.meta}>
+                            <span>{relativeTime(r.created_at)}</span>
+                            {r.staleness?.stale && (
+                              <>
+                                <span style={H.dot}>·</span>
+                                <span style={{ color: "#b8860b" }}>stale</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {hypProjectRuns.length > 3 && (
+                      <div style={{ fontSize: 11, color: "var(--muted2, #98a0af)", padding: "6px 2px 0" }}>
+                        +{hypProjectRuns.length - 3} older, not shown
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* CENTER: swaps by hypTab -- same components/props Sift's own
+                  workspace tabs use (same session data), just reached from
+                  the standalone Hypothesis entry point instead. */}
+              <div>
+                <div className="card">
+                  {hypTab === "hypothesis" && (
+                    <HypothesisAgentPanel
+                      runId={runId}
+                      busy={hypothesisBusy}
+                      result={hypothesisRun}
+                      error={hypothesisError}
+                      onRun={runHypothesisPipeline}
+                      papers={papers}
+                      extractions={extractions}
+                      onCheckResults={checkHypothesisResults}
+                      onApplyRefinement={applyHypothesisRefinement}
+                      resultsCheckBusy={resultsCheckBusy}
+                      resultsCheckError={resultsCheckError}
+                      onReverifyRefinement={reverifyHypothesisRefinement}
+                      reverifyBusy={reverifyBusy}
+                      reverifyError={reverifyError}
+                      onDisputeMetaReview={disputeMetaReview}
+                      onApplyDispute={applyHypothesisDispute}
+                      disputeBusy={disputeBusy}
+                      disputeError={disputeError}
+                    />
+                  )}
+                  {hypTab === "review" && (
+                    Object.keys(sections || {}).length > 0
+                      ? <>
+                          <ExportBar runId={runId} onError={(m) => setError({ stage: "Export", msg: m })} />
+                          <ReviewView topic={topic} sections={sections} citeOrder={citeOrder} />
+                        </>
+                      : (
+                        <div style={{ textAlign: "center", padding: "28px 16px" }}>
+                          <h3 style={{ margin: "0 0 8px", fontSize: 16 }}>No written review yet</h3>
+                          <div className="muted tiny" style={{ maxWidth: 460, margin: "0 auto", lineHeight: 1.6 }}>
+                            This project's Literature Review hasn't generated a written review yet —
+                            open it from Literature Review to write one.
+                          </div>
+                        </div>
+                      )
+                  )}
+                  {hypTab === "sources" && (
+                    <SourcesView
+                      citeOrder={citeOrder} extractions={extractions} ranked={synth?.ranked}
+                      extractStats={extractStats} runId={runId} apiKey={apiKey} model={model}
+                      papers={papers} included={included} scope={reform?.scope}
+                      analysisStale={analysisStale} busy={busy}
+                      onRemove={removeSources} onAdd={addPaperToSources}
+                      onUpload={uploadPaperToSources}
+                      onReanalyze={reanalyzeSources} onGenerate={runWrite}
+                      hasReview={Object.keys(sections || {}).length > 0}
+                    />
+                  )}
+                  {hypTab === "graph" && (
+                    <KnowledgeGraphView concepts={sideModules?.knowledge_graph} citeNum={citeNum} papers={citeOrder} />
+                  )}
+                </div>
+              </div>
+
+              <div className="rcol">
+                <HypothesisPipelineRail
+                  stage={hypothesisStage}
+                  busy={hypothesisBusy}
+                  done={hypothesisStageDone}
+                  live={hypothesisLive}
+                />
+              </div>
+            </div>
+          </div>
+        )}
+        {view === "billing" && (
+          <div style={{ maxWidth: 1100, margin: "0 auto", padding: "24px 32px 80px" }}>
+            <button
+              type="button" onClick={() => setView("home")}
+              style={{
+                display: "flex", alignItems: "center", gap: 6, background: "none", border: "none",
+                color: "var(--muted)", fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+                padding: 0, marginBottom: 14, fontFamily: "inherit",
+              }}
+            >
+              <ArrowLeft size={13} /> Home
+            </button>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 20, fontWeight: 700, marginBottom: 4 }}>
+              <Coins size={19} /> Account and Billing
+            </div>
+            <div className="muted tiny" style={{ marginBottom: 20 }}>
+              Sift doesn't run a subscription/credits plan, so there's no "remaining balance" to
+              show — this is your actual usage and cost so far, across every project.
+            </div>
+            <div className="card">
+              <UsageView runId={null} />
+            </div>
+          </div>
+        )}
+        {view === "workspace" && (
       <div className="sm-wrap wide">
         <div className="sm-head" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 20 }}>
           <div>
+            <button
+              type="button" onClick={() => setView("home")}
+              style={{
+                display: "flex", alignItems: "center", gap: 6, background: "none", border: "none",
+                color: "var(--muted)", fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+                padding: 0, marginBottom: 10, fontFamily: "inherit",
+              }}
+            >
+              <ArrowLeft size={13} /> Home
+            </button>
             <div className="eyebrow" style={{ marginBottom: 8 }}>
               {currentProject ? "Project workspace" : "Multi-agent literature review · live pipeline"}
             </div>
@@ -1110,32 +1645,6 @@ export default function App() {
                 ? "Every search you run here is filed under this project — papers, notes and review history all stay together."
                 : "Enter a research question and watch it move through the agent pipeline — reformulate, search the live web, filter sources, extract, critique, and write a cited review."}
             </div>
-          </div>
-          <div style={{ flexShrink: 0, paddingTop: 4, display: "flex", alignItems: "center", gap: 10 }}>
-            <AuthButtons
-              extraItems={[{
-                label: "Profile",
-                onClick: () => setAccountTab("profile"),
-              }, {
-                label: "Settings",
-                onClick: () => setAccountTab("settings"),
-              }, {
-                label: "Delete all my data",
-                danger: true,
-                onClick: async () => {
-                  const ok = await confirmAsync("Permanently delete all your saved runs? This cannot be undone.",
-                    { title: "Delete all data?", danger: true, confirmLabel: "Delete everything" });
-                  if (!ok) return;
-                  try {
-                    await api.deleteAllSessions();
-                    reset(); setTopic("");
-                    refreshSessions();
-                  } catch (e) {
-                    setError({ stage: "Delete data", msg: e.message });
-                  }
-                },
-              }]}
-            />
           </div>
         </div>
 
@@ -1747,6 +2256,9 @@ export default function App() {
               />
             )}
           </div>
+        </div>
+      </div>
+        )}
         </div>
       </div>
     </div>

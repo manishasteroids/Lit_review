@@ -338,7 +338,15 @@ export function ScoreBars({ critique, papers = [] }) {
   if (rows.length === 0) return null;
 
   return (
-    <div style={{ margin: "8px 0 12px", maxWidth: 420 }}>
+    // Was capped at 420px, which also squeezed the critique note/revise
+    // prose below the bars into narrow lines regardless of how much room
+    // the surrounding panel actually had (e.g. the Hypothesis Agent's
+    // "one at a time" sequential view, which gives a full column's width
+    // and had a lot of dead space to the right of this section). Widened
+    // to a normal comfortable reading width -- still bounded, so it costs
+    // nothing in the narrower grid/side-by-side layouts where the card
+    // itself is already narrower than this cap.
+    <div style={{ margin: "8px 0 12px", maxWidth: 720 }}>
       {rows.map(([label, value]) => {
         const s = statusFor(value);
         return (

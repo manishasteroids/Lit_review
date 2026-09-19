@@ -166,6 +166,10 @@ def init_db() -> None:
     init_sharing_tables()
     from core.hypothesis_db import init_hypothesis_table
     init_hypothesis_table()
+    from core.data_analysis_db import init_data_analysis_table
+    init_data_analysis_table()
+    from core.quick_ask_history import init_quick_ask_history_table
+    init_quick_ask_history_table()
 
 
 # ── Write ───────────────────────────────────────────────────────────────────

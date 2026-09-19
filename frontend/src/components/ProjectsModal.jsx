@@ -9,14 +9,28 @@ import { api } from "../api/client.js";
  * the project workspace (see App.jsx's `openProject`), then closes the modal.
  * `onOpenProject(project)` enters the workspace without picking a specific
  * run — App.jsx jumps to the most recently updated one, or a blank slate.
+ * `onGenerateHypotheses(runId, project)` (optional) — the Flow-A handoff
+ * from pipeline-wiring-architecture.md: same restore as onOpenRun, but
+ * lands directly on the Hypothesis Generation tab for that run instead of
+ * Review. Only offered next to completed (`stage === "done"`) runs, since
+ * Hypothesis Generation reads a Lit Review's finished synthesis/extractions.
  */
-export default function ProjectsModal({ onClose, onOpenRun, onOpenProject }) {
+export default function ProjectsModal({ onClose, onOpenRun, onOpenProject, onGenerateHypotheses, initialMode }) {
   const [projects, setProjects] = useState(null);
   const [openId, setOpenId] = useState(null);
-  const [creating, setCreating] = useState(false);
+  // initialMode="create" -- the sidebar's "Create new project" button opens
+  // this same modal straight into the create-project form (see App.jsx),
+  // instead of a separate new UI, since this is already the project-create
+  // flow Sift's own "+ New" path uses.
+  const [creating, setCreating] = useState(initialMode === "create");
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
   const [err, setErr] = useState(null);
+  // Which tab ProjectDetail should land on when opened -- "share" right
+  // after creating a project (so the "add a collaborator" option the user
+  // asked for is what they see next), "runs" when opening an existing one
+  // from the list below.
+  const [openTab, setOpenTab] = useState("runs");
 
   const load = useCallback(() => {
     api.listProjects().then((d) => setProjects(d.projects || [])).catch(() => setProjects([]));
@@ -37,6 +51,7 @@ export default function ProjectsModal({ onClose, onOpenRun, onOpenProject }) {
       const p = await api.createProject(newName.trim(), newDesc.trim());
       setNewName(""); setNewDesc(""); setCreating(false);
       load();
+      setOpenTab("share");
       setOpenId(p.id);
     } catch (e2) {
       setErr(e2.message || "Could not create project.");
@@ -51,9 +66,11 @@ export default function ProjectsModal({ onClose, onOpenRun, onOpenProject }) {
         {openId ? (
           <ProjectDetail
             projectId={openId}
+            initialTab={openTab}
             onBack={() => { setOpenId(null); load(); }}
             onOpenRun={onOpenRun}
             onOpenProject={onOpenProject}
+            onGenerateHypotheses={onGenerateHypotheses}
             onDeleted={() => { setOpenId(null); load(); }}
           />
         ) : (
@@ -88,7 +105,7 @@ export default function ProjectsModal({ onClose, onOpenRun, onOpenProject }) {
             ) : (
               <div style={{ marginTop: 6 }}>
                 {projects.map((p) => (
-                  <button key={p.id} style={S.projRow} onClick={() => setOpenId(p.id)}>
+                  <button key={p.id} style={S.projRow} onClick={() => { setOpenTab("runs"); setOpenId(p.id); }}>
                     <div style={{ minWidth: 0, flex: 1 }}>
                       <div style={S.projName}>
                         {p.name}
@@ -112,9 +129,9 @@ export default function ProjectsModal({ onClose, onOpenRun, onOpenProject }) {
   );
 }
 
-function ProjectDetail({ projectId, onBack, onOpenRun, onOpenProject, onDeleted }) {
+function ProjectDetail({ projectId, onBack, onOpenRun, onOpenProject, onGenerateHypotheses, onDeleted, initialTab }) {
   const [proj, setProj] = useState(null);
-  const [tab, setTab] = useState("runs");
+  const [tab, setTab] = useState(initialTab || "runs");
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -167,7 +184,11 @@ function ProjectDetail({ projectId, onBack, onOpenRun, onOpenProject, onDeleted 
       </div>
 
       {tab === "runs" && (
-        <RunsTab runs={proj.runs} onOpenRun={onOpenRun && ((runId) => onOpenRun(runId, proj))} />
+        <RunsTab
+          runs={proj.runs}
+          onOpenRun={onOpenRun && ((runId) => onOpenRun(runId, proj))}
+          onGenerateHypotheses={onGenerateHypotheses && ((runId) => onGenerateHypotheses(runId, proj))}
+        />
       )}
       {tab === "papers" && <PapersTab projectId={projectId} papers={proj.papers} onChange={load} />}
       {tab === "notes" && <NotesTab projectId={projectId} notes={proj.notes} onChange={load} />}
@@ -343,20 +364,38 @@ function ShareTab({ projectId, isOwner }) {
   );
 }
 
-function RunsTab({ runs, onOpenRun }) {
+function RunsTab({ runs, onOpenRun, onGenerateHypotheses }) {
   if (runs.length === 0) {
     return <div style={S.muted}>No reviews filed under this project yet. Start a search and choose this project, or file an existing run from its History entry.</div>;
   }
   return (
     <div>
       {runs.map((r) => (
-        <button key={r.id} style={S.listRow} onClick={() => onOpenRun(r.id)}>
-          <div style={{ minWidth: 0, flex: 1 }}>
+        <div key={r.id} style={S.listRow}>
+          <div
+            role="button" tabIndex={0} onClick={() => onOpenRun(r.id)}
+            onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && onOpenRun(r.id)}
+            style={{ minWidth: 0, flex: 1, cursor: "pointer" }}
+          >
             <div style={S.rowTitle}>{r.topic || "Untitled review"}</div>
             <div style={S.rowMeta}>{r.stage === "done" ? "Completed" : "In progress"} · {r.paper_count} papers</div>
           </div>
-          <span style={S.chev}>→</span>
-        </button>
+          {/* Flow A (pipeline-wiring-architecture.md): jump straight into
+              Hypothesis Generation pre-loaded with this review's handoff
+              artifact, instead of opening Review and navigating manually.
+              Only offered once a review is actually done -- Hypothesis
+              Generation needs finished extractions/synthesis to read. */}
+          {r.stage === "done" && onGenerateHypotheses && (
+            <button
+              type="button" style={S.smallBtn}
+              onClick={(e) => { e.stopPropagation(); onGenerateHypotheses(r.id); }}
+              title="Open Hypothesis Generation pre-loaded with this review"
+            >
+              🧪 Hypotheses
+            </button>
+          )}
+          <span style={S.chev} onClick={() => onOpenRun(r.id)}>→</span>
+        </div>
       ))}
     </div>
   );
