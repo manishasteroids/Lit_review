@@ -9,7 +9,16 @@ import { api } from "../api/client.js";
  * Pages: "home" (hero + features), "pricing", "careers", "about".
  */
 export default function LandingPage() {
-  const [page, setPage] = useState("home");
+  // A role's "Apply →" link (see applyHref() near RoleCard below) opens a
+  // brand-new tab pointing at this same site with ?apply=<roleId> in the
+  // URL. Checking for it here, once, on first render, is what turns that
+  // new tab into the full-page application form instead of the normal
+  // marketing site — no router needed for a link that only ever matters on
+  // initial page load.
+  const [page, setPage] = useState(() => {
+    const applyId = new URLSearchParams(window.location.search).get("apply");
+    return applyId ? `apply:${applyId}` : "home";
+  });
   // Every call site below is an acquisition CTA ("Try for free", "Sign up",
   // pricing buttons, etc.) except the one explicit "Sign in" link, so this
   // defaults to opening the modal on the signup tab rather than making
@@ -18,10 +27,23 @@ export default function LandingPage() {
 
   useEffect(() => { window.scrollTo(0, 0); }, [page]);
 
+  const applyRoleId = typeof page === "string" && page.startsWith("apply:") ? page.slice(6) : null;
+  const applyRole = applyRoleId ? OPEN_ROLES.find((r) => r.id === applyRoleId) : null;
+
+  if (applyRole) {
+    return (
+      <div className="lp-root">
+        <LandingStyles />
+        <ApplyPage role={applyRole} onBack={() => setPage("careers")} />
+      </div>
+    );
+  }
+
   const PAGES = {
     pricing: <Pricing login={login} />,
     careers: <CareersPage />,
     about: <AboutPage />,
+    blog: <BlogPage />,
   };
 
   return (
@@ -128,8 +150,14 @@ function TopBar({ page, setPage, login }) {
     ["News", "What's moving across AI-driven research", "news"],
     ["FAQ", "Answers to the questions researchers ask most", "faq"],
     ["Publications", "Papers & white papers coming out of this project", "pub"],
+    ["Blog", "Notes on building Sift and what we're learning", "blog"],
   ];
-  const resourceActions = [() => jump("lp-news"), () => jump("lp-faq"), () => jump("lp-papers")];
+  const resourceActions = [
+    () => jump("lp-news"),
+    () => jump("lp-faq"),
+    () => jump("lp-papers"),
+    () => setPage("blog"),
+  ];
 
   return (
     <header className="lp-bar">
@@ -254,6 +282,7 @@ const ICON_PATHS = {
   news: "M4 4h13a2 2 0 0 1 2 2v13a1 1 0 0 1-1 1H6a2 2 0 0 1-2-2V4z M20 8v9a2 2 0 0 1-2 2 M8 8h7 M8 12h7 M8 16h4",
   faq: "M12 17.5h.01 M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.9.4-1.5 1-1.5 2.2 M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z",
   pub: "M6 3h12v18l-6-3.5L6 21z",
+  blog: "M4 19V6a2 2 0 0 1 2-2h9l5 5v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z M15 4v5h5 M8 12h8 M8 16h5",
   ask: "M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z M12 8.3a1.8 1.8 0 1 1 2.3 1.7c-.7.3-1.3.8-1.3 1.6 M12.3 14.2h.01",
   filter: "M3 4h18l-7 8v6l-4 2v-8z",
   extract: "M12 2v4 M12 18v4 M2 12h4 M18 12h4 M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z",
@@ -611,6 +640,7 @@ function SiteFooter({ setPage }) {
             <div className="lp-foot-links">
               <button onClick={() => setPage("careers")}>Careers</button>
               <button onClick={() => setPage("about")}>About</button>
+              <button onClick={() => setPage("blog")}>Blog</button>
               <button onClick={() => setPage("pricing")}>Pricing</button>
             </div>
           )}
@@ -1201,18 +1231,115 @@ const OPEN_ROLES = [
         ],
       },
     ],
-    notes: "Please submit your CV and cover letter in English to hr@orcusintelligencelab.com. " +
-      "If you have a GitHub profile, personal portfolio, or previous projects involving LLMs " +
-      "or agentic systems, please include those links.",
+    notes: "A CV and a cover letter (both required) should be submitted in English to " +
+      "hr@orcusintelligencelab.com — applications without a cover letter will not be " +
+      "reviewed. If you have a GitHub profile, personal portfolio, or previous projects " +
+      "involving LLMs or agentic systems, please include those links.",
+  },
+  {
+    id: "ai-systems-research-engineer-rsi",
+    title: "AI Systems Research Engineer — Recursive Self-Improvement (RSI)",
+    meta: "Internship → Full-time · Remote",
+    salary: "NPR 35,000 / month (initial contract)",
+    contract: "3-month initial contract",
+    contractNote: "Renews as a full-time role with shared equity and an increased salary, based on " +
+      "performance during the initial contract.",
+    applyEmail: "hr@orcusintelligencelab.com",
+    blurb: "This role sits on our Recursive Self-Improvement (RSI) track: building the agents, " +
+      "harnesses, and feedback loops that let our own systems accelerate the research and " +
+      "engineering work behind them. You'll work across the full loop — evaluations, agent " +
+      "harnesses, training data, and infrastructure — turning open-ended problems in agentic " +
+      "and embodied AI into rigorous, reliable systems. You'll move fluidly between research " +
+      "and implementation, with real ownership over what gets built.",
+    sections: [
+      {
+        heading: "Key responsibilities",
+        items: [
+          "Recursive self-improvement loops — design evaluations for agent judgment, " +
+            "hypothesis generation, and long-horizon task execution; turn real failures and " +
+            "workflow traces into data and evaluation flywheels that make the next iteration " +
+            "of the system better.",
+          "Agent harness design — build and maintain agent harnesses, tool-use scaffolding, " +
+            "and sandboxed runtimes that let models operate reliably on consumer devices and " +
+            "automated systems, not just in a chat window.",
+          "Embodied & robotic systems — extend agentic workflows toward physical systems: " +
+            "sensor integration, actuator/motion control interfaces, and closing the loop " +
+            "between an agent's decisions and real-world sensing and movement.",
+          "Simulation & sim-to-real validation — set up policy evaluation in simulation " +
+            "environments and help validate that behavior learned or planned in sim holds up " +
+            "on real hardware.",
+          "Infrastructure & reliability — build the pipelines, tooling, and monitoring needed " +
+            "to run these systems safely and repeatably, and think rigorously about failure " +
+            "modes before they reach hardware.",
+        ],
+      },
+      {
+        heading: "Required qualifications",
+        items: [
+          "Strong proficiency in Python and comfort with systems-level engineering (async " +
+            "programming, APIs, concurrency).",
+          "Experience with LLM/agent APIs and building agentic workflows (tool use, function " +
+            "calling, multi-step task execution).",
+          "Solid CS fundamentals — data structures, algorithms, and the judgment to design " +
+            "evaluations for problems that don't have an obvious right answer yet.",
+          "Comfortable working on ambiguous, open-ended problems without an established " +
+            "playbook.",
+        ],
+      },
+      {
+        heading: "Preferred qualifications (added benefit, not required)",
+        items: [
+          "Hands-on familiarity with robotics systems — sensor integration (LIDAR, depth " +
+            "cameras, IMUs, etc.), actuator/motor control, and basic motion planning.",
+          "Experience with NVIDIA Isaac Sim, Gazebo, or a comparable simulator for policy " +
+            "evaluation and sim-to-real validation.",
+          "Experience building agent harnesses for consumer devices or automated/robotic " +
+            "systems, rather than purely cloud/API-based agents.",
+          "Background in reinforcement learning, robot learning, or control theory.",
+        ],
+      },
+    ],
+    notes: "A CV and a cover letter (both required) should be submitted in English to " +
+      "hr@orcusintelligencelab.com — applications without a cover letter will not be " +
+      "reviewed. If you've worked on robotics, sim-to-real, or agentic systems before, " +
+      "please include links to that work (GitHub, papers, videos of hardware in action, " +
+      "etc.) — for this role, a demo is worth more than a bullet point.",
   },
 ];
 
-function RoleCard({ role }) {
-  const applyEmail = role.applyEmail || CONTACT_EMAIL;
-  const subject = encodeURIComponent(`Application: ${role.title}`);
-  const body = encodeURIComponent(
-    `Hi Orcus Intelligence Lab team,\n\nI'm interested in the ${role.title} role. My CV and cover letter are attached.\n\n`
+// Splits a notes string on any email address and renders each one as a
+// clickable mailto: link, so job-posting copy (which is written as plain
+// text in the OPEN_ROLES data above) doesn't need its own JSX just to make
+// the contact address tappable.
+const EMAIL_RE = /([\w.+-]+@[\w-]+\.[\w.-]+)/g;
+// A single non-global regex for the per-part .test() below — reusing the
+// global EMAIL_RE (or any global regex) across repeated .test() calls would
+// silently skip matches, since .test() advances lastIndex on a global regex.
+const EMAIL_RE_SINGLE = /^[\w.+-]+@[\w-]+\.[\w.-]+$/;
+function renderNotesWithMailto(text) {
+  const parts = text.split(EMAIL_RE);
+  return parts.map((part, i) =>
+    EMAIL_RE_SINGLE.test(part) ? (
+      <a key={i} href={`mailto:${part}`}>{part}</a>
+    ) : (
+      <span key={i}>{part}</span>
+    )
   );
+}
+
+// The URL a role's "Apply" link points to — same origin/path, plus an
+// ?apply=<roleId> query param that LandingPage checks on load to jump
+// straight into the full-page ApplyPage below, in a brand-new tab (so the
+// person doesn't lose their place on the Careers listing), mirroring how
+// job boards like Ashby open the application form as its own page.
+function applyHref(roleId) {
+  const url = new URL(window.location.href);
+  url.search = `?apply=${encodeURIComponent(roleId)}`;
+  url.hash = "";
+  return url.toString();
+}
+
+function RoleCard({ role }) {
   return (
     <div className="lp-role-card">
       <div className="lp-role-head">
@@ -1223,11 +1350,9 @@ function RoleCard({ role }) {
           </div>
           {role.contractNote && <div className="lp-role-meta">{role.contractNote}</div>}
         </div>
-        {applyEmail && (
-          <a className="lp-cta" href={`mailto:${applyEmail}?subject=${subject}&body=${body}`}>
-            Apply →
-          </a>
-        )}
+        <a className="lp-cta" href={applyHref(role.id)} target="_blank" rel="noopener noreferrer">
+          Apply →
+        </a>
       </div>
       {role.blurb && <p className="lp-role-blurb">{role.blurb}</p>}
       {role.sections.map((s) => (
@@ -1238,7 +1363,262 @@ function RoleCard({ role }) {
           </ul>
         </div>
       ))}
-      {role.notes && <p className="lp-role-notes">{role.notes}</p>}
+      {role.notes && <p className="lp-role-notes">{renderNotesWithMailto(role.notes)}</p>}
+    </div>
+  );
+}
+
+const APPLY_FIELDS_INITIAL = {
+  first_name: "", last_name: "", email: "", phone_code: "+977", phone: "",
+  address: "", city: "", country: "", linkedin: "", scholar: "",
+  github: "", personal_website: "",
+  location: "", start_date: "", work_authorized: "", needs_sponsorship: "",
+  additional_info: "", website: "",
+};
+
+// A two-button Yes/No toggle, styled after the same pattern most job-board
+// screening questions use — simpler than a <select> for a binary answer,
+// and makes "unanswered" visually obvious (neither button highlighted)
+// instead of quietly defaulting to one side.
+function YesNoToggle({ value, onChange }) {
+  return (
+    <div className="lp-yn-toggle" role="group">
+      {["yes", "no"].map((v) => (
+        <button key={v} type="button" className={"lp-yn-btn" + (value === v ? " active" : "")}
+          onClick={() => onChange(v)}>
+          {v === "yes" ? "Yes" : "No"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// A short list covering the countries most likely to actually apply (Nepal
+// first, since that's where the company and most roles posted so far are
+// based) — not every ITU code in existence, just enough that "no country
+// code at all" stops being the default.
+const COUNTRY_CODES = [
+  ["+977", "Nepal (+977)"],
+  ["+91", "India (+91)"],
+  ["+1", "US/Canada (+1)"],
+  ["+44", "UK (+44)"],
+  ["+61", "Australia (+61)"],
+  ["+971", "UAE (+971)"],
+  ["+65", "Singapore (+65)"],
+  ["+49", "Germany (+49)"],
+  ["+33", "France (+33)"],
+  ["+81", "Japan (+81)"],
+  ["+86", "China (+86)"],
+  ["+880", "Bangladesh (+880)"],
+];
+
+// Full-page application form — opened in its own tab via applyHref() above,
+// styled after the job-board pattern (org header, job details on the left,
+// Overview/Application tabs on the right) rather than an in-page modal, so
+// the person keeps the Careers listing open in their original tab.
+function ApplyPage({ role, onBack }) {
+  const [tab, setTab] = useState("application"); // "overview" | "application"
+  const [fields, setFields] = useState(APPLY_FIELDS_INITIAL);
+  const [resume, setResume] = useState(null);
+  const [coverLetter, setCoverLetter] = useState(null);
+  const [additionalDoc, setAdditionalDoc] = useState(null);
+  const [certified, setCertified] = useState(false);
+  const [status, setStatus] = useState("idle"); // idle | sending | sent | error
+  const [error, setError] = useState("");
+  const applyEmail = role.applyEmail || CONTACT_EMAIL;
+
+  const set = (field) => (e) => setFields((f) => ({ ...f, [field]: e.target.value }));
+  const setChoice = (field) => (v) => setFields((f) => ({ ...f, [field]: v }));
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!fields.first_name.trim() || !fields.last_name.trim() || !fields.email.trim()) {
+      setStatus("error");
+      setError("Please fill in your first name, last name, and email.");
+      return;
+    }
+    if (!fields.location.trim() || !fields.start_date) {
+      setStatus("error");
+      setError("Please fill in your current location and earliest start date.");
+      return;
+    }
+    if (!fields.work_authorized || !fields.needs_sponsorship) {
+      setStatus("error");
+      setError("Please answer the work authorization and sponsorship questions.");
+      return;
+    }
+    if (!resume || !coverLetter) {
+      setStatus("error");
+      setError("Both a resume and a cover letter are required (PDF or Word, up to 8MB each).");
+      return;
+    }
+    if (!certified) {
+      setStatus("error");
+      setError("Please confirm the information in your application is accurate before submitting.");
+      return;
+    }
+    setStatus("sending");
+    setError("");
+    try {
+      const { phone_code, phone, address, city, country, ...rest } = fields;
+      const fullPhone = phone.trim() ? `${phone_code} ${phone.trim()}` : "";
+      const fullAddress = [address.trim(), city.trim(), country.trim()].filter(Boolean).join(", ");
+      await api.submitJobApplication({
+        ...rest, phone: fullPhone, address: fullAddress, role_title: role.title,
+        certified: certified ? "yes" : "no",
+        resume, cover_letter: coverLetter, additional_document: additionalDoc,
+      });
+      setStatus("sent");
+    } catch (err) {
+      setStatus("error");
+      setError(err.message || "Something went wrong. Please try again.");
+    }
+  }
+
+  return (
+    <div className="lp-apply-page">
+      <header className="lp-apply-header">
+        <button type="button" className="lp-apply-back" onClick={onBack} aria-label="Back to Careers">←</button>
+        <div className="lp-apply-header-brand"><LogoMark /><span>Orcus Intelligence Lab</span></div>
+        <span className="lp-apply-back" aria-hidden="true" style={{ visibility: "hidden" }}>←</span>
+      </header>
+
+      <div className="lp-apply-body">
+        <h1 className="lp-apply-title">{role.title}</h1>
+
+        <div className="lp-apply-grid">
+          <aside className="lp-apply-side">
+            {role.meta && (
+              <div className="lp-apply-meta-block">
+                <div className="lp-apply-meta-label">Type</div>
+                <div>{role.meta}</div>
+              </div>
+            )}
+            {role.salary && (
+              <div className="lp-apply-meta-block">
+                <div className="lp-apply-meta-label">Compensation</div>
+                <div>{role.salary}</div>
+              </div>
+            )}
+            {role.contract && (
+              <div className="lp-apply-meta-block">
+                <div className="lp-apply-meta-label">Contract</div>
+                <div>{role.contract}</div>
+                {role.contractNote && <div className="lp-apply-meta-note">{role.contractNote}</div>}
+              </div>
+            )}
+            {role.blurb && <p className="lp-apply-blurb">{role.blurb}</p>}
+          </aside>
+
+          <main className="lp-apply-main">
+            <div className="lp-apply-tabs">
+              <button type="button" className={"lp-apply-tab" + (tab === "overview" ? " active" : "")}
+                onClick={() => setTab("overview")}>Overview</button>
+              <button type="button" className={"lp-apply-tab" + (tab === "application" ? " active" : "")}
+                onClick={() => setTab("application")}>Application</button>
+            </div>
+
+            {tab === "overview" ? (
+              <div className="lp-apply-overview">
+                {role.sections.map((s) => (
+                  <div key={s.heading} className="lp-role-section">
+                    <div className="lp-role-section-h">{s.heading}</div>
+                    <ul className="lp-role-list">
+                      {s.items.map((it, i) => <li key={i}>{it}</li>)}
+                    </ul>
+                  </div>
+                ))}
+                {role.notes && <p className="lp-role-notes">{renderNotesWithMailto(role.notes)}</p>}
+                <button type="button" className="lp-cta" onClick={() => setTab("application")}>
+                  Continue to application →
+                </button>
+              </div>
+            ) : status === "sent" ? (
+              <div className="lp-modal-sent">
+                <h3>Application received</h3>
+                <p>Thanks for applying to {role.title} — we'll be in touch.</p>
+              </div>
+            ) : (
+              <form className="lp-apply-form" onSubmit={submit}>
+                {/* Honeypot — see backend/api/routes.py submit_job_application */}
+                <input type="text" name="website" value={fields.website} onChange={set("website")}
+                  className="lp-contact-honeypot" tabIndex={-1} autoComplete="off" aria-hidden="true" />
+                <div className="lp-contact-form-row">
+                  <input type="text" placeholder="First name" value={fields.first_name} onChange={set("first_name")} required />
+                  <input type="text" placeholder="Last name" value={fields.last_name} onChange={set("last_name")} required />
+                </div>
+                <input type="email" placeholder="Email" value={fields.email} onChange={set("email")} required />
+                <div className="lp-phone-row">
+                  <select value={fields.phone_code} onChange={set("phone_code")} className="lp-phone-code" aria-label="Country code">
+                    {COUNTRY_CODES.map(([code, label]) => <option key={code} value={code}>{label}</option>)}
+                  </select>
+                  <input type="tel" placeholder="Phone number" value={fields.phone} onChange={set("phone")} />
+                </div>
+                <input type="text" placeholder="Street address" value={fields.address} onChange={set("address")} />
+                <div className="lp-contact-form-row">
+                  <input type="text" placeholder="City" value={fields.city} onChange={set("city")} />
+                  <input type="text" placeholder="Country" value={fields.country} onChange={set("country")} />
+                </div>
+                <input type="url" placeholder="LinkedIn profile URL (optional)" value={fields.linkedin} onChange={set("linkedin")} />
+                <input type="url" placeholder="Google Scholar URL (optional)" value={fields.scholar} onChange={set("scholar")} />
+                <input type="url" placeholder="GitHub profile URL (optional)" value={fields.github} onChange={set("github")} />
+                <input type="url" placeholder="Personal website (optional)" value={fields.personal_website} onChange={set("personal_website")} />
+
+                <label className="lp-file-field">
+                  <span>Resume (PDF/Word, required)</span>
+                  <input type="file" accept=".pdf,.doc,.docx" onChange={(e) => setResume(e.target.files?.[0] || null)} required />
+                </label>
+                <label className="lp-file-field">
+                  <span>Cover letter (PDF/Word, required)</span>
+                  <input type="file" accept=".pdf,.doc,.docx" onChange={(e) => setCoverLetter(e.target.files?.[0] || null)} required />
+                </label>
+                <label className="lp-file-field">
+                  <span>Additional document (optional — portfolio, writing sample, research summary)</span>
+                  <input type="file" accept=".pdf,.doc,.docx" onChange={(e) => setAdditionalDoc(e.target.files?.[0] || null)} />
+                </label>
+
+                <div className="lp-apply-questions">
+                  <label className="lp-apply-q">
+                    <span>Where are you currently located? (city, country)</span>
+                    <input type="text" placeholder="e.g. Kathmandu, Nepal" value={fields.location} onChange={set("location")} required />
+                  </label>
+                  <label className="lp-apply-q">
+                    <span>When can you start, if selected?</span>
+                    <input type="date" value={fields.start_date} onChange={set("start_date")} required />
+                  </label>
+                  <div className="lp-apply-q">
+                    <span>Are you legally authorized to work in your country of residence?</span>
+                    <YesNoToggle value={fields.work_authorized} onChange={setChoice("work_authorized")} />
+                  </div>
+                  <div className="lp-apply-q">
+                    <span>Will you now or in the future require visa/work-permit sponsorship for this role?</span>
+                    <YesNoToggle value={fields.needs_sponsorship} onChange={setChoice("needs_sponsorship")} />
+                  </div>
+                  <label className="lp-apply-q">
+                    <span>Anything else you'd like us to know? (motivation, context — optional)</span>
+                    <textarea rows={4} value={fields.additional_info} onChange={set("additional_info")} />
+                  </label>
+                </div>
+
+                <label className="lp-apply-certify">
+                  <input type="checkbox" checked={certified} onChange={(e) => setCertified(e.target.checked)} required />
+                  <span>I confirm the information provided in this application is accurate and complete to the best of my knowledge.</span>
+                </label>
+
+                {status === "error" && <p className="lp-contact-form-error">{error}</p>}
+                <button type="submit" className="lp-cta" disabled={status === "sending"}>
+                  {status === "sending" ? "Submitting…" : "Submit application"}
+                </button>
+                {applyEmail && (
+                  <a className="lp-apply-email-fallback" href={`mailto:${applyEmail}?subject=${encodeURIComponent(`Application: ${role.title}`)}`}>
+                    Prefer email? Email HR directly →
+                  </a>
+                )}
+              </form>
+            )}
+          </main>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1289,8 +1669,93 @@ function CareersPage() {
 const ABOUT_TABS = [
   { id: "about-team", label: "Team" },
   { id: "about-contact", label: "Contact us" },
-  { id: "about-blog", label: "Blog" },
 ];
+
+function ContactForm() {
+  const [form, setForm] = useState({ name: "", email: "", affiliation: "", message: "", website: "" });
+  const [status, setStatus] = useState("idle"); // idle | sending | sent | error
+  const [error, setError] = useState("");
+
+  const set = (field) => (e) => setForm((f) => ({ ...f, [field]: e.target.value }));
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!form.name.trim() || !form.email.trim() || !form.message.trim()) {
+      setStatus("error");
+      setError("Please fill in your name, email, and a message.");
+      return;
+    }
+    setStatus("sending");
+    setError("");
+    try {
+      await api.submitContactForm(form);
+      setStatus("sent");
+      setForm({ name: "", email: "", affiliation: "", message: "", website: "" });
+    } catch (err) {
+      setStatus("error");
+      setError(err.message || "Something went wrong. Please try again.");
+    }
+  }
+
+  if (status === "sent") {
+    return (
+      <div className="lp-contact-form-sent">
+        Thanks for reaching out — we'll get back to you soon.
+      </div>
+    );
+  }
+
+  return (
+    <form className="lp-contact-form" onSubmit={submit}>
+      {/* Honeypot: hidden from real visitors via CSS, so only bots that
+          blindly fill every field will populate it (see backend/api/routes.py
+          submit_contact_form for the server-side check). */}
+      <input
+        type="text"
+        name="website"
+        value={form.website}
+        onChange={set("website")}
+        className="lp-contact-honeypot"
+        tabIndex={-1}
+        autoComplete="off"
+        aria-hidden="true"
+      />
+      <div className="lp-contact-form-row">
+        <input
+          type="text"
+          placeholder="Name"
+          value={form.name}
+          onChange={set("name")}
+          required
+        />
+        <input
+          type="email"
+          placeholder="Email"
+          value={form.email}
+          onChange={set("email")}
+          required
+        />
+      </div>
+      <input
+        type="text"
+        placeholder="Affiliation (optional)"
+        value={form.affiliation}
+        onChange={set("affiliation")}
+      />
+      <textarea
+        placeholder="Your question or message"
+        rows={5}
+        value={form.message}
+        onChange={set("message")}
+        required
+      />
+      {status === "error" && <p className="lp-contact-form-error">{error}</p>}
+      <button type="submit" className="lp-cta" disabled={status === "sending"}>
+        {status === "sending" ? "Sending…" : "Send message"}
+      </button>
+    </form>
+  );
+}
 
 function AboutPage() {
   const jump = (id) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1338,14 +1803,20 @@ function AboutPage() {
             <a className="lp-cta-2" href={LINKEDIN_URL} target="_blank" rel="noreferrer">LinkedIn ↗</a>
           )}
         </div>
+        <ContactForm />
       </div>
+    </section>
+  );
+}
 
-      <div className="lp-band" id="about-blog" style={{ textAlign: "left" }}>
-        <h2 className="lp-cat">Blog</h2>
-        <p className="lp-cat-sub">Notes on building Sift and what we're learning from researchers who use it.</p>
-        <div className="lp-empty-card">
-          <p>No posts yet — check back soon, or follow along on LinkedIn.</p>
-        </div>
+function BlogPage() {
+  return (
+    <section className="lp-pricing" style={{ paddingBottom: 0 }}>
+      <BrandMark width={148} />
+      <h1 className="lp-p-title" style={{ marginTop: 18 }}>Blog</h1>
+      <p className="lp-p-sub">Notes on building Sift and what we're learning from researchers who use it.</p>
+      <div className="lp-empty-card" style={{ maxWidth: 620, margin: "0 auto 60px" }}>
+        <p>No posts yet — check back soon, or follow along on LinkedIn.</p>
       </div>
     </section>
   );
@@ -1763,6 +2234,113 @@ function LandingStyles() {
         text-align: left; background: var(--lp-bg2); }
       .lp-empty-card p { color: var(--lp-muted); font-size: 14.5px; line-height: 1.65; margin: 0 0 18px; }
       .lp-contact-row { display: flex; gap: 12px; flex-wrap: wrap; }
+
+      .lp-contact-form { max-width: 560px; margin: 28px 0 0; display: flex; flex-direction: column; gap: 12px; }
+      .lp-contact-form-row { display: flex; gap: 12px; flex-wrap: wrap; }
+      .lp-contact-form-row input { flex: 1 1 200px; }
+      .lp-contact-form input, .lp-contact-form textarea {
+        border: 1px solid var(--lp-line); border-radius: 10px; padding: 11px 14px;
+        font-size: 14.5px; font-family: inherit; color: inherit; background: #fff; resize: vertical;
+      }
+      .lp-contact-form input:focus, .lp-contact-form textarea:focus {
+        outline: none; border-color: var(--lp-accent, #6c5ce7);
+      }
+      .lp-contact-form button { align-self: flex-start; border: none; cursor: pointer; }
+      .lp-contact-form button:disabled { opacity: 0.6; cursor: default; }
+      .lp-contact-form-error { color: #c0392b; font-size: 13.5px; margin: 0; }
+      .lp-contact-form-sent { max-width: 560px; margin: 28px 0 0; padding: 16px 18px;
+        border-radius: 10px; background: var(--lp-bg2); color: var(--lp-muted); font-size: 14.5px; }
+      /* Honeypot: off-screen rather than display:none — some bots skip
+         fields hidden via display:none but still fill ones merely
+         positioned off-canvas, so this stays a better spam trap. */
+      .lp-contact-honeypot {
+        position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; overflow: hidden;
+      }
+
+      .lp-modal-backdrop {
+        position: fixed; inset: 0; background: rgba(20, 22, 28, 0.55); z-index: 1000;
+        display: flex; align-items: center; justify-content: center; padding: 24px;
+      }
+      .lp-modal {
+        position: relative; background: #fff; border-radius: 16px; padding: 32px;
+        max-width: 560px; width: 100%; max-height: 88vh; overflow-y: auto;
+        box-shadow: 0 20px 60px rgba(20, 22, 28, 0.25);
+      }
+      .lp-modal-close {
+        position: absolute; top: 14px; right: 14px; border: none; background: transparent;
+        font-size: 26px; line-height: 1; color: var(--lp-muted2); cursor: pointer; padding: 4px 8px;
+      }
+      .lp-modal-close:hover { color: var(--lp-ink); }
+      .lp-modal-title { margin: 0 0 18px; font-size: 20px; padding-right: 24px; }
+      .lp-modal-sent { text-align: center; padding: 20px 0; }
+      .lp-modal-sent h3 { margin: 0 0 10px; }
+      .lp-modal-sent p { color: var(--lp-muted); margin: 0 0 20px; }
+      .lp-apply-form { display: flex; flex-direction: column; gap: 12px; }
+      .lp-apply-form input[type="text"], .lp-apply-form input[type="email"],
+      .lp-apply-form input[type="tel"], .lp-apply-form input[type="url"] {
+        border: 1px solid var(--lp-line); border-radius: 10px; padding: 11px 14px;
+        font-size: 14.5px; font-family: inherit; color: inherit; background: #fff; width: 100%;
+      }
+      .lp-apply-form input:focus { outline: none; border-color: var(--lp-accent, #6c5ce7); }
+      .lp-phone-row { display: flex; gap: 12px; }
+      .lp-phone-code {
+        flex: 0 0 150px; border: 1px solid var(--lp-line); border-radius: 10px; padding: 11px 10px;
+        font-size: 14.5px; font-family: inherit; color: inherit; background: #fff;
+      }
+      .lp-phone-row input[type="tel"] { flex: 1 1 auto; }
+      .lp-file-field { display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; color: var(--lp-muted); }
+      .lp-file-field input[type="file"] { font-size: 13.5px; }
+      .lp-apply-email-fallback { font-size: 13.5px; color: var(--lp-muted); text-align: center; margin-top: 4px; }
+
+      /* Full-page job application (its own tab — see applyHref()/ApplyPage) */
+      .lp-apply-page { min-height: 100vh; background: #fff; }
+      .lp-apply-header {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 18px 28px; border-bottom: 1px solid var(--lp-line);
+      }
+      .lp-apply-back {
+        border: none; background: transparent; font-size: 20px; cursor: pointer;
+        color: var(--lp-ink); padding: 4px 8px; line-height: 1;
+      }
+      .lp-apply-back:hover { color: var(--lp-indigo); }
+      .lp-apply-header-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 15px; }
+      .lp-apply-body { max-width: 980px; margin: 0 auto; padding: 40px 28px 100px; }
+      .lp-apply-title { font-size: 30px; margin: 0 0 32px; }
+      .lp-apply-grid { display: grid; grid-template-columns: 260px 1fr; gap: 48px; align-items: start; }
+      @media (max-width: 720px) { .lp-apply-grid { grid-template-columns: 1fr; } }
+      .lp-apply-side { display: flex; flex-direction: column; gap: 20px; }
+      .lp-apply-meta-block { border-top: 1px solid var(--lp-line); padding-top: 12px; font-size: 14.5px; }
+      .lp-apply-meta-label { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
+        color: var(--lp-muted2); margin-bottom: 4px; }
+      .lp-apply-meta-note { color: var(--lp-muted); font-size: 13px; margin-top: 4px; }
+      .lp-apply-blurb { color: var(--lp-muted); font-size: 14px; line-height: 1.65; }
+      .lp-apply-main { min-width: 0; }
+      .lp-apply-tabs { display: flex; gap: 28px; border-bottom: 1px solid var(--lp-line); margin-bottom: 28px; }
+      .lp-apply-tab {
+        border: none; background: transparent; font-size: 15px; font-weight: 600; cursor: pointer;
+        color: var(--lp-muted); padding: 0 0 12px; border-bottom: 2px solid transparent;
+      }
+      .lp-apply-tab.active { color: var(--lp-ink); border-bottom-color: var(--lp-indigo); }
+      .lp-apply-overview { display: flex; flex-direction: column; gap: 4px; }
+      .lp-apply-overview .lp-cta { align-self: flex-start; margin-top: 16px; }
+
+      .lp-apply-questions { display: flex; flex-direction: column; gap: 16px; margin-top: 6px;
+        padding-top: 16px; border-top: 1px solid var(--lp-line); }
+      .lp-apply-q { display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+      .lp-apply-q > span:first-child { font-weight: 600; color: var(--lp-ink); font-size: 14.5px; }
+      .lp-apply-q input[type="text"], .lp-apply-q input[type="date"], .lp-apply-q textarea {
+        border: 1px solid var(--lp-line); border-radius: 10px; padding: 11px 14px;
+        font-size: 14.5px; font-family: inherit; color: inherit; background: #fff; resize: vertical;
+      }
+      .lp-yn-toggle { display: flex; gap: 10px; }
+      .lp-yn-btn {
+        border: 1px solid var(--lp-line); background: #fff; border-radius: 10px;
+        padding: 9px 22px; font-size: 14px; font-weight: 600; color: var(--lp-muted); cursor: pointer;
+      }
+      .lp-yn-btn.active { border-color: var(--lp-indigo); color: var(--lp-indigo); background: var(--lp-soft); }
+      .lp-apply-certify { display: flex; align-items: flex-start; gap: 10px; font-size: 13.5px;
+        color: var(--lp-muted); margin-top: 8px; }
+      .lp-apply-certify input { margin-top: 3px; }
 
       .lp-role-card { border: 1px solid var(--lp-line); border-radius: 14px; padding: 26px 28px;
         text-align: left; background: #fff; }

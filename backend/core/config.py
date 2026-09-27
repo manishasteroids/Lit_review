@@ -100,5 +100,25 @@ class Settings:
     # UPLOADS_DIR for deployments with a mounted/persistent volume.
     uploads_dir: str = os.environ.get("UPLOADS_DIR", str(Path(__file__).parent.parent / "data" / "uploads"))
 
+    # Public "Contact us" form (About page). Cloudflare Email Routing only
+    # forwards mail that actually arrives at contact_to_email over SMTP — it
+    # can't see HTTP form submissions — so the backend sends a real outbound
+    # email TO that address via Resend's API, and Cloudflare's already-
+    # configured routing rule takes it from there (forwarding to whatever
+    # inbox it's set to point at today, with no code change needed if that
+    # inbox changes later).
+    resend_api_key: str = os.environ.get("RESEND_API_KEY", "")
+    # Must be a sender address on a domain verified in Resend (e.g.
+    # noreply@orcusintelligencelab.com) — defaults to Resend's shared test
+    # sender, which only delivers to the Resend account's own verified email,
+    # so the real domain must be verified for production use.
+    contact_from_email: str = os.environ.get("CONTACT_FROM_EMAIL", "onboarding@resend.dev")
+    contact_to_email: str = os.environ.get("CONTACT_TO_EMAIL", "contact@orcusintelligencelab.com")
+
+    # Careers page "Apply" form — same Resend delivery path as the contact
+    # form above, just a different recipient and a multipart body (resume +
+    # cover letter attachments) instead of a plain text message.
+    hr_email: str = os.environ.get("HR_EMAIL", "hr@orcusintelligencelab.com")
+
 
 settings = Settings()

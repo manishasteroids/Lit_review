@@ -32,8 +32,10 @@ class QueryReformulator(Agent):
     )
 
     def run(self, topic: str) -> dict:
-        out = self.llm.call(user_text=f"Research topic: {topic}", system=self.SYSTEM)
-        data = self.llm.parse_json(out)
+        # call_json() retries once on a malformed response instead of
+        # crashing the very first pipeline stage on what's almost always a
+        # one-off JSON formatting slip — see its docstring in core/llm_client.py.
+        data = self.llm.call_json(user_text=f"Research topic: {topic}", system=self.SYSTEM)
         # Trust the model's classification if valid; fall back to a free
         # keyword check (core/domain_classifier.py) if it's missing/malformed
         # rather than letting a bad field silently break routing downstream.

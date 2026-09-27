@@ -662,6 +662,45 @@ export const api = {
     if (!res.ok) throw new Error(data.detail || "Access denied.");
     return data;
   },
+  // Public "Contact us" form on the About page — no auth header, since a
+  // visitor filling this out isn't necessarily signed in to Sift at all.
+  submitContactForm: async ({ name, email, affiliation, message, website }) => {
+    const res = await fetch(BASE + "/api/contact", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, email, affiliation, message, website }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Couldn't send your message.");
+    return data;
+  },
+  // Careers page "Apply" form. Uses FormData (not JSON) because it carries
+  // the resume + cover letter files — leave Content-Type unset so the
+  // browser fills in the multipart boundary itself.
+  submitJobApplication: async (fields) => {
+    const fd = new FormData();
+    Object.entries(fields).forEach(([k, v]) => { if (v != null) fd.append(k, v); });
+    const res = await fetch(BASE + "/api/careers/apply", { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Couldn't submit your application.");
+    return data;
+  },
+  shareGetHypothesis: async (token, runId, email) => {
+    const res = await fetch(
+      BASE + `/api/share/${token}/runs/${runId}/hypothesis?email=` + encodeURIComponent(email)
+    );
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Access denied.");
+    return data;
+  },
+  shareGetStudio: async (token, runId, email) => {
+    const res = await fetch(
+      BASE + `/api/share/${token}/runs/${runId}/studio?email=` + encodeURIComponent(email)
+    );
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Access denied.");
+    return data;
+  },
 
   // ── Hypothesis Agent: its own tool, its own table (core/hypothesis_db.py),
   // reads a completed Sift run once via source_run_id and never writes back

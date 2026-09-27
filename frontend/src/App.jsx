@@ -220,6 +220,28 @@ export default function App() {
   // placeholders per the doc's phased plan.
   const [view, setView] = useState("home");
   const [dataAnalysisWhich, setDataAnalysisWhich] = useState("dataviz");
+
+  // `view` lives in memory for the whole browser tab and isn't reset just
+  // because the user signed out — signing out only flips `signedOut` (which
+  // makes the top-level render swap in <LandingPage/>), it doesn't unmount
+  // this component or its state. So if someone was sitting on, say, the
+  // "workspace" view, got signed out (token expiry, clicking Sign out, etc.),
+  // and then logged back in from the landing page WITHOUT a full page
+  // refresh, the app would silently resume that exact stale view — landing
+  // them back in the middle of the old Sift tool with no way to reach the
+  // Home dashboard's persistent nav, since that nav only renders for
+  // view === "home". A plain refresh doesn't have this problem (a fresh
+  // mount always starts at "home"), which is what made this look
+  // refresh-dependent rather than a real bug. Explicitly reset to "home" on
+  // every signed-out -> signed-in transition so a fresh login always behaves
+  // like a fresh page load.
+  const prevSignedOutRef = useRef(signedOut);
+  useEffect(() => {
+    if (prevSignedOutRef.current && !signedOut) {
+      setView("home");
+    }
+    prevSignedOutRef.current = signedOut;
+  }, [signedOut]);
   // Home's "Discuss with Sift AI" box sets topic + flips this, so the actual
   // runStart() call happens once we've switched into the workspace view
   // (avoids calling it against stale/mid-transition state).

@@ -2186,6 +2186,320 @@ def share_get_run(token: str, run_id: str, email: str):
     }
 
 
+def _share_verified_session(token: str, run_id: str, email: str) -> dict:
+    """Shared by every /share/{token}/runs/{run_id}/... sub-resource below:
+    re-verify the link+email pair and that this run actually belongs to that
+    link's project, then return the raw session row (which carries the
+    review OWNER's user_id) so callers can look up owner-scoped data
+    (Hypothesis Agent runs, Studio chat) under that identity. A share-link
+    viewer has no user_id of their own — they were never asked to have a
+    Sift account — so every lookup here deliberately runs AS the owner,
+    exactly as it would if the owner were looking at their own project,
+    rather than trying to invent a "shared" identity that doesn't exist in
+    those tables."""
+    from core.project_sharing import verify_share_access
+    from core.db import _conn, _PH
+    link = verify_share_access(token, email)
+    if not link:
+        raise HTTPException(403, "This link doesn't grant access to that email.")
+    with _conn() as conn:
+        row = conn.execute(f"SELECT * FROM sessions WHERE id = {_PH}", (run_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Run not found.")
+    session = dict(row)
+    if session.get("project_id") != link["project_id"]:
+        raise HTTPException(404, "Run not found.")
+    return session
+
+
+@router.get("/share/{token}/runs/{run_id}/hypothesis")
+def share_get_hypothesis(token: str, run_id: str, email: str):
+    """Read-only Hypothesis Agent output for a shared run, if one was ever
+    generated — same run-level artifact a signed-in collaborator would see
+    on the Hypothesis tab, just without needing an account."""
+    from core.hypothesis_db import list_hypothesis_runs, get_hypothesis_run
+    session = _share_verified_session(token, run_id, email)
+    owner_id = session.get("user_id")
+    runs = list_hypothesis_runs(owner_id, run_id)
+    if not runs:
+        return {"hypothesis": None}
+    full = get_hypothesis_run(runs[0]["id"], owner_id)
+    return {"hypothesis": full}
+
+
+@router.get("/share/{token}/runs/{run_id}/studio")
+def share_get_studio(token: str, run_id: str, email: str):
+    """Read-only Studio (multi-paper chat) transcript for a shared run.
+    Studio history is stored per-user, not per-run, so this deliberately
+    shows the review OWNER's conversation — the one attached to the run a
+    visitor is actually looking at — not some notion of a "project-wide"
+    thread that doesn't exist in the schema."""
+    from core.studio_history import get_studio_chat
+    session = _share_verified_session(token, run_id, email)
+    owner_id = session.get("user_id")
+    return {"messages": get_studio_chat(owner_id, run_id)}
+
+
+class ContactBody(BaseModel):
+    name: str
+    email: str
+    affiliation: str = ""
+    message: str
+    # Honeypot field: real visitors never see or fill this (hidden via CSS on
+    # the frontend), so a non-empty value here means a bot filled every
+    # field it could find. Silently accepted-but-dropped rather than a 4xx,
+    # so the bot doesn't learn its submission was recognized as spam.
+    website: str = ""
+
+
+@router.post("/contact")
+async def submit_contact_form(body: ContactBody):
+    """Public 'Contact us' form on the About page. No auth — anyone can
+    reach this, so keep it narrow: fixed recipient (settings.contact_to_email,
+    never client-supplied), a honeypot field, and basic length/format checks.
+    Actual delivery goes through Resend's HTTP API rather than raw SMTP,
+    since Cloud Run doesn't allow outbound SMTP ports on some networks and
+    Resend's API works over plain HTTPS."""
+    if body.website.strip():
+        return {"ok": True}
+
+    name = body.name.strip()
+    email = body.email.strip()
+    message = body.message.strip()
+    affiliation = body.affiliation.strip()
+
+    if not name or not email or not message:
+        raise HTTPException(400, "Name, email, and message are required.")
+    if "@" not in email or len(email) > 320:
+        raise HTTPException(400, "That doesn't look like a valid email address.")
+    if len(name) > 200 or len(affiliation) > 300:
+        raise HTTPException(400, "Name or affiliation is too long.")
+    if len(message) > 5000:
+        raise HTTPException(400, "Message is too long (5000 character limit).")
+
+    if not settings.resend_api_key:
+        logging.error("Contact form submitted but RESEND_API_KEY is not configured — dropping.")
+        raise HTTPException(503, "Contact form isn't set up yet. Please email us directly.")
+
+    import httpx
+    html_body = (
+        f"<p><b>Name:</b> {_esc(name)}</p>"
+        f"<p><b>Email:</b> {_esc(email)}</p>"
+        + (f"<p><b>Affiliation:</b> {_esc(affiliation)}</p>" if affiliation else "")
+        + f"<p><b>Message:</b></p><p>{_esc(message).replace(chr(10), '<br>')}</p>"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {settings.resend_api_key}"},
+                json={
+                    "from": f"Orcus Intelligence Lab site <{settings.contact_from_email}>",
+                    "to": [settings.contact_to_email],
+                    "reply_to": email,
+                    "subject": f"Contact form: {name}",
+                    "html": html_body,
+                },
+            )
+        if resp.status_code >= 300:
+            logging.error("Resend send failed (%s): %s", resp.status_code, resp.text)
+            raise HTTPException(502, "Couldn't send your message right now. Please try again shortly.")
+    except httpx.HTTPError as e:
+        logging.error("Resend request error: %s", e)
+        raise HTTPException(502, "Couldn't send your message right now. Please try again shortly.")
+
+    return {"ok": True}
+
+
+def _esc(s: str) -> str:
+    """Minimal HTML-escape for interpolating user text into the contact
+    email's HTML body — this is an internal notification email, not
+    rendered in a browser the sender controls, but escaping costs nothing
+    and avoids any chance of the HTML body being malformed."""
+    return (
+        s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    )
+
+
+_RESUME_EXTS = (".pdf", ".doc", ".docx")
+_MAX_ATTACHMENT_BYTES = 8_000_000  # 8MB/file — generous for a CV/cover letter, keeps the
+                                    # total well under Resend's per-email attachment ceiling
+
+
+async def _read_application_file(f: UploadFile, label: str) -> dict:
+    """Validate + base64-encode one uploaded file for Resend's attachments
+    array. Raises HTTPException on anything that isn't a small PDF/Word doc —
+    this is a public, unauthenticated endpoint, so it's deliberately narrow
+    about what it will forward as an email attachment."""
+    name = (f.filename or "").strip()
+    if not name.lower().endswith(_RESUME_EXTS):
+        raise HTTPException(400, f"{label} must be a PDF or Word document (.pdf, .doc, .docx).")
+    data = await f.read()
+    if not data:
+        raise HTTPException(400, f"{label} appears to be empty.")
+    if len(data) > _MAX_ATTACHMENT_BYTES:
+        raise HTTPException(400, f"{label} is too large (8MB limit).")
+    return {"filename": name, "content": base64.b64encode(data).decode("ascii")}
+
+
+@router.post("/careers/apply")
+async def submit_job_application(
+    role_title: str = Form(...),
+    first_name: str = Form(...),
+    last_name: str = Form(...),
+    email: str = Form(...),
+    phone: str = Form(""),
+    address: str = Form(""),
+    linkedin: str = Form(""),
+    scholar: str = Form(""),
+    github: str = Form(""),
+    personal_website: str = Form(""),
+    # Screening questions — same spirit as a standard job-board application
+    # (current location, availability, work authorization) but trimmed down
+    # for a small remote-first team: no office-attendance question (these
+    # roles are remote) and no formal arbitration/EEO legal boilerplate,
+    # since that's US-employment-law machinery this company isn't set up
+    # for. "certified" stands in for that as a single honesty checkbox.
+    location: str = Form(...),
+    start_date: str = Form(...),
+    work_authorized: str = Form(...),  # "yes" | "no"
+    needs_sponsorship: str = Form(...),  # "yes" | "no"
+    additional_info: str = Form(""),
+    certified: str = Form(...),  # must be "yes"
+    website: str = Form(""),  # honeypot — see submit_contact_form for the same pattern
+    resume: UploadFile = File(...),
+    cover_letter: UploadFile = File(...),
+    additional_document: UploadFile | None = File(None),
+):
+    """Careers page 'Apply' form. Public, unauthenticated, so validation here
+    is deliberately strict: fixed recipient (settings.hr_email, never
+    client-supplied), a honeypot, tight file-type/size limits, and the same
+    Resend delivery path as the Contact form — just with attachments and a
+    reply_to set to the applicant's own email so HR can reply directly."""
+    if website.strip():
+        return {"ok": True}
+
+    first_name, last_name, email = first_name.strip(), last_name.strip(), email.strip()
+    phone, address = phone.strip(), address.strip()
+    linkedin, scholar, role_title = linkedin.strip(), scholar.strip(), role_title.strip()
+    github, personal_website = github.strip(), personal_website.strip()
+    location, start_date = location.strip(), start_date.strip()
+    additional_info = additional_info.strip()
+
+    if not first_name or not last_name or not email:
+        raise HTTPException(400, "First name, last name, and email are required.")
+    if "@" not in email or len(email) > 320:
+        raise HTTPException(400, "That doesn't look like a valid email address.")
+    if not location or not start_date:
+        raise HTTPException(400, "Current location and earliest start date are required.")
+    if work_authorized not in ("yes", "no") or needs_sponsorship not in ("yes", "no"):
+        raise HTTPException(400, "Please answer the work authorization and sponsorship questions.")
+    if certified != "yes":
+        raise HTTPException(400, "Please confirm the information in your application is accurate.")
+    for field, val, limit in (("First name", first_name, 100), ("Last name", last_name, 100),
+                              ("Phone", phone, 40), ("Address", address, 300),
+                              ("LinkedIn URL", linkedin, 300), ("Google Scholar URL", scholar, 300),
+                              ("GitHub URL", github, 300), ("Personal website URL", personal_website, 300),
+                              ("Location", location, 200), ("Additional information", additional_info, 3000)):
+        if len(val) > limit:
+            raise HTTPException(400, f"{field} is too long.")
+
+    if not settings.resend_api_key:
+        logging.error("Job application submitted but RESEND_API_KEY is not configured — dropping.")
+        raise HTTPException(503, "Applications aren't set up yet. Please email us directly.")
+
+    import httpx
+    resume_att = await _read_application_file(resume, "Resume")
+    cover_letter_att = await _read_application_file(cover_letter, "Cover letter")
+    attachments = [resume_att, cover_letter_att]
+    # Optional — a portfolio, writing sample, or research summary the
+    # applicant wants to add beyond the required resume/cover letter.
+    if additional_document is not None and (additional_document.filename or "").strip():
+        attachments.append(await _read_application_file(additional_document, "Additional document"))
+
+    rows = [("Name", f"{first_name} {last_name}"), ("Email", email)]
+    if phone: rows.append(("Phone", phone))
+    if address: rows.append(("Address", address))
+    if linkedin: rows.append(("LinkedIn", linkedin))
+    if scholar: rows.append(("Google Scholar", scholar))
+    if github: rows.append(("GitHub", github))
+    if personal_website: rows.append(("Personal website", personal_website))
+    rows.append(("Current location", location))
+    rows.append(("Earliest start date", start_date))
+    rows.append(("Authorized to work in their country of residence", "Yes" if work_authorized == "yes" else "No"))
+    rows.append(("Will need visa sponsorship", "Yes" if needs_sponsorship == "yes" else "No"))
+    if additional_info: rows.append(("Additional information", additional_info))
+    html_body = f"<p><b>Role:</b> {_esc(role_title or 'Unspecified')}</p>" + "".join(
+        f"<p><b>{_esc(k)}:</b> {_esc(v)}</p>" for k, v in rows
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {settings.resend_api_key}"},
+                json={
+                    "from": f"Orcus Intelligence Lab site <{settings.contact_from_email}>",
+                    "to": [settings.hr_email],
+                    "reply_to": email,
+                    "subject": f"Application: {role_title or 'Unspecified role'} — {first_name} {last_name}",
+                    "html": html_body,
+                    "attachments": attachments,
+                },
+            )
+        if resp.status_code >= 300:
+            logging.error("Resend send failed (%s): %s", resp.status_code, resp.text)
+            raise HTTPException(502, "Couldn't submit your application right now. Please try again shortly.")
+
+        # Confirmation email back to the applicant — same attachments, so they
+        # have a receipt of exactly what was submitted (and a backup copy of
+        # their own resume/cover letter, in case they don't keep one handy).
+        # Best-effort: HR already has the application at this point, so a
+        # failure here shouldn't turn into a user-facing error — just log it.
+        try:
+            confirm_html = (
+                f"<p>Hi {_esc(first_name)},</p>"
+                f"<p>Thanks for applying to <b>{_esc(role_title or 'Orcus Intelligence Lab')}</b> — "
+                f"we've received your application and will be in touch.</p>"
+                f"<p>For your records, here's a copy of what you submitted:</p>" + html_body
+            )
+            confirm_resp = await client_post_resend(
+                settings.resend_api_key,
+                {
+                    "from": f"Orcus Intelligence Lab <{settings.contact_from_email}>",
+                    "to": [email],
+                    "reply_to": settings.hr_email,
+                    "subject": f"We received your application — {role_title or 'Orcus Intelligence Lab'}",
+                    "html": confirm_html,
+                    "attachments": attachments,
+                },
+            )
+            if confirm_resp.status_code >= 300:
+                logging.error("Applicant confirmation email failed (%s): %s",
+                              confirm_resp.status_code, confirm_resp.text)
+        except httpx.HTTPError as e:
+            logging.error("Applicant confirmation email request error: %s", e)
+    except httpx.HTTPError as e:
+        logging.error("Resend request error: %s", e)
+        raise HTTPException(502, "Couldn't submit your application right now. Please try again shortly.")
+
+    return {"ok": True}
+
+
+async def client_post_resend(api_key: str, payload: dict):
+    """POST one email to Resend's send API — factored out so the
+    applicant-confirmation send in submit_job_application (a second,
+    best-effort email alongside the HR notification) doesn't duplicate the
+    request boilerplate inline."""
+    import httpx
+    async with httpx.AsyncClient(timeout=30) as client:
+        return await client.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json=payload,
+        )
+
+
 @router.get("/usage/trend")
 def usage_trend(days: int = 30, tz_offset: int = 0, user_id: str = Depends(require_user)):
     """Per-day token + cost totals for the signed-in user, plus an all-time

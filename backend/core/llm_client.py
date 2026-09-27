@@ -259,6 +259,54 @@ class LLMClient:
         self.last_truncated = getattr(resp, "stop_reason", None) == "max_tokens"
         return out
 
+    def call_json(
+        self,
+        user_text: Optional[str] = None,
+        system: Optional[str] = None,
+        tools: Optional[list] = None,
+        max_tokens: int = 1200,
+        content: Optional[list] = None,
+        cache_prefix: Optional[str] = None,
+        temperature: Optional[float] = None,
+        retries: int = 1,
+    ) -> Any:
+        """call() + parse_json(), retrying the WHOLE call (not just re-parsing
+        the same broken text) up to `retries` times if the response doesn't
+        parse. Every one of parse_json()'s fallback repairs (truncation,
+        stray unescaped quotes) is best-effort against known patterns, not a
+        guarantee -- a response can still fail to parse for a reason neither
+        repair covers, and that used to surface straight to the user as a raw
+        Python exception (e.g. "Expecting ',' delimiter: line 7 column 3
+        (char 361)") crashing an early pipeline stage like the Query
+        Reformulator. These are near-always one-off formatting slips, not a
+        deterministic failure, so a fresh call with the same prompt very
+        often just succeeds -- turning what was a user-facing pipeline crash
+        into an invisible retry. On a retry, the system prompt gets an extra
+        line reinforcing strict JSON, in case the first failure was the model
+        drifting into markdown/prose rather than a one-off stray character."""
+        last_err: Exception | None = None
+        for attempt in range(retries + 1):
+            call_system = system
+            if attempt > 0 and system:
+                call_system = system + (
+                    "\n\nYour previous response was not valid JSON. Respond with ONLY "
+                    "valid, complete JSON this time — no markdown fences, no text "
+                    "before or after it, every quote inside a string properly escaped."
+                )
+            out = self.call(
+                user_text=user_text, system=call_system, tools=tools, max_tokens=max_tokens,
+                content=content, cache_prefix=cache_prefix, temperature=temperature,
+            )
+            try:
+                return self.parse_json(out)
+            except Exception as e:
+                last_err = e
+                log.warning(
+                    "call_json: response didn't parse (stage=%s attempt=%d/%d): %s",
+                    self.stage, attempt + 1, retries + 1, e,
+                )
+        raise last_err
+
     def _call_gemini(self, user_text, system, max_tokens, content, model: str,
                       temperature: Optional[float] = None) -> str:
         """Route the same request to Google Gemini, converting Anthropic-style
