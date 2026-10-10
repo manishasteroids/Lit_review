@@ -1,6 +1,15 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, lazy, Suspense } from "react";
 import { ensureAuth } from "../Auth.jsx";
 import { api } from "../api/client.js";
+
+// The 3D figures pull in three.js, so they load as their own chunk after the
+// page itself is on screen.
+const figure = (name) => lazy(() => import("./LandingFigures.jsx").then((m) => ({ default: m[name] })));
+const CitationFigure = figure("CitationFigure");
+const PipelineFigure = figure("PipelineFigure");
+const HypothesisFigure = figure("HypothesisFigure");
+const LoopFigure = figure("LoopFigure");
+const FigureFallback = () => <figure className="lp3-fig"><div className="lp3-stage" /></figure>;
 
 /**
  * Public marketing site — shown to signed-out visitors, before the tools app.
@@ -152,6 +161,13 @@ function TopBar({ page, setPage, login }) {
     ["Publications", "Papers & white papers coming out of this project", "pub"],
     ["Blog", "Notes on building Sift and what we're learning", "blog"],
   ];
+  // Product menu -> the section of the home page that shows that feature.
+  const productActions = [
+    () => jump("lp-features"),   // Literature Review        -> Sift
+    () => jump("feat-4"),        // Research Paper Analysis  -> Chat with any paper
+    () => jump("lp-infinity"),   // Research Methods Generation -> Infinity
+    () => jump("sift-extract"),  // Data Analysis            -> Sift's Extract step (comparison table)
+  ];
   const resourceActions = [
     () => jump("lp-news"),
     () => jump("lp-faq"),
@@ -168,7 +184,8 @@ function TopBar({ page, setPage, login }) {
         </div>
 
         <nav className="lp-nav">
-          <NavDropdown label="Product" items={FEATURE_ITEMS} closeSignal={page} onSelect={() => login()} />
+          <NavDropdown label="Product" items={FEATURE_ITEMS} closeSignal={page}
+            onSelect={(i) => productActions[i]()} />
           <NavDropdown label="Resources" items={RESOURCE_ITEMS} closeSignal={page}
             onSelect={(i) => resourceActions[i]()} />
           <button className="lp-link" onClick={() => setPage("careers")}>Careers</button>
@@ -306,73 +323,26 @@ function FeatureIcon({ i, name }) {
 function Home({ login, setPage }) {
   return (
     <>
-      <section className="lp-hero">
-        <h1 className="lp-h1">Interactive Scientific AI Research Assistant</h1>
-        <p className="lp-sub">Accelerates innovation, and boosts scientific discovery.</p>
-        <div className="lp-cta-row">
-          <button className="lp-cta" onClick={() => login("signup")}>Try for free</button>
-          <button className="lp-cta-2"
-            onClick={() => document.getElementById("lp-features")?.scrollIntoView({ behavior: "smooth" })}>
-            See how it works
-          </button>
+      <section className="lp3-hero">
+        <div className="lp3-hero-copy">
+          <div className="lp3-eyebrow">Sift · literature review agent</div>
+          <h1 className="lp-h1">Interactive Scientific AI Research Assistant</h1>
+          <p className="lp-sub">Accelerates innovation, and boosts scientific discovery.</p>
+          <div className="lp-cta-row">
+            <button className="lp-cta" onClick={() => login("signup")}>Try for free</button>
+            <button className="lp-cta-2"
+              onClick={() => document.getElementById("lp-features")?.scrollIntoView({ behavior: "smooth" })}>
+              See how it works
+            </button>
+          </div>
+          <div className="lp-note">Sign in with Google, GitHub, or email — no credit card required.</div>
+          <button className="lp-pricing-link" onClick={() => setPage("pricing")}>See pricing →</button>
         </div>
-        <div className="lp-note">Sign in with Google, GitHub, or email — no credit card required.</div>
-        <button className="lp-pricing-link" onClick={() => setPage("pricing")}>See pricing →</button>
-        <HeroVisual />
+        <Suspense fallback={<FigureFallback />}><CitationFigure /></Suspense>
       </section>
 
       <div id="lp-features" className="lp-section">
-        <div className="lp-ads-label">What it does</div>
-        <h2 className="lp-cat">Literature Review</h2>
-        <p className="lp-cat-sub">From a research question to a cited review — automatically.</p>
-
-        {/* Pipeline steps overview — clickable, scrolls to the matching
-            detail section below so the strip feels like a live map of the
-            pipeline rather than a flat row of labels. */}
-        <div className="lp-steps">
-          {STEPS.map((s, i) => (
-            <React.Fragment key={s.k}>
-              <a href={`#feat-${STEP_FEATURE_MAP[i]}`} className="lp-step">
-                <div className="lp-step-ic">
-                  <span className="lp-step-ic-ring" />
-                  <FeatureIcon name={STEP_ICONS[i]} />
-                </div>
-                <div className="lp-step-n">{i + 1}</div>
-                <div className="lp-step-t">{s.k}</div>
-                <div className="lp-step-d">{s.d}</div>
-              </a>
-              {i < STEPS.length - 1 && (
-                <div className="lp-step-arrow" aria-hidden="true">
-                  <svg viewBox="0 0 28 16" className="lp-step-arrow-svg">
-                    <path d="M1 8h22M17 2l6 6-6 6" />
-                    <circle r="2" className="lp-step-flow">
-                      <animateMotion dur="2.4s" repeatCount="indefinite"
-                        begin={`${i * 0.3}s`} path="M1 8h22" />
-                    </circle>
-                  </svg>
-                </div>
-              )}
-            </React.Fragment>
-          ))}
-        </div>
-
-        {/* Step-by-step feature detail */}
-        {FEATURES.map((f, i) => (
-          <Reveal key={f.title}>
-            <div className={"lp-feature" + (i % 2 ? " rev" : "")} id={`feat-${i}`}>
-              <div>
-                <div className="lp-step-tag">Step {i + 1}</div>
-                <h3 className="lp-feat-title">{f.title}</h3>
-                <p className="lp-feat-body">{f.body}</p>
-                <ul className="lp-feat-list">
-                  {f.points.map((p) => <li key={p}><span className="lp-check">✓</span>{p}</li>)}
-                </ul>
-                <button className="lp-learn" onClick={() => login("signup")}>Try it free →</button>
-              </div>
-              <div className="lp-visual">{f.visual}</div>
-            </div>
-          </Reveal>
-        ))}
+        <SiftSection login={login} />
 
         {/* ── Research Collaborations ─────────────────────────── */}
         <Reveal>
@@ -676,57 +646,179 @@ function SiteFooter({ setPage }) {
 
 /* ── Hypothesis Generation — auto-advancing closed-loop carousel ───────── */
 
-function HypothesisSection({ login }) {
+/* ── Sift: one review followed through the six agents ───────────────────
+   The copy scrolls on the left while the 3D figure stays pinned on the right
+   and moves the same fifty papers from stage to stage. */
+function SiftSection({ login }) {
+  const stepsRef = useRef(null);
+  const [cur, setCur] = useState(0);
+  const stages = [
+    {
+      k: "Ask", title: "Your research question",
+      body: "Ask a question in plain language. Sift reformulates it into precise search queries before anything is retrieved.",
+      points: [],
+      visual: (
+        <div className="lp-card lp3-ask">
+          <span>Q</span>How do diffusion models handle protein–ligand binding?
+        </div>
+      ),
+    },
+    {
+      k: "Search", ...FEATURES[0],
+      body: "Sift searches Semantic Scholar, arXiv, OpenAlex and PubMed at once — ranking results by relevance to your topic, not just citation count.",
+    },
+    { k: "Filter", ...FEATURES[1] },
+    { k: "Extract", ...FEATURES[2] },
+    {
+      k: "Critique", title: "Themes and gaps",
+      body: "Before a word is written, the critique agent groups the corpus into themes, finds where the papers agree, and marks what nobody has studied yet.",
+      points: ["Themes, consensus and gaps detected first", "Every claim traces to a numbered source"],
+      visual: null,
+    },
+    { k: "Write", ...FEATURES[3] },
+  ];
+  const chat = FEATURES[4];
+
+  return (
+    <>
+      <div className="lp-ads-label lp3-left">What it does</div>
+      <h2 className="lp-cat">Sift - Literature Review</h2>
+      <p className="lp-cat-sub">
+        From a research question to a cited review — automatically. Scroll to follow one review through the six agents.
+      </p>
+
+      <div className="lp3-pipe">
+        <div className="lp3-steps" ref={stepsRef}>
+          {stages.map((f, i) => (
+            <article key={f.k} id={"sift-" + f.k.toLowerCase()} className={"lp3-step" + (i === cur ? " on" : "")}>
+              <div className="lp-step-tag">{i + 1} · {f.k}</div>
+              <h3 className="lp-feat-title">{f.title}</h3>
+              <p className="lp-feat-body">{f.body}</p>
+              {f.points.length > 0 && (
+                <ul className="lp-feat-list">
+                  {f.points.map((p) => <li key={p}><span className="lp-check">✓</span>{p}</li>)}
+                </ul>
+              )}
+              {f.visual && <div className="lp-visual lp3-step-visual">{f.visual}</div>}
+              {i > 0 && <button className="lp-learn" onClick={() => login("signup")}>Try it free →</button>}
+            </article>
+          ))}
+        </div>
+        <div className="lp3-pipe-fig">
+          <Suspense fallback={<FigureFallback />}>
+            <PipelineFigure stepsRef={stepsRef} onStage={setCur} />
+          </Suspense>
+        </div>
+      </div>
+
+      <Reveal>
+        <div className="lp-feature" id="feat-4">
+          <div>
+            <div className="lp-step-tag">After the review</div>
+            <h3 className="lp-feat-title">{chat.title}</h3>
+            <p className="lp-feat-body">{chat.body}</p>
+            <ul className="lp-feat-list">
+              {chat.points.map((p) => <li key={p}><span className="lp-check">✓</span>{p}</li>)}
+            </ul>
+            <button className="lp-learn" onClick={() => login("signup")}>Try it free →</button>
+          </div>
+          <div className="lp-visual">{chat.visual}</div>
+        </div>
+      </Reveal>
+    </>
+  );
+}
+
+/* ── Infinity: hypothesis generation ─────────────────────────────────────
+   Two blocks. First the hypothesis pipeline, condensed to its four key
+   moves (the app's HypothesisPipelineRail has the full seven stages) and
+   shown as a rotating 3D bracket. Then the three-stage loop out to the bench. */
+const HYPO_PIPELINE = [
+  ["Generate", "Reads Sift's findings and proposes competing hypotheses"],
+  ["Critique", "Scores each one and searches for prior art"],
+  ["Rank", "Head-to-head matches, single elimination"],
+  ["Recommend", "Final pick, checked against the reported literature"],
+];
+
+// Steps through `count` stages on a timer; stops for good once the visitor
+// picks a stage themselves, and waits while they hover.
+function useAutoStage(count, ms) {
   const [i, setI] = useState(0);
   const [paused, setPaused] = useState(false);
-
+  const [manual, setManual] = useState(false);
   useEffect(() => {
-    if (paused) return;
-    const t = setInterval(() => setI((n) => (n + 1) % LOOP.length), 5000);
+    if (paused || manual) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const t = setInterval(() => setI((n) => (n + 1) % count), ms);
     return () => clearInterval(t);
-  }, [paused]);
+  }, [paused, manual, count, ms]);
+  const hover = { onMouseEnter: () => setPaused(true), onMouseLeave: () => setPaused(false) };
+  return [i, (n) => { setManual(true); setI(n); }, hover];
+}
 
+function HypothesisSection({ login }) {
+  const [h, pickH, hoverH] = useAutoStage(HYPO_PIPELINE.length, 7000);
+  const [i, pickI, hoverI] = useAutoStage(LOOP.length, 14000);
   const stage = LOOP[i];
+
   return (
-    <div className="lp-band" onMouseEnter={() => setPaused(true)} onMouseLeave={() => setPaused(false)}>
-      <h2 className="lp-cat">Hypothesis Generation</h2>
+    <div className="lp-band" id="lp-infinity">
+      <div className="lp-ads-label lp3-left">Early access</div>
+      <h2 className="lp-cat">Infinity - Hypothesis Generation</h2>
       <p className="lp-cat-sub">
         Beyond reading the literature — close the loop between AI reasoning and the bench.
       </p>
 
-      {/* loop navigator */}
-      <div className="lp-loop">
-        {LOOP.map((s, n) => (
-          <React.Fragment key={s.key}>
-            <button className={"lp-loop-node" + (n === i ? " on" : "")} onClick={() => setI(n)}>
-              <span className="lp-loop-ic">{s.ic}</span>
-              <span className="lp-loop-t">{s.key}</span>
-              <span className="lp-loop-s">{s.sub}</span>
-            </button>
-            <span className="lp-loop-arrow" aria-hidden="true">{n === LOOP.length - 1 ? "↺" : "→"}</span>
-          </React.Fragment>
-        ))}
-      </div>
-
-      {/* slide */}
-      <div className="lp-slide" key={stage.key}>
-        <div className="lp-slide-copy">
-          <div className="lp-step-tag">Stage {i + 1} of {LOOP.length}</div>
-          <h3 className="lp-feat-title">{stage.title}</h3>
-          <p className="lp-feat-body">{stage.body}</p>
-          <ul className="lp-feat-list">
-            {stage.points.map((p) => <li key={p}><span className="lp-check">✓</span>{p}</li>)}
-          </ul>
-          <button className="lp-learn" onClick={() => login("signup")}>Join the early access →</button>
+      {/* 1. the hypothesis pipeline */}
+      <div className="lp3-loop" {...hoverH}>
+        <div className="lp3-loopfig">
+          <Suspense fallback={<FigureFallback />}><HypothesisFigure stage={h} /></Suspense>
         </div>
-        <div className="lp-visual">{stage.visual}</div>
+        <div>
+          <div className="lp-step-tag">Hypothesis pipeline</div>
+          <h3 className="lp-feat-title">From your literature to one recommended hypothesis</h3>
+          <p className="lp-feat-body">
+            Infinity reads the findings Sift extracted, proposes competing hypotheses, and makes them
+            earn their place: each is critiqued, checked for prior art and ranked head to head before one is recommended.
+          </p>
+          <ol className="lp3-rail">
+            {HYPO_PIPELINE.map(([t, d], n) => (
+              <li key={t}>
+                <button className={"lp3-rail-btn" + (n === h ? " on" : "") + (n < h ? " done" : "")}
+                  aria-current={n === h ? "step" : undefined} onClick={() => pickH(n)}>
+                  <span className="lp3-rail-n">{n < h ? "✓" : n + 1}</span>
+                  <span><b>{t}</b><small>{d}</small></span>
+                </button>
+              </li>
+            ))}
+          </ol>
+        </div>
       </div>
 
-      <div className="lp-dots">
-        {LOOP.map((s, n) => (
-          <button key={s.key} aria-label={s.key}
-            className={"lp-dot" + (n === i ? " on" : "")} onClick={() => setI(n)} />
-        ))}
+      {/* 2. out to the bench and back */}
+      <div className="lp3-loop lp3-loop-2" {...hoverI}>
+        <div className="lp3-loopfig">
+          <Suspense fallback={<FigureFallback />}><LoopFigure mode={i} /></Suspense>
+        </div>
+        <div>
+          <div className="lp3-tabs" role="tablist" aria-label="Stages of the Infinity loop">
+            {LOOP.map((s, n) => (
+              <button key={s.key} role="tab" aria-selected={n === i}
+                className={"lp3-tab" + (n === i ? " on" : "")} onClick={() => pickI(n)}>
+                <span className="lp3-tab-n">{n + 1}/{LOOP.length}</span>
+                <span><b>{s.key}</b><small>{s.sub}</small></span>
+              </button>
+            ))}
+          </div>
+          <div className="lp3-panel" key={stage.key}>
+            <h3 className="lp-feat-title">{stage.title}</h3>
+            <p className="lp-feat-body">{stage.body}</p>
+            <ul className="lp-feat-list">
+              {stage.points.map((p) => <li key={p}><span className="lp-check">✓</span>{p}</li>)}
+            </ul>
+            <button className="lp-learn" onClick={() => login("signup")}>Join the early access →</button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -1339,32 +1431,67 @@ function applyHref(roleId) {
   return url.toString();
 }
 
-function RoleCard({ role }) {
+// One open role. The header (title, facts, Apply) and the summary are always
+// visible; the long responsibilities/qualifications lists open on demand so
+// the page stays scannable when there are several roles.
+function RoleCard({ role, defaultOpen = false }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const facts = [...(role.meta || "").split(" · "), role.salary, role.contract].filter(Boolean);
+  const [first, ...rest] = role.sections;
   return (
-    <div className="lp-role-card">
-      <div className="lp-role-head">
-        <div>
-          <div className="lp-role-title">{role.title}</div>
-          <div className="lp-role-meta">
-            {role.meta}{role.salary ? ` · ${role.salary}` : ""}{role.contract ? ` · ${role.contract}` : ""}
-          </div>
-          {role.contractNote && <div className="lp-role-meta">{role.contractNote}</div>}
+    <article className="lpc-role" id={`role-${role.id}`}>
+      <div className="lpc-role-head">
+        <div className="lpc-role-headmain">
+          <h3 className="lpc-role-title">{role.title}</h3>
+          <ul className="lpc-facts">
+            {facts.map((f) => <li key={f}>{f}</li>)}
+          </ul>
         </div>
-        <a className="lp-cta" href={applyHref(role.id)} target="_blank" rel="noopener noreferrer">
+        <a className="lp-cta lpc-apply" href={applyHref(role.id)} target="_blank" rel="noopener noreferrer">
           Apply →
         </a>
       </div>
-      {role.blurb && <p className="lp-role-blurb">{role.blurb}</p>}
-      {role.sections.map((s) => (
-        <div key={s.heading} className="lp-role-section">
-          <div className="lp-role-section-h">{s.heading}</div>
-          <ul className="lp-role-list">
-            {s.items.map((it, i) => <li key={i}>{it}</li>)}
-          </ul>
+      {role.blurb && <p className="lpc-role-blurb">{role.blurb}</p>}
+      {role.contractNote && <p className="lpc-role-after"><b>After the contract</b>{role.contractNote}</p>}
+
+      <button className="lpc-toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        {open ? "Hide full description" : "Read full description"}
+        <svg className={"lp-caret" + (open ? " up" : "")} viewBox="0 0 12 8" width="10" height="7" aria-hidden="true">
+          <path d="M1 1.5 6 6.5 11 1.5" fill="none" stroke="currentColor" strokeWidth="1.6"
+            strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="lpc-role-body">
+          {first && (
+            <div className="lpc-sec">
+              <h4>{first.heading}</h4>
+              <ul>{first.items.map((it, i) => <li key={i}>{it}</li>)}</ul>
+            </div>
+          )}
+          {rest.length > 0 && (
+            <div className="lpc-sec-grid">
+              {rest.map((sec) => (
+                <div key={sec.heading} className="lpc-sec">
+                  <h4>{sec.heading}</h4>
+                  <ul>{sec.items.map((it, i) => <li key={i}>{it}</li>)}</ul>
+                </div>
+              ))}
+            </div>
+          )}
+          {role.notes && (
+            <div className="lpc-howto">
+              <b>How to apply</b>
+              <p>{renderNotesWithMailto(role.notes)}</p>
+              <a className="lp-cta lpc-apply" href={applyHref(role.id)} target="_blank" rel="noopener noreferrer">
+                Apply for this role →
+              </a>
+            </div>
+          )}
         </div>
-      ))}
-      {role.notes && <p className="lp-role-notes">{renderNotesWithMailto(role.notes)}</p>}
-    </div>
+      )}
+    </article>
   );
 }
 
@@ -1624,29 +1751,56 @@ function ApplyPage({ role, onBack }) {
 }
 
 function CareersPage() {
+  const jump = (id) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
   return (
-    <section className="lp-pricing">
-      <h1 className="lp-p-title">Careers at Orcus Intelligence Lab</h1>
-      <p className="lp-p-sub">
-        We're building the tools we wish existed when we were doing research ourselves —
-        and we're just getting started.
-      </p>
+    <section className="lpc">
+      {/* Header: the pitch on the left, what's open right now on the right */}
+      <div className="lpc-hero">
+        <div>
+          <div className="lp3-eyebrow">Careers</div>
+          <h1 className="lpc-title">Careers at Orcus Intelligence Lab</h1>
+          <p className="lpc-sub">
+            We're building the tools we wish existed when we were doing research ourselves —
+            and we're just getting started.
+          </p>
+          {OPEN_ROLES.length > 0 && (
+            <button className="lp-cta" onClick={() => jump("lpc-roles")}>
+              See open roles ({OPEN_ROLES.length})
+            </button>
+          )}
+        </div>
+        {OPEN_ROLES.length > 0 && (
+          <aside className="lpc-open" aria-label="Open roles">
+            <div className="lpc-open-h"><span className="lpc-dot" />Hiring now</div>
+            {OPEN_ROLES.map((r) => (
+              <button key={r.id} className="lpc-open-row" onClick={() => jump(`role-${r.id}`)}>
+                <span>
+                  <b>{r.title}</b>
+                  <small>{r.meta}</small>
+                </span>
+                <span aria-hidden="true">→</span>
+              </button>
+            ))}
+          </aside>
+        )}
+      </div>
 
-      <div className="lp-tri" style={{ textAlign: "left", marginBottom: 56 }}>
+      <div className="lpc-why">
         {WHY_SIFT.map((w) => (
-          <div className="lp-tile" key={w.t}>
-            <div className="lp-tile-t">{w.t}</div>
-            <div className="lp-tile-d">{w.d}</div>
+          <div key={w.t}>
+            <h3>{w.t}</h3>
+            <p>{w.d}</p>
           </div>
         ))}
       </div>
 
-      <div className="lp-openroles">
-        <h2 className="lp-cat" style={{ textAlign: "left" }}>Open roles</h2>
+      <div className="lpc-roles" id="lpc-roles">
+        <div className="lpc-roles-head">
+          <h2 className="lpc-h2">Open roles</h2>
+          {OPEN_ROLES.length > 0 && <span className="lpc-count">{OPEN_ROLES.length} open</span>}
+        </div>
         {OPEN_ROLES.length > 0 ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-            {OPEN_ROLES.map((r) => <RoleCard role={r} key={r.id} />)}
-          </div>
+          OPEN_ROLES.map((r) => <RoleCard role={r} key={r.id} defaultOpen={OPEN_ROLES.length === 1} />)
         ) : (
           <div className="lp-empty-card">
             <p>
@@ -1795,6 +1949,12 @@ function AboutPage() {
           Questions, feedback, partnership ideas, or just want to talk about the product —
           reach out any time.
         </p>
+        <address className="lp-address">
+          <strong>Orcus Intelligence Lab</strong><br />
+          25600 Rolling Hills Way<br />
+          Los Angeles, California 90505<br />
+          United States
+        </address>
         <div className="lp-contact-row">
           {CONTACT_EMAIL && (
             <a className="lp-cta" href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>
@@ -2233,6 +2393,8 @@ function LandingStyles() {
       .lp-empty-card { border: 1px dashed var(--lp-line); border-radius: 14px; padding: 30px 28px;
         text-align: left; background: var(--lp-bg2); }
       .lp-empty-card p { color: var(--lp-muted); font-size: 14.5px; line-height: 1.65; margin: 0 0 18px; }
+      .lp-address { font-style: normal; color: var(--lp-muted); font-size: 15px; line-height: 1.7; margin: 0 0 20px; }
+      .lp-address strong { color: var(--lp-ink); }
       .lp-contact-row { display: flex; gap: 12px; flex-wrap: wrap; }
 
       .lp-contact-form { max-width: 560px; margin: 28px 0 0; display: flex; flex-direction: column; gap: 12px; }
@@ -2357,6 +2519,190 @@ function LandingStyles() {
       .lp-role-list li { margin-bottom: 8px; }
       .lp-role-list li:last-child { margin-bottom: 0; }
       .lp-role-notes { margin: 18px 0 0; font-size: 13px; color: var(--lp-muted2); font-style: italic; }
+
+      /* ── 3D figures and the layouts around them (see LandingFigures.jsx) ── */
+      .lp-section .lp-cat { font-size: clamp(28px, 3.4vw, 42px); letter-spacing: -.02em; line-height: 1.1; margin: 0 0 12px; }
+      .lp-section .lp-cat-sub { font-size: 17px; line-height: 1.55; max-width: 60ch; margin: 0 0 36px; }
+      .lp-ads-label.lp3-left { text-align: left; margin-bottom: 12px; }
+
+      .lp3-hero { max-width: 1140px; margin: 0 auto; padding: 64px 24px 72px; display: grid;
+        grid-template-columns: minmax(0, .86fr) minmax(0, 1.14fr); gap: 52px; align-items: center; }
+      .lp3-hero-copy { min-width: 0; }
+      .lp3-eyebrow { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; letter-spacing: .14em;
+        text-transform: uppercase; color: var(--lp-muted2); margin-bottom: 18px; }
+      .lp3-hero .lp-h1 { font-size: clamp(36px, 4.9vw, 62px); }
+      .lp3-hero .lp-sub { margin: 0 0 30px; }
+      .lp3-hero .lp-cta-row { justify-content: flex-start; }
+      .lp3-hero .lp-pricing-link { margin: 10px 0 0; }
+      .lp3-hero .lp3-stage { aspect-ratio: 1.18 / 1; }
+      @media (max-width: 860px) {
+        .lp3-hero { grid-template-columns: minmax(0, 1fr); gap: 36px; padding-top: 44px; }
+        .lp3-hero .lp3-stage { aspect-ratio: 1 / 1; }
+      }
+
+      /* phones: the bar's menus don't fit, and a page that scrolls sideways unpins the Sift figure */
+      @media (max-width: 760px) { .lp-nav { display: none; } .lp-bar-cta { margin-left: auto; } .lp-logo { font-size: 16px; } }
+
+      /* menu links land below the sticky bar, not underneath it */
+      #lp-features, #lp-infinity, #lp-papers, #lp-faq, #lp-news, #feat-4 { scroll-margin-top: 76px; }
+      .lp3-step { scroll-margin-top: 40px; }
+
+      .lp3-fig { margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+      .lp3-stage { position: relative; overflow: hidden; border: 1px solid var(--lp-line); border-radius: 14px;
+        background-color: #f3f3fa;
+        background-image: linear-gradient(#e6e6f2 1px, transparent 1px), linear-gradient(90deg, #e6e6f2 1px, transparent 1px);
+        background-size: 28px 28px; background-position: -1px -1px; }
+      .lp3-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+        touch-action: pan-y; cursor: grab; }
+      .lp3-stage canvas:active { cursor: grabbing; }
+      .lp3-stage.fixed canvas { cursor: default; }
+      .lp3-hud { position: absolute; pointer-events: none; font-family: 'JetBrains Mono', monospace;
+        font-size: 11px; line-height: 1.55; color: var(--lp-muted); letter-spacing: .02em; }
+      .lp3-hud b { color: var(--lp-ink); font-weight: 500; }
+      .lp3-hud.tl { top: 12px; left: 14px; }
+      .lp3-hud.tr { top: 12px; right: 14px; text-align: right; }
+      .lp3-hud.bl { bottom: 12px; left: 14px; right: 14px; display: flex; flex-wrap: wrap; gap: 4px 14px; }
+      .lp3-sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
+      .lp3-tag { position: absolute; top: 0; left: 0; pointer-events: none; white-space: nowrap; opacity: 0;
+        font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--lp-ink);
+        transition: opacity .4s; will-change: transform; }
+      .lp3-tag.on { opacity: 1; }
+      .lp3-tag span { display: inline-block; transform: translate(10px, -50%); background: rgba(255,255,255,.88);
+        border: 1px solid var(--lp-line); border-radius: 5px; padding: 2px 7px; max-width: 320px;
+        overflow: hidden; text-overflow: ellipsis; }
+      .lp3-tag.flip span { transform: translate(calc(-100% - 10px), -50%); }
+      .lp3-tag.axis span { background: none; border: 0; color: var(--lp-muted); transform: translate(-50%, -50%); padding: 0; }
+      .lp3-tag.strong span { color: var(--lp-indigo); font-weight: 700; }
+      .lp3-fig figcaption { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; line-height: 1.55; color: var(--lp-muted); }
+      .lp3-fig figcaption b { color: var(--lp-ink); font-weight: 500; }
+      .lp3-nogl { display: none; position: absolute; inset: 0; place-items: center; padding: 24px;
+        text-align: center; color: var(--lp-muted); font-size: 14px; }
+      .no-gl .lp3-nogl { display: grid; }
+      .lp3-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+      .lp3-chip { height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--lp-line);
+        background: #fff; color: var(--lp-muted); font-size: 13px; font-weight: 500; cursor: pointer;
+        display: inline-flex; align-items: center; gap: 7px; }
+      .lp3-chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+      .lp3-chip[aria-pressed="true"] { color: var(--lp-ink); border-color: var(--c); box-shadow: inset 0 0 0 1px var(--c); }
+
+      .lp3-pipe { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 52px; }
+      .lp3-pipe-fig { position: sticky; top: 84px; align-self: start; min-width: 0; }
+      .lp3-pipe-fig .lp3-stage { height: min(70vh, 640px); }
+      .lp3-steps { display: flex; flex-direction: column; min-width: 0; }
+      .lp3-step { min-height: 78vh; display: flex; flex-direction: column; justify-content: center;
+        padding-left: 20px; border-left: 2px solid var(--lp-line); transition: border-color .3s; }
+      .lp3-step.on { border-left-color: var(--lp-indigo); }
+      .lp3-step .lp-learn { align-self: flex-start; }
+      .lp3-step-visual { margin-top: 20px; }
+      .lp3-ask { padding: 14px 16px; font-size: 14.5px; display: flex; gap: 10px; align-items: baseline; }
+      .lp3-ask span { font-family: 'JetBrains Mono', monospace; color: var(--lp-indigo); font-weight: 700; }
+      @media (max-width: 860px) {
+        .lp3-pipe { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+        .lp3-pipe-fig { order: -1; top: 60px; z-index: 5; background: #fff; padding: 8px 0; }
+        .lp3-pipe-fig .lp3-stage { height: 38vh; }
+        .lp3-pipe-fig figcaption { display: none; }
+        .lp3-step { min-height: 0; padding-top: 36px; padding-bottom: 36px; }
+      }
+
+      .lp3-loop { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, .85fr); gap: 52px; align-items: start; }
+      .lp3-loop-2 { margin-top: 72px; padding-top: 56px; border-top: 1px solid var(--lp-line); }
+      .lp3-loopfig { min-width: 0; }
+      .lp3-loopfig .lp3-stage { height: min(64vh, 540px); }
+      @media (max-width: 860px) {
+        .lp3-loop { grid-template-columns: minmax(0, 1fr); gap: 28px; }
+        .lp3-loopfig .lp3-stage { height: 46vh; }
+      }
+      .lp3-rail { list-style: none; margin: 22px 0 0; padding: 0; display: flex; flex-direction: column; }
+      .lp3-rail li { position: relative; }
+      .lp3-rail li:not(:last-child)::after { content: ""; position: absolute; left: 25px; top: 44px; bottom: -6px;
+        width: 1px; background: var(--lp-line); }
+      .lp3-rail-btn { display: flex; gap: 14px; align-items: flex-start; width: 100%; text-align: left;
+        background: none; border: 1px solid transparent; border-radius: 10px; padding: 8px 10px; cursor: pointer; color: var(--lp-ink); }
+      .lp3-rail-btn:hover { background: var(--lp-bg2); }
+      .lp3-rail-btn.on { background: var(--lp-soft); border-color: var(--lp-indigo); }
+      .lp3-rail-n { flex: none; width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--lp-line);
+        background: #fff; display: grid; place-items: center; font-family: 'JetBrains Mono', monospace;
+        font-size: 12px; color: var(--lp-muted); position: relative; z-index: 1; }
+      .lp3-rail-btn.on .lp3-rail-n { border-color: var(--lp-indigo); background: var(--lp-indigo); color: #fff; }
+      .lp3-rail-btn.done .lp3-rail-n { border-color: #7bc493; color: #1f8a4c; background: #eefaf2; }
+      .lp3-rail-btn b, .lp3-tab b { display: block; font-size: 14.5px; font-weight: 600; }
+      .lp3-rail-btn small, .lp3-tab small { display: block; font-size: 12.5px; color: var(--lp-muted); margin-top: 1px; }
+      .lp3-tabs { display: flex; flex-direction: column; gap: 8px; }
+      .lp3-tab { display: flex; gap: 14px; align-items: baseline; text-align: left; width: 100%; padding: 13px 16px;
+        border-radius: 10px; border: 1px solid var(--lp-line); background: none; cursor: pointer; color: var(--lp-ink); }
+      .lp3-tab:hover { border-color: var(--lp-indigo); }
+      .lp3-tab.on { background: var(--lp-soft); border-color: var(--lp-indigo); }
+      .lp3-tab-n { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--lp-muted); }
+      .lp3-tab.on .lp3-tab-n { color: var(--lp-indigo); }
+      .lp3-panel { padding-top: 24px; }
+
+      /* ── Careers page ─────────────────────────────────────────────────── */
+      .lpc { max-width: 1140px; margin: 0 auto; padding: 64px 24px 88px; text-align: left; }
+      .lpc a.lp-cta { text-decoration: none; display: inline-block; white-space: nowrap; }
+      .lpc-hero { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); gap: 56px; align-items: center; }
+      .lpc-title { font-weight: 700; font-size: clamp(34px, 4.6vw, 56px); line-height: 1.05; letter-spacing: -.025em; margin: 0 0 18px; }
+      .lpc-sub { color: var(--lp-muted); font-size: 18px; line-height: 1.55; max-width: 46ch; margin: 0 0 28px; }
+      .lpc-open { border: 1px solid var(--lp-line); border-radius: 16px; background: var(--lp-bg2); padding: 10px; }
+      .lpc-open-h { display: flex; align-items: center; gap: 8px; padding: 10px 12px 12px;
+        font-family: 'JetBrains Mono', monospace; font-size: 11.5px; letter-spacing: .12em;
+        text-transform: uppercase; color: var(--lp-muted); }
+      .lpc-dot { width: 8px; height: 8px; border-radius: 50%; background: #1f9d55; box-shadow: 0 0 0 4px rgba(31,157,85,.16); }
+      .lpc-open-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%;
+        text-align: left; background: #fff; border: 1px solid var(--lp-line); border-radius: 11px;
+        padding: 14px 16px; cursor: pointer; color: var(--lp-ink); transition: border-color .15s ease, transform .15s ease; }
+      .lpc-open-row + .lpc-open-row { margin-top: 8px; }
+      .lpc-open-row:hover { border-color: var(--lp-indigo); transform: translateX(2px); }
+      .lpc-open-row b { display: block; font-size: 15px; font-weight: 600; line-height: 1.35; }
+      .lpc-open-row small { display: block; font-size: 13px; color: var(--lp-muted); margin-top: 3px; }
+      .lpc-open-row > span:last-child { color: var(--lp-indigo); font-weight: 700; }
+
+      .lpc-why { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 40px; margin: 72px 0 80px; }
+      .lpc-why > div { border-top: 2px solid var(--lp-ink); padding-top: 16px; }
+      .lpc-why h3 { font-size: 19px; font-weight: 700; letter-spacing: -.01em; margin: 0 0 8px; }
+      .lpc-why p { color: var(--lp-muted); font-size: 15px; line-height: 1.6; margin: 0; }
+
+      .lpc-roles { scroll-margin-top: 84px; }
+      .lpc-roles-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 22px; }
+      .lpc-h2 { font-weight: 700; font-size: clamp(28px, 3.4vw, 40px); letter-spacing: -.02em; margin: 0; }
+      .lpc-count { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--lp-muted); }
+      .lpc-role { border: 1px solid var(--lp-line); border-radius: 16px; background: #fff; padding: 30px 32px;
+        scroll-margin-top: 84px; transition: border-color .2s ease, box-shadow .2s ease; }
+      .lpc-role + .lpc-role { margin-top: 18px; }
+      .lpc-role:hover { border-color: #c9c5fb; box-shadow: 0 10px 30px rgba(91,79,240,.07); }
+      .lpc-role-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+      .lpc-role-headmain { min-width: 0; }
+      .lpc-role-title { font-size: 23px; font-weight: 700; letter-spacing: -.015em; line-height: 1.25; margin: 0 0 14px; }
+      .lpc-facts { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+      .lpc-facts li { font-size: 13px; font-weight: 500; color: var(--lp-ink); background: var(--lp-soft);
+        border-radius: 999px; padding: 5px 12px; }
+      .lpc-role-blurb { color: var(--lp-muted); font-size: 15.5px; line-height: 1.7; margin: 22px 0 0; max-width: 78ch; }
+      .lpc-role-after { font-size: 14px; line-height: 1.6; color: var(--lp-muted); margin: 14px 0 0; max-width: 78ch; }
+      .lpc-role-after b { color: var(--lp-ink); font-weight: 600; margin-right: 8px; }
+      .lpc-toggle { display: inline-flex; align-items: center; gap: 8px; margin-top: 22px; background: none;
+        border: none; padding: 0; cursor: pointer; color: var(--lp-indigo); font-size: 14.5px; font-weight: 600; }
+      .lpc-toggle:hover { text-decoration: underline; }
+      .lpc-toggle .lp-caret { transition: transform .2s ease; }
+      .lpc-toggle .lp-caret.up { transform: rotate(180deg); }
+      .lpc-role-body { margin-top: 26px; padding-top: 26px; border-top: 1px solid var(--lp-line); }
+      .lpc-sec h4 { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; font-weight: 500;
+        letter-spacing: .12em; text-transform: uppercase; color: var(--lp-indigo); margin: 0 0 12px; }
+      .lpc-sec ul { margin: 0; padding-left: 18px; color: var(--lp-muted); font-size: 14.5px; line-height: 1.65; }
+      .lpc-sec li { margin-bottom: 10px; }
+      .lpc-sec li::marker { color: var(--lp-muted2); }
+      .lpc-sec-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 36px; margin-top: 26px; }
+      .lpc-howto { margin-top: 28px; background: var(--lp-bg2); border: 1px solid var(--lp-line);
+        border-radius: 12px; padding: 20px 22px; }
+      .lpc-howto b { font-size: 14.5px; }
+      .lpc-howto p { color: var(--lp-muted); font-size: 14px; line-height: 1.65; margin: 6px 0 16px; max-width: 78ch; }
+      .lpc-howto p a { color: var(--lp-indigo); }
+      @media (max-width: 860px) {
+        .lpc { padding-top: 44px; }
+        .lpc-hero { grid-template-columns: minmax(0, 1fr); gap: 32px; }
+        .lpc-why { grid-template-columns: minmax(0, 1fr); gap: 26px; margin: 52px 0 56px; }
+        .lpc-role { padding: 22px 20px; }
+        .lpc-role-head { flex-direction: column; gap: 16px; }
+        .lpc-sec-grid { grid-template-columns: minmax(0, 1fr); gap: 26px; }
+      }
     `}</style>
   );
 }

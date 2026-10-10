@@ -262,6 +262,9 @@ function LoginModal({ onDismiss, initialMode }) {
   const [phone, setPhone] = useState("");
   const [address, setAddress] = useState("");
   const [msg, setMsg] = useState(null);
+  // "success" renders green, "error" red — the signup confirmation notice
+  // used to share the error colour and read like a failure.
+  const [msgKind, setMsgKind] = useState("error");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -272,32 +275,58 @@ function LoginModal({ onDismiss, initialMode }) {
 
   async function submit(e) {
     e.preventDefault();
-    setBusy(true); setMsg(null);
+    setBusy(true); setMsg(null); setMsgKind("error");
+    const cleanEmail = email.trim();
     try {
-      const { error } = mode === "signin"
-        ? await supabase.auth.signInWithPassword({ email, password })
-        : await supabase.auth.signUp({
-            email, password,
-            options: {
-              data: {
-                full_name: fullName.trim() || undefined,
-                affiliation: affiliation.trim() || undefined,
-                phone: phone.trim() || undefined,
-                address: address.trim() || undefined,
-              },
-            },
-          });
-      if (error) setMsg(error.message);
-      else if (mode === "signup") setMsg("Account created — check your email to confirm, then sign in.");
+      if (mode === "signin") {
+        const { error } = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
+        if (error) {
+          // Supabase reports an unconfirmed address as "Email not confirmed"
+          // (or, on some configs, the generic "Invalid login credentials").
+          // Point people at the likely cause instead of just "invalid".
+          const m = /not confirmed/i.test(error.message)
+            ? "Please confirm your email first — open the link we sent you, then sign in."
+            : /invalid login/i.test(error.message)
+              ? "Invalid email or password. If you just signed up, confirm your email via the link we sent first."
+              : error.message;
+          setMsg(m);
+        }
+        // On success, onAuthStateChange in AuthModalHost closes the modal.
+        return;
+      }
+
+      const { data, error } = await supabase.auth.signUp({
+        email: cleanEmail, password,
+        options: {
+          // Where the confirmation link sends people (and signs them in).
+          emailRedirectTo: window.location.origin,
+          data: {
+            full_name: fullName.trim() || undefined,
+            affiliation: affiliation.trim() || undefined,
+            phone: phone.trim() || undefined,
+            address: address.trim() || undefined,
+          },
+        },
+      });
+      if (error) { setMsg(error.message); return; }
+      if (data?.session) return; // email confirmation off → already signed in
+      // With confirmation on, an already-registered address comes back as a
+      // user with no identities rather than an error.
+      if (data?.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+        setMsg("An account with this email already exists — try signing in instead.");
+        return;
+      }
+      setMsgKind("success");
+      setMsg(`Account created! We sent a confirmation link to ${cleanEmail}. Open it to finish — you'll be signed in automatically. (Check spam if you don't see it.)`);
     } catch (err) {
       setMsg(err.message);
     } finally {
       setBusy(false);
     }
   }
- 
+
   async function oauth(provider) {
-    setMsg(null);
+    setMsg(null); setMsgKind("error");
     const { error } = await supabase.auth.signInWithOAuth({
       provider,
       options: { redirectTo: window.location.origin },
@@ -393,7 +422,11 @@ function LoginModal({ onDismiss, initialMode }) {
           </button>
         </form>
  
-        {msg && <div style={{ color: "#c0392b", fontSize: 13, marginTop: 12 }}>{msg}</div>}
+        {msg && (
+          <div style={{ color: msgKind === "success" ? "#1b7a3d" : "#c0392b", fontSize: 13, marginTop: 12, lineHeight: 1.5 }}>
+            {msg}
+          </div>
+        )}
  
         <div style={{ fontSize: 14, color: "#6b6b7b", marginTop: 18 }}>
           {mode === "signin" ? "New here? " : "Already have an account? "}
