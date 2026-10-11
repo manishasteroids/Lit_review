@@ -1,5 +1,19 @@
 import React, { useState, useEffect, useRef } from "react";
 import { authEnabled, supabase } from "./supabase.js";
+
+// True when frontend/.env still has the template value from .env.example, in
+// which case every sign-in request goes to a host that doesn't exist.
+const SUPABASE_PLACEHOLDER = /your-project\.supabase\.co/.test(import.meta.env.VITE_SUPABASE_URL || "");
+const NOT_CONFIGURED_MSG = "Sign-in isn't set up on this build: VITE_SUPABASE_URL in frontend/.env is still the placeholder. Put your real Supabase URL and anon key there, then restart the dev server.";
+// A browser reports any unreachable server as "Failed to fetch" — say what that means instead.
+function friendlyAuthError(err) {
+  const m = (err && err.message) || "";
+  if (/failed to fetch|networkerror|load failed/i.test(m)) {
+    return SUPABASE_PLACEHOLDER ? NOT_CONFIGURED_MSG
+      : "We couldn't reach the sign-in service. Check your connection and try again.";
+  }
+  return m || "Something went wrong. Please try again.";
+}
  
 const ACCENT = "#6d5ef6";
  
@@ -273,6 +287,14 @@ function LoginModal({ onDismiss, initialMode }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onDismiss]);
 
+  // While the dialog is open the page behind it must not scroll — otherwise
+  // the wheel moves the page instead of the form.
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prev; };
+  }, []);
+
   async function submit(e) {
     e.preventDefault();
     setBusy(true); setMsg(null); setMsgKind("error");
@@ -288,7 +310,7 @@ function LoginModal({ onDismiss, initialMode }) {
             ? "Please confirm your email first — open the link we sent you, then sign in."
             : /invalid login/i.test(error.message)
               ? "Invalid email or password. If you just signed up, confirm your email via the link we sent first."
-              : error.message;
+              : friendlyAuthError(error);
           setMsg(m);
         }
         // On success, onAuthStateChange in AuthModalHost closes the modal.
@@ -308,7 +330,7 @@ function LoginModal({ onDismiss, initialMode }) {
           },
         },
       });
-      if (error) { setMsg(error.message); return; }
+      if (error) { setMsg(friendlyAuthError(error)); return; }
       if (data?.session) return; // email confirmation off → already signed in
       // With confirmation on, an already-registered address comes back as a
       // user with no identities rather than an error.
@@ -319,7 +341,7 @@ function LoginModal({ onDismiss, initialMode }) {
       setMsgKind("success");
       setMsg(`Account created! We sent a confirmation link to ${cleanEmail}. Open it to finish — you'll be signed in automatically. (Check spam if you don't see it.)`);
     } catch (err) {
-      setMsg(err.message);
+      setMsg(friendlyAuthError(err));
     } finally {
       setBusy(false);
     }
@@ -327,11 +349,12 @@ function LoginModal({ onDismiss, initialMode }) {
 
   async function oauth(provider) {
     setMsg(null); setMsgKind("error");
+    if (SUPABASE_PLACEHOLDER) { setMsg(NOT_CONFIGURED_MSG); return; }
     const { error } = await supabase.auth.signInWithOAuth({
       provider,
       options: { redirectTo: window.location.origin },
     });
-    if (error) setMsg(error.message);
+    if (error) setMsg(friendlyAuthError(error));
   }
   const google = () => oauth("google");
   const github = () => oauth("github");
@@ -341,14 +364,18 @@ function LoginModal({ onDismiss, initialMode }) {
       onClick={onDismiss}
       style={{
         position: "fixed", inset: 0, background: "rgba(17,17,27,0.45)",
-        display: "flex", alignItems: "center", justifyContent: "center",
+        // The overlay itself scrolls: a form taller than the window (signup on
+        // a laptop) scrolls inside it, and margin:auto on the card still
+        // centres it whenever it does fit.
+        display: "flex", alignItems: "flex-start", justifyContent: "center",
+        overflowY: "auto", overscrollBehavior: "contain",
         zIndex: 9999, padding: 20, backdropFilter: "blur(2px)",
       }}
     >
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: "100%", maxWidth: 400, background: "#fff", borderRadius: 16,
+          width: "100%", maxWidth: 400, background: "#fff", borderRadius: 16, margin: "auto",
           padding: "32px 30px", boxShadow: "0 20px 60px rgba(0,0,0,0.25)",
           fontFamily: "'Space Grotesk',sans-serif", color: "#111", position: "relative",
         }}
