@@ -405,6 +405,7 @@ export const HYPO_STAGES = [
 function buildHypo(st, ctl) {
   const r = rng(41), g = gaussOf(r);
   const SCORE = [0.62, 0.81, 0.9, 0.55, 0.74, 0.47, 0.86, 0.68], FLAG = [0, 0, 0, 1, 0, 1, 0, 0];
+  const SPEED = 1.5; // playback rate of the stage animations; LandingPage's stage timer is 7s / SPEED
   const R0 = 7, PH = 2.6, TIER = [[4.7, 3.7], [2.5, 5.3], [0, 6.9]]; // [radius, height] of each round's winners
   const angOf = (i) => (i / 8) * 6.2832 + 0.39;
   const polar = (rad, a, y) => new THREE.Vector3(Math.cos(a) * rad, y, Math.sin(a) * rad);
@@ -486,7 +487,7 @@ function buildHypo(st, ctl) {
 
   return (t, dt) => {
     ctl.now = t;
-    const s = ctl.stage, lt = RM ? 99 : t - ctl.t0, k = RM ? 1 : Math.min(1, dt * 4);
+    const s = ctl.stage, lt = RM ? 99 : (t - ctl.t0) * SPEED, k = RM ? 1 : Math.min(1, dt * 4 * SPEED);
     const ease = (key, on) => { v[key] += ((on ? 1 : 0) - v[key]) * k; return v[key]; };
     ease("hyp", s > 0 || lt > 0.5); ease("bar", s >= 1); ease("flag", s > 1 || (s === 1 && lt > 1.6));
     ease("champ", s >= 3); ease("plaus", s === 3 && lt > 1.4);
@@ -517,7 +518,7 @@ function buildHypo(st, ctl) {
     // pulses: papers flowing into the hypotheses, then winners flowing up the bracket
     pulses.forEach((p, n) => {
       const on = p.rd < 0 ? (s === 0 ? v.hyp : 0) : v.r[p.rd] * (s >= 2 ? 1 : 0);
-      p.c.getPoint(RM ? 0.5 : (t * (p.rd < 0 ? 0.45 : 0.4) + p.ph) % 1, P);
+      p.c.getPoint(RM ? 0.5 : (t * SPEED * (p.rd < 0 ? 0.45 : 0.4) + p.ph) % 1, P);
       S.setScalar(Math.max(0.0001, on)); M.compose(P, Q, S); pulseMesh.setMatrixAt(n, M);
       pulseMesh.setColorAt(n, p.rd < 0 ? PAL.muted : PAL.accent);
     });

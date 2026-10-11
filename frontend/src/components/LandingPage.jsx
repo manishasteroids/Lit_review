@@ -51,7 +51,7 @@ export default function LandingPage() {
   const PAGES = {
     pricing: <Pricing login={login} />,
     careers: <CareersPage />,
-    about: <AboutPage />,
+    about: <AboutPage setPage={setPage} />,
     blog: <BlogPage />,
   };
 
@@ -593,7 +593,9 @@ function FaqItem({ q, a }) {
 //   VITE_TWITTER_URL=https://x.com/your-handle
 //   VITE_LINKEDIN_URL=https://www.linkedin.com/company/your-page
 const TWITTER_URL = import.meta.env.VITE_TWITTER_URL || "";
-const LINKEDIN_URL = import.meta.env.VITE_LINKEDIN_URL || "";
+// Falls back to the public company page so the LinkedIn links work in every
+// environment (local dev has no VITE_LINKEDIN_URL); set the variable to override.
+const LINKEDIN_URL = import.meta.env.VITE_LINKEDIN_URL || "https://www.linkedin.com/company/143052410";
 const CONTACT_EMAIL = import.meta.env.VITE_CONTACT_EMAIL || "";
 
 function SiteFooter({ setPage }) {
@@ -714,7 +716,7 @@ function SiftSection({ login }) {
       <Reveal>
         <div className="lp-feature" id="feat-4">
           <div>
-            <div className="lp-step-tag">After the review</div>
+            <div className="lp-step-tag">Research Paper Analysis</div>
             <h3 className="lp-feat-title">{chat.title}</h3>
             <p className="lp-feat-body">{chat.body}</p>
             <ul className="lp-feat-list">
@@ -740,25 +742,36 @@ const HYPO_PIPELINE = [
   ["Recommend", "Final pick, checked against the reported literature"],
 ];
 
-// Steps through `count` stages on a timer; stops for good once the visitor
-// picks a stage themselves, and waits while they hover.
+// Steps through `count` stages on its own, forever, while the block is on
+// screen — no hovering or clicking needed. Clicking a stage jumps to it, holds
+// it for twice as long, then the cycle carries on. Returns the ref to put on
+// the block and the current hold time (for the progress bar on the active item).
 function useAutoStage(count, ms) {
+  const ref = useRef(null);
   const [i, setI] = useState(0);
-  const [paused, setPaused] = useState(false);
-  const [manual, setManual] = useState(false);
+  const [hold, setHold] = useState(ms);
+  const [turn, setTurn] = useState(0);   // bumps on every change so the timer restarts
+  const [seen, setSeen] = useState(false);
   useEffect(() => {
-    if (paused || manual) return;
+    const el = ref.current;
+    if (!el) return;
+    const io = new IntersectionObserver(([e]) => setSeen(e.isIntersecting), { threshold: 0.25 });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+  useEffect(() => {
+    if (!seen) return;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const t = setInterval(() => setI((n) => (n + 1) % count), ms);
-    return () => clearInterval(t);
-  }, [paused, manual, count, ms]);
-  const hover = { onMouseEnter: () => setPaused(true), onMouseLeave: () => setPaused(false) };
-  return [i, (n) => { setManual(true); setI(n); }, hover];
+    const t = setTimeout(() => { setI((n) => (n + 1) % count); setHold(ms); setTurn((n) => n + 1); }, hold);
+    return () => clearTimeout(t);
+  }, [seen, turn, hold, count, ms]);
+  const pick = (n) => { setI(n); setHold(ms * 2); setTurn((t) => t + 1); };
+  return [i, pick, ref, { "--lp3-hold": hold + "ms" }, seen, turn];
 }
 
 function HypothesisSection({ login }) {
-  const [h, pickH, hoverH] = useAutoStage(HYPO_PIPELINE.length, 7000);
-  const [i, pickI, hoverI] = useAutoStage(LOOP.length, 14000);
+  const [h, pickH, refH, holdH, seenH, turnH] = useAutoStage(HYPO_PIPELINE.length, 4700);
+  const [i, pickI, refI, holdI, seenI, turnI] = useAutoStage(LOOP.length, 14000);
   const stage = LOOP[i];
 
   return (
@@ -770,7 +783,7 @@ function HypothesisSection({ login }) {
       </p>
 
       {/* 1. the hypothesis pipeline */}
-      <div className="lp3-loop" {...hoverH}>
+      <div className={"lp3-loop" + (seenH ? " lp3-auto" : "")} ref={refH} style={holdH}>
         <div className="lp3-loopfig">
           <Suspense fallback={<FigureFallback />}><HypothesisFigure stage={h} /></Suspense>
         </div>
@@ -783,7 +796,7 @@ function HypothesisSection({ login }) {
           </p>
           <ol className="lp3-rail">
             {HYPO_PIPELINE.map(([t, d], n) => (
-              <li key={t}>
+              <li key={n === h ? t + turnH : t}>
                 <button className={"lp3-rail-btn" + (n === h ? " on" : "") + (n < h ? " done" : "")}
                   aria-current={n === h ? "step" : undefined} onClick={() => pickH(n)}>
                   <span className="lp3-rail-n">{n < h ? "✓" : n + 1}</span>
@@ -796,14 +809,14 @@ function HypothesisSection({ login }) {
       </div>
 
       {/* 2. out to the bench and back */}
-      <div className="lp3-loop lp3-loop-2" {...hoverI}>
+      <div className={"lp3-loop lp3-loop-2" + (seenI ? " lp3-auto" : "")} ref={refI} style={holdI}>
         <div className="lp3-loopfig">
           <Suspense fallback={<FigureFallback />}><LoopFigure mode={i} /></Suspense>
         </div>
         <div>
           <div className="lp3-tabs" role="tablist" aria-label="Stages of the Infinity loop">
             {LOOP.map((s, n) => (
-              <button key={s.key} role="tab" aria-selected={n === i}
+              <button key={n === i ? s.key + turnI : s.key} role="tab" aria-selected={n === i}
                 className={"lp3-tab" + (n === i ? " on" : "")} onClick={() => pickI(n)}>
                 <span className="lp3-tab-n">{n + 1}/{LOOP.length}</span>
                 <span><b>{s.key}</b><small>{s.sub}</small></span>
@@ -1195,8 +1208,8 @@ const FEATURES = [
   },
   {
     title: "Chat with any paper",
-    body: "Ask a specific paper anything. Quick mode answers instantly from cached extractions at no cost; Deep mode re-reads the full PDF for thorough, reasoned answers — and you can attach a figure to discuss it.",
-    points: ["Quick (free) and Deep (thorough) modes", "Grounded in the paper — no invented facts", "Chat history saved per paper"],
+    body: "Ask a specific paper anything, at any point: while you're still choosing sources, in the middle of a review, or on its own to understand a paper you already have. Quick mode answers instantly from cached extractions at no cost; Deep mode re-reads the full PDF for thorough, reasoned answers — and you can attach a figure to discuss it.",
+    points: ["Use it during a review, or on a single paper by itself", "Upload your own PDFs to read and question them", "Quick (free) and Deep (thorough) modes", "Grounded in the paper — no invented facts", "Chat history saved per paper"],
     visual: ChatVisual,
   },
 ];
@@ -1277,7 +1290,7 @@ const OPEN_ROLES = [
     contract: "3-month initial contract",
     contractNote: "Possibility of converting to a full-time role with startup equity after the initial contract.",
     applyEmail: "hr@orcusintelligencelab.com",
-    blurb: "At Orcus Intelligence Labs, we are building next-generation multi-agent systems " +
+    blurb: "At Orcus Intelligence Lab, we are building next-generation multi-agent systems " +
       "designed to automate academic literature discovery, semantic synthesis, and hypothesis " +
       "generation. We are seeking a fast-learning, engineering-minded intern to work at the " +
       "intersection of agentic workflows and production full-stack systems. You will play a " +
@@ -1825,8 +1838,13 @@ const ABOUT_TABS = [
   { id: "about-contact", label: "Contact us" },
 ];
 
+// What the message is about. The backend takes one free-text message, so
+// the chosen topic is sent as a "[Topic]" prefix on it — no API change needed.
+const CONTACT_TOPICS = ["Question", "Feedback", "Partnership", "Something else"];
+
 function ContactForm() {
   const [form, setForm] = useState({ name: "", email: "", affiliation: "", message: "", website: "" });
+  const [topic, setTopic] = useState(CONTACT_TOPICS[0]);
   const [status, setStatus] = useState("idle"); // idle | sending | sent | error
   const [error, setError] = useState("");
 
@@ -1842,7 +1860,7 @@ function ContactForm() {
     setStatus("sending");
     setError("");
     try {
-      await api.submitContactForm(form);
+      await api.submitContactForm({ ...form, message: `[${topic}] ${form.message}` });
       setStatus("sent");
       setForm({ name: "", email: "", affiliation: "", message: "", website: "" });
     } catch (err) {
@@ -1853,14 +1871,17 @@ function ContactForm() {
 
   if (status === "sent") {
     return (
-      <div className="lp-contact-form-sent">
-        Thanks for reaching out — we'll get back to you soon.
+      <div className="lpa-form lpa-sent" role="status">
+        <span className="lpa-sent-ic" aria-hidden="true">✓</span>
+        <h3>Message sent</h3>
+        <p>Thanks for reaching out — we'll get back to you soon.</p>
+        <button type="button" className="lp-cta-2" onClick={() => setStatus("idle")}>Send another message</button>
       </div>
     );
   }
 
   return (
-    <form className="lp-contact-form" onSubmit={submit}>
+    <form className="lpa-form" onSubmit={submit} noValidate>
       {/* Honeypot: hidden from real visitors via CSS, so only bots that
           blindly fill every field will populate it (see backend/api/routes.py
           submit_contact_form for the server-side check). */}
@@ -1874,94 +1895,140 @@ function ContactForm() {
         autoComplete="off"
         aria-hidden="true"
       />
-      <div className="lp-contact-form-row">
-        <input
-          type="text"
-          placeholder="Name"
-          value={form.name}
-          onChange={set("name")}
-          required
-        />
-        <input
-          type="email"
-          placeholder="Email"
-          value={form.email}
-          onChange={set("email")}
-          required
-        />
+      <h3 className="lpa-form-title">Send us a message</h3>
+
+      <fieldset className="lpa-topics">
+        <legend>What is this about?</legend>
+        {CONTACT_TOPICS.map((t) => (
+          <button type="button" key={t} aria-pressed={t === topic}
+            className={"lpa-topic" + (t === topic ? " on" : "")} onClick={() => setTopic(t)}>
+            {t}
+          </button>
+        ))}
+      </fieldset>
+
+      <div className="lpa-row">
+        <label className="lpa-field" htmlFor="contact-name">
+          <span>Name</span>
+          <input id="contact-name" type="text" autoComplete="name" value={form.name} onChange={set("name")} required />
+        </label>
+        <label className="lpa-field" htmlFor="contact-email">
+          <span>Email</span>
+          <input id="contact-email" type="email" autoComplete="email" placeholder="you@university.edu"
+            value={form.email} onChange={set("email")} required />
+        </label>
       </div>
-      <input
-        type="text"
-        placeholder="Affiliation (optional)"
-        value={form.affiliation}
-        onChange={set("affiliation")}
-      />
-      <textarea
-        placeholder="Your question or message"
-        rows={5}
-        value={form.message}
-        onChange={set("message")}
-        required
-      />
-      {status === "error" && <p className="lp-contact-form-error">{error}</p>}
-      <button type="submit" className="lp-cta" disabled={status === "sending"}>
+      <label className="lpa-field" htmlFor="contact-affiliation">
+        <span>Affiliation <em>optional</em></span>
+        <input id="contact-affiliation" type="text" autoComplete="organization" placeholder="University, lab or company"
+          value={form.affiliation} onChange={set("affiliation")} />
+      </label>
+      <label className="lpa-field" htmlFor="contact-message">
+        <span>Message</span>
+        <textarea id="contact-message" rows={6} placeholder="Your question or message"
+          value={form.message} onChange={set("message")} required />
+      </label>
+      {status === "error" && <p className="lpa-error" role="alert">{error}</p>}
+      <button type="submit" className="lp-cta lpa-send" disabled={status === "sending"}>
         {status === "sending" ? "Sending…" : "Send message"}
       </button>
     </form>
   );
 }
 
-function AboutPage() {
+const WHAT_WE_BUILD = [
+  ["Sift", "Literature review agent"],
+  ["Infinity", "Hypothesis generation agent"],
+  ["Physical AI", "Systems for Physical AI"],
+];
+
+// The About page is deliberately laid out differently from Home and Careers:
+// a centred statement up top, and Contact as one two-tone panel (dark details
+// side, light form side) rather than another pair of columns.
+function AboutPage({ setPage }) {
   const jump = (id) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
   return (
-    <section className="lp-pricing" style={{ paddingBottom: 0 }}>
-      <BrandMark width={148} />
-      <h1 className="lp-p-title" style={{ marginTop: 18 }}>About Orcus Intelligence Labs</h1>
-      <p className="lp-p-sub">
-        Orcus Intelligence Labs builds Sift — a multi-agent research assistant for people who
-        read papers for a living. We're small, independent, and focused on one problem.
-      </p>
-      <p className="lp-mark-caption">
-        Our mark: two ideas in balance — human judgment on one side, AI on the other. Sift
+    <section className="lpa">
+      <div className="lpa-hero">
+        <BrandMark width={148} />
+        <h1 className="lpa-title">About Orcus Intelligence Lab</h1>
+        <p className="lpa-sub">
+          Orcus Intelligence Lab builds AI agents for research and systems for Physical AI.
+          We're small and independent.
+        </p>
+        <ul className="lpa-builds">
+          {WHAT_WE_BUILD.map(([name, what]) => (
+            <li key={name}><b>{name}</b><span>{what}</span></li>
+          ))}
+        </ul>
+        <div className="lpa-hero-cta">
+          <button className="lp-cta" onClick={() => jump("about-contact")}>Contact us</button>
+          <button className="lp-cta-2" onClick={() => jump("about-team")}>Meet the team</button>
+        </div>
+      </div>
+
+      <blockquote className="lpa-quote">
+        <span>Our mark</span>
+        Two ideas in balance — human judgment on one side, AI on the other. Sift
         doesn't replace the researcher's read of the literature; it holds up its end of the
         scale so you can do yours faster.
-      </p>
+      </blockquote>
 
-      <div className="lp-filters" style={{ justifyContent: "center", margin: "0 0 40px" }}>
-        {ABOUT_TABS.map((t) => (
-          <button key={t.id} className="lp-filter" onClick={() => jump(t.id)}>{t.label}</button>
-        ))}
+      <div className="lpa-team" id="about-team">
+        <h2 className="lpc-h2">Team</h2>
+        <div>
+          <p className="lpa-lede">
+            Sift is built by a small, hands-on team of researchers and engineers — everyone here
+            also uses the product to do their own literature reviews. Full team profiles are coming
+            soon; in the meantime, the fastest way to meet us is to say hello.
+          </p>
+          <button className="lp-learn" onClick={() => jump("about-contact")}>Get in touch →</button>
+        </div>
       </div>
 
-      <div className="lp-band" id="about-team" style={{ textAlign: "left" }}>
-        <h2 className="lp-cat">Team</h2>
-        <p className="lp-cat-sub">
-          Sift is built by a small, hands-on team of researchers and engineers — everyone here
-          also uses the product to do their own literature reviews. Full team profiles are coming
-          soon; in the meantime, the fastest way to meet us is to say hello.
-        </p>
-        <a className="lp-learn" onClick={() => jump("about-contact")}>Get in touch →</a>
-      </div>
+      <div className="lpa-card" id="about-contact">
+        <div className="lpa-dark">
+          <h2>Contact us</h2>
+          <p>
+            Questions, feedback, partnership ideas, or just want to talk about the product —
+            reach out any time.
+          </p>
 
-      <div className="lp-band" id="about-contact" style={{ textAlign: "left" }}>
-        <h2 className="lp-cat">Contact us</h2>
-        <p className="lp-cat-sub">
-          Questions, feedback, partnership ideas, or just want to talk about the product —
-          reach out any time.
-        </p>
-        <address className="lp-address">
-          <strong>Orcus Intelligence Lab</strong><br />
-          25600 Rolling Hills Way<br />
-          Los Angeles, California 90505<br />
-          United States
-        </address>
-        <div className="lp-contact-row">
-          {CONTACT_EMAIL && (
-            <a className="lp-cta" href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>
-          )}
-          {LINKEDIN_URL && (
-            <a className="lp-cta-2" href={LINKEDIN_URL} target="_blank" rel="noreferrer">LinkedIn ↗</a>
-          )}
+          <dl className="lpa-channels">
+            {CONTACT_EMAIL && (
+              <div>
+                <dt>Email</dt>
+                <dd><a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a></dd>
+              </div>
+            )}
+            {LINKEDIN_URL && (
+              <div>
+                <dt>LinkedIn</dt>
+                <dd><a href={LINKEDIN_URL} target="_blank" rel="noreferrer">Orcus Intelligence Lab ↗</a></dd>
+              </div>
+            )}
+            {setPage && OPEN_ROLES.length > 0 && (
+              <div>
+                <dt>Careers</dt>
+                <dd>
+                  <button className="lpa-linkbtn" onClick={() => setPage("careers")}>
+                    See open roles ({OPEN_ROLES.length}) →
+                  </button>
+                </dd>
+              </div>
+            )}
+            <div>
+              <dt>Office</dt>
+              <dd>
+                <address className="lpa-address">
+                  Orcus Intelligence Lab<br />
+                  25600 Rolling Hills Way<br />
+                  Los Angeles, California 90505<br />
+                  United States
+                </address>
+              </dd>
+            </div>
+          </dl>
         </div>
         <ContactForm />
       </div>
@@ -2635,6 +2702,13 @@ function LandingStyles() {
       .lp3-tab-n { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--lp-muted); }
       .lp3-tab.on .lp3-tab-n { color: var(--lp-indigo); }
       .lp3-panel { padding-top: 24px; }
+      /* the active stage fills left to right while it plays, then the next one takes over */
+      .lp3-rail-btn, .lp3-tab { position: relative; overflow: hidden; }
+      .lp3-auto .lp3-rail-btn.on::after, .lp3-auto .lp3-tab.on::after { content: ""; position: absolute; left: 0; bottom: 0;
+        height: 3px; width: 100%; background: var(--lp-indigo); transform-origin: left;
+        animation: lp3-hold var(--lp3-hold, 7000ms) linear both; }
+      @keyframes lp3-hold { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+      @media (prefers-reduced-motion: reduce) { .lp3-auto .lp3-rail-btn.on::after, .lp3-auto .lp3-tab.on::after { display: none; } }
 
       /* ── Careers page ─────────────────────────────────────────────────── */
       .lpc { max-width: 1140px; margin: 0 auto; padding: 64px 24px 88px; text-align: left; }
@@ -2702,6 +2776,93 @@ function LandingStyles() {
         .lpc-role { padding: 22px 20px; }
         .lpc-role-head { flex-direction: column; gap: 16px; }
         .lpc-sec-grid { grid-template-columns: minmax(0, 1fr); gap: 26px; }
+      }
+
+      /* ── About + Contact page ─────────────────────────────────────────── */
+      .lpa { max-width: 1140px; margin: 0 auto; padding: 72px 24px 96px; text-align: left; }
+      .lpa-hero { text-align: center; max-width: 820px; margin: 0 auto; }
+      .lpa-title { font-weight: 700; font-size: clamp(36px, 5.2vw, 64px); line-height: 1.04;
+        letter-spacing: -.03em; margin: 22px 0 20px; }
+      .lpa-sub { color: var(--lp-muted); font-size: 19px; line-height: 1.55; max-width: 60ch; margin: 0 auto 30px; }
+      .lpa-builds { list-style: none; margin: 0 auto 32px; padding: 0; display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--lp-line); border-radius: 14px;
+        overflow: hidden; text-align: left; }
+      .lpa-builds li { padding: 16px 20px; background: var(--lp-bg2); }
+      .lpa-builds li + li { border-left: 1px solid var(--lp-line); }
+      .lpa-builds b { display: block; font-size: 17px; font-weight: 700; letter-spacing: -.01em; }
+      .lpa-builds span { display: block; font-size: 14px; color: var(--lp-muted); margin-top: 3px; }
+      @media (max-width: 640px) {
+        .lpa-builds { grid-template-columns: minmax(0, 1fr); }
+        .lpa-builds li + li { border-left: 0; border-top: 1px solid var(--lp-line); }
+      }
+      .lpa-hero-cta { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+
+      .lpa-quote { margin: 72px auto 0; max-width: 860px; padding: 34px 0; border-top: 1px solid var(--lp-line);
+        border-bottom: 1px solid var(--lp-line); font-size: clamp(19px, 2.1vw, 24px); line-height: 1.5;
+        letter-spacing: -.01em; color: var(--lp-ink); text-align: center; }
+      .lpa-quote span { display: block; font-family: 'JetBrains Mono', monospace; font-size: 11.5px;
+        letter-spacing: .14em; text-transform: uppercase; color: var(--lp-indigo); margin-bottom: 14px; }
+
+      .lpa-team { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 40px; margin-top: 88px; scroll-margin-top: 90px; }
+      .lpa-lede { color: var(--lp-muted); font-size: 18px; line-height: 1.6; max-width: 62ch; margin: 4px 0 20px; }
+      .lpa .lp-learn { margin-top: 0; }
+
+      /* Contact: one panel, two tones */
+      .lpa-card { display: grid; grid-template-columns: minmax(0, .82fr) minmax(0, 1.18fr); margin-top: 88px;
+        border-radius: 24px; overflow: hidden; border: 1px solid var(--lp-line);
+        box-shadow: 0 24px 70px rgba(20,22,28,.10); scroll-margin-top: 90px; }
+      .lpa-dark { padding: 48px 44px; color: #fff;
+        background: radial-gradient(120% 80% at 0% 0%, rgba(91,79,240,.55), transparent 60%),
+                    radial-gradient(90% 70% at 100% 100%, rgba(143,131,247,.22), transparent 60%), #14161c; }
+      .lpa-dark h2 { font-size: clamp(30px, 3.4vw, 42px); font-weight: 700; letter-spacing: -.02em; line-height: 1.08; margin: 0 0 14px; }
+      .lpa-dark > p { color: rgba(255,255,255,.74); font-size: 16.5px; line-height: 1.6; margin: 0; max-width: 40ch; }
+      .lpa-channels { margin: 40px 0 0; }
+      .lpa-channels > div { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 16px;
+        padding: 18px 0; border-top: 1px solid rgba(255,255,255,.16); }
+      .lpa-channels dt { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; letter-spacing: .12em;
+        text-transform: uppercase; color: rgba(255,255,255,.55); padding-top: 3px; }
+      .lpa-channels dd { margin: 0; font-size: 15.5px; font-weight: 500; overflow-wrap: anywhere; }
+      .lpa-channels a, .lpa-linkbtn { color: #fff; text-decoration: underline; text-decoration-color: rgba(255,255,255,.4);
+        text-underline-offset: 4px; }
+      .lpa-channels a:hover, .lpa-linkbtn:hover { text-decoration-color: #fff; }
+      .lpa-linkbtn { background: none; border: none; padding: 0; cursor: pointer; font-size: 15.5px; font-weight: 500; }
+      .lpa-address { font-style: normal; font-weight: 400; color: rgba(255,255,255,.74); line-height: 1.65; }
+      .lpa-address::first-line { color: #fff; font-weight: 500; }
+
+      .lpa-form { background: #fff; padding: 48px 44px; display: flex; flex-direction: column; gap: 18px; }
+      .lpa-form-title { font-size: 22px; font-weight: 700; letter-spacing: -.01em; margin: 0; }
+      .lpa-topics { border: 0; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+      .lpa-topics legend, .lpa-field > span { display: block; padding: 0; font-size: 13.5px; font-weight: 600;
+        color: var(--lp-ink); margin-bottom: 8px; }
+      .lpa-field > span em { font-style: normal; font-weight: 400; color: var(--lp-muted2); margin-left: 6px; }
+      .lpa-topic { height: 36px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--lp-line);
+        background: #fff; color: var(--lp-muted); font-size: 14px; font-weight: 500; cursor: pointer; }
+      .lpa-topic:hover { border-color: var(--lp-indigo); }
+      .lpa-topic.on { border-color: var(--lp-indigo); background: var(--lp-soft); color: var(--lp-indigo); }
+      .lpa-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+      .lpa-field { display: block; min-width: 0; }
+      .lpa-field input, .lpa-field textarea { display: block; width: 100%; box-sizing: border-box;
+        font: inherit; font-size: 15px; color: var(--lp-ink); background: var(--lp-bg2); border: 1px solid #d5d8e0;
+        border-radius: 10px; padding: 12px 14px; transition: border-color .15s ease, box-shadow .15s ease, background .15s ease; }
+      .lpa-field textarea { resize: vertical; min-height: 140px; line-height: 1.55; }
+      .lpa-field input::placeholder, .lpa-field textarea::placeholder { color: #a3a8b6; }
+      .lpa-field input:focus, .lpa-field textarea:focus { outline: none; background: #fff; border-color: var(--lp-indigo);
+        box-shadow: 0 0 0 4px rgba(91,79,240,.14); }
+      .lpa-error { margin: 0; padding: 11px 14px; border-radius: 10px; background: #fdf0ee; color: #b3261e; font-size: 14px; }
+      .lpa-send { align-self: flex-start; min-width: 170px; }
+      .lpa-send:disabled { opacity: .6; cursor: default; }
+      .lpa-sent { align-items: flex-start; justify-content: center; gap: 10px; }
+      .lpa-sent h3 { font-size: 22px; margin: 6px 0 0; }
+      .lpa-sent p { color: var(--lp-muted); font-size: 15.5px; margin: 0 0 12px; }
+      .lpa-sent-ic { width: 44px; height: 44px; border-radius: 50%; background: #eefaf2; color: #1f8a4c;
+        display: grid; place-items: center; font-size: 20px; font-weight: 700; }
+      @media (max-width: 860px) {
+        .lpa { padding-top: 48px; }
+        .lpa-quote { margin-top: 52px; padding: 26px 0; }
+        .lpa-team { grid-template-columns: minmax(0, 1fr); gap: 12px; margin-top: 60px; }
+        .lpa-card { grid-template-columns: minmax(0, 1fr); margin-top: 60px; border-radius: 18px; }
+        .lpa-dark, .lpa-form { padding: 30px 22px; }
+        .lpa-row { grid-template-columns: minmax(0, 1fr); }
       }
     `}</style>
   );
