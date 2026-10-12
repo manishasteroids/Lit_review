@@ -22,7 +22,8 @@ import { TextLayerBuilder } from "pdfjs-dist/web/pdf_viewer.mjs";
 // required so pdf.js can parse/render off the main thread.
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { api } from "../api/client.js";
-import { ArrowLeft, MessageSquare, X, Trash2, PenTool, Eraser, TypeIcon, Square, CircleShape, ChevronDown } from "./icons.jsx";
+import PaperChatPanel from "./PaperChatPanel.jsx";
+import { ArrowLeft, MessageSquare, Sparkles, X, Trash2, PenTool, Eraser, TypeIcon, Square, CircleShape, ChevronDown, ZoomIn, ZoomOut, MousePointer } from "./icons.jsx";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -123,11 +124,22 @@ function getSelectionRects(range) {
   return rects;
 }
 
-export default function PdfViewer({ runId, paper, onClose }) {
-  const canvasRef = useRef(null);
-  const textLayerContainerRef = useRef(null);
-  const pageWrapRef = useRef(null);
-  const renderTaskRef = useRef(null);
+// The paper chat lives in a resizable column on the right of the reader, so
+// you can read, mark up and ask questions side by side.
+const CHAT_W_KEY = "sift-reader-chat-w";
+function savedChatW() {
+  try { const v = parseInt(localStorage.getItem(CHAT_W_KEY), 10); return v >= 300 && v <= 900 ? v : 420; }
+  catch { return 420; }
+}
+
+export default function PdfViewer({ runId, paper, onClose, extraction, cite, apiKey, model, initialChat = false }) {
+  // Pages are laid out top to bottom in one scrolling column. pageEls maps a
+  // page number to its element; drawPageRef is the page a pen/shape/text/
+  // eraser gesture started on.
+  const pageEls = useRef({});
+  const scrollRef = useRef(null);
+  const drawPageRef = useRef(1);
+  const [sizes, setSizes] = useState([]);   // [{w,h}] per page at scale 1
 
   const [doc, setDoc] = useState(null);
   const [page, setPage] = useState(1);
@@ -142,12 +154,32 @@ export default function PdfViewer({ runId, paper, onClose }) {
   const [commentDraft, setCommentDraft] = useState(null); // {x,y,rectsAtScale,text,value}
   const [openComment, setOpenComment] = useState(null);   // annotation id being viewed
   const [showPanel, setShowPanel] = useState(false);
+  const [showChat, setShowChat] = useState(initialChat);
+  const [chatW, setChatW] = useState(savedChatW);
+  const [chatSeed, setChatSeed] = useState(null);   // {text, n}: selected passage to ask about
+
+  function startChatResize(e) {
+    e.preventDefault();
+    const s = { mx: e.clientX, w: chatW };
+    let last = chatW;
+    const move = (ev) => {
+      last = Math.max(300, Math.min(900, Math.min(window.innerWidth - 420, s.w - (ev.clientX - s.mx))));
+      setChatW(last);
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.style.cursor = "";
+      try { localStorage.setItem(CHAT_W_KEY, String(last)); } catch { /* ignore */ }
+    };
+    document.body.style.cursor = "ew-resize";
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  }
 
   // ── Pen / eraser / text / shapes ────────────────────────────────────
   const [tool, setTool] = useState("select");   // select | pen | eraser | text | rect | circle
   const [drawColor, setDrawColor] = useState(PEN_COLORS[0]);   // shared by pen, text & shapes
-  const [penMenuOpen, setPenMenuOpen] = useState(false);
-  const [shapeMenuOpen, setShapeMenuOpen] = useState(false);
   const [shapeKind, setShapeKind] = useState("rect");    // which shape the "Shapes" button's main click draws
   const [stroke, setStroke] = useState(null);   // in-progress pen stroke: [{x,y}, ...] unscaled
   const [shapePreview, setShapePreview] = useState(null);  // in-progress shape: {shape,x,y,w,h} unscaled
@@ -167,6 +199,7 @@ export default function PdfViewer({ runId, paper, onClose }) {
     setLoading(true);
     setError(null);
     setDoc(null);
+    setSizes([]);
     setPage(1);
     setNumPages(0);
     (async () => {
@@ -175,6 +208,13 @@ export default function PdfViewer({ runId, paper, onClose }) {
         if (cancelled) return;
         const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
         if (cancelled) return;
+        const sz = [];
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const v = (await pdf.getPage(i)).getViewport({ scale: 1 });
+          if (cancelled) return;
+          sz.push({ w: v.width, h: v.height });
+        }
+        setSizes(sz);
         setDoc(pdf);
         setNumPages(pdf.numPages);
       } catch (e) {
@@ -205,79 +245,30 @@ export default function PdfViewer({ runId, paper, onClose }) {
     };
   }, [runId, paper.idx]);
 
-  // ── Render the current page (canvas + selectable text layer) ───────────
+  // ── Scrolling: keep the page counter in step, and jump on request ─────
+  function goToPage(n) {
+    const target = Math.max(1, Math.min(numPages || 1, n));
+    setPage(target);
+    const el = pageEls.current[target], box = scrollRef.current;
+    if (el && box) box.scrollTo({ top: el.offsetTop - 12 });
+  }
+
+  function onBodyScroll() {
+    const box = scrollRef.current;
+    if (!box) return;
+    const line = box.scrollTop + box.clientHeight * 0.35;
+    let cur = 1;
+    for (const [pn, el] of Object.entries(pageEls.current)) {
+      if (el && el.offsetTop <= line) cur = Math.max(cur, Number(pn));
+    }
+    setPage((p) => (p === cur ? p : cur));
+  }
+
+  // Zooming changes every page's height: stay on the page you were reading.
   useEffect(() => {
-    if (!doc) return;
-    let cancelled = false;
-    (async () => {
-      const pdfPage = await doc.getPage(page);
-      if (cancelled) return;
-      const viewport = pdfPage.getViewport({ scale });
-
-      const canvas = canvasRef.current;
-      if (canvas) {
-        // The canvas backing store was sized to `viewport.width/height`
-        // (CSS pixels) with no separate CSS size set, so on any HiDPI/Retina
-        // screen the browser was displaying it 1:1 in device pixels — i.e.
-        // rendering at roughly half the real screen resolution (a third on
-        // 3x displays) and then the browser stretched that up, which reads
-        // as visibly softer/blurrier text and figures than the same PDF
-        // open in a native viewer (which always renders at full device
-        // resolution). Render the backing store at devicePixelRatio and
-        // pin the CSS display size to the logical viewport size instead —
-        // pdf.js's own documented pattern for crisp HiDPI canvas output.
-        // Even on a standard (non-Retina) display, devicePixelRatio is 1 —
-        // rendering at exactly the CSS size then produces visibly soft text,
-        // since a browser's own native PDF viewer always rasterizes well
-        // above 1x. Floor the backing-store scale at 2x regardless of the
-        // display's actual pixel ratio, so quality doesn't regress to "blurry"
-        // on ordinary monitors.
-        const outputScale = Math.max(2, window.devicePixelRatio || 1);
-        canvas.width = Math.floor(viewport.width * outputScale);
-        canvas.height = Math.floor(viewport.height * outputScale);
-        canvas.style.width = `${viewport.width}px`;
-        canvas.style.height = `${viewport.height}px`;
-        const ctx = canvas.getContext("2d");
-        if (renderTaskRef.current) {
-          try { renderTaskRef.current.cancel(); } catch (e) {}
-        }
-        const transform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null;
-        const task = pdfPage.render({ canvasContext: ctx, viewport, transform });
-        renderTaskRef.current = task;
-        try { await task.promise; } catch (e) { /* superseded by a newer render */ }
-      }
-      if (cancelled) return;
-
-      const wrap = pageWrapRef.current;
-      if (wrap) {
-        wrap.style.width = `${viewport.width}px`;
-        wrap.style.height = `${viewport.height}px`;
-      }
-
-      const container = textLayerContainerRef.current;
-      if (container) {
-        container.innerHTML = "";
-        container.style.width = `${viewport.width}px`;
-        container.style.height = `${viewport.height}px`;
-        try {
-          const textLayer = new TextLayerBuilder({ pdfPage });
-          // Must match the actual render scale (the canvas below it is drawn
-          // at `scale`, e.g. 1.25x) — hardcoding this to 1 sizes the invisible
-          // selectable glyphs smaller than the real ones underneath, so a
-          // selection's computed rects drift further right the longer the
-          // line is (the overflowing "staircase" highlight bug).
-          textLayer.div.style.setProperty("--total-scale-factor", String(scale));
-          container.appendChild(textLayer.div);
-          await textLayer.render({ viewport });
-        } catch (e) {
-          /* text layer is a selection nicety — a failure here shouldn't block reading */
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [doc, page, scale]);
+    requestAnimationFrame(() => goToPage(page));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scale]);
 
   // ── Text-selection -> floating toolbar ──────────────────────────────────
   // Remember exactly where the mouse went down, so mouseup can rebuild the
@@ -294,8 +285,7 @@ export default function PdfViewer({ runId, paper, onClose }) {
   const mouseDownPtRef = useRef(null);
 
   const handleMouseDown = useCallback((e) => {
-    const wrap = pageWrapRef.current;
-    mouseDownPtRef.current = (wrap && wrap.contains(e.target))
+    mouseDownPtRef.current = e.target?.closest?.("[data-pn]")
       ? { x: e.clientX, y: e.clientY } : null;
   }, []);
 
@@ -314,9 +304,12 @@ export default function PdfViewer({ runId, paper, onClose }) {
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
     const text = sel.toString();
     if (!text.trim()) return;
-    const wrap = pageWrapRef.current;
     let range = sel.getRangeAt(0);
-    if (!wrap || !wrap.contains(range.commonAncestorContainer)) return;
+    const anc = range.commonAncestorContainer;
+    // One page at a time: a selection that spans two pages has no single page to sit on.
+    const wrap = (anc.nodeType === 1 ? anc : anc.parentElement)?.closest?.("[data-pn]");
+    if (!wrap) return;
+    const pn = Number(wrap.dataset.pn);
 
     const down = mouseDownPtRef.current;
     if (down && upEvent) {
@@ -355,7 +348,7 @@ export default function PdfViewer({ runId, paper, onClose }) {
     setToolbar({
       x: Math.min(last.x + last.w + 6, (wrap.clientWidth || 0) - 190),
       y: Math.max(last.y - 6, 0),
-      rectsAtScale, text: range.toString(),
+      rectsAtScale, text: range.toString(), pn,
     });
   }, []);
 
@@ -375,7 +368,7 @@ export default function PdfViewer({ runId, paper, onClose }) {
     setAnnErr(null);
     try {
       const ann = await api.addAnnotation(runId, paper.idx, {
-        kind, page, rects: rectsUnscaled,
+        kind, page: source.pn, rects: rectsUnscaled,
         color: kind === "underline" ? UNDERLINE_COLOR : HIGHLIGHT_COLOR,
         snippet: source.text, comment: commentText || null,
       });
@@ -394,7 +387,7 @@ export default function PdfViewer({ runId, paper, onClose }) {
     setAnnErr(null);
     try {
       const ann = await api.addAnnotation(runId, paper.idx, {
-        kind: "drawing", page, rects: [{ path: points.map((p) => [p.x, p.y]) }],
+        kind: "drawing", page: drawPageRef.current, rects: [{ path: points.map((p) => [p.x, p.y]) }],
         color: drawColor,
       });
       setAnnotations((prev) => [...prev, ann]);
@@ -416,7 +409,7 @@ export default function PdfViewer({ runId, paper, onClose }) {
     setAnnErr(null);
     try {
       const ann = await api.addAnnotation(runId, paper.idx, {
-        kind: "shape", page, rects: [norm], color: drawColor,
+        kind: "shape", page: drawPageRef.current, rects: [norm], color: drawColor,
       });
       setAnnotations((prev) => [...prev, ann]);
       undoStackRef.current.push(ann.id);
@@ -425,12 +418,12 @@ export default function PdfViewer({ runId, paper, onClose }) {
     }
   }
 
-  async function saveText(x, y, text) {
+  async function saveText(x, y, text, pn) {
     if (!text.trim()) return;
     setAnnErr(null);
     try {
       const ann = await api.addAnnotation(runId, paper.idx, {
-        kind: "text", page, rects: [{ x, y, text: text.trim() }], color: drawColor,
+        kind: "text", page: pn, rects: [{ x, y, text: text.trim() }], color: drawColor,
       });
       setAnnotations((prev) => [...prev, ann]);
       undoStackRef.current.push(ann.id);
@@ -474,16 +467,16 @@ export default function PdfViewer({ runId, paper, onClose }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const pageAnnotations = annotations.filter((a) => a.page === page);
-  const drawings = pageAnnotations.filter((a) => a.kind === "drawing" && a.rects[0]?.path);
-  const shapes = pageAnnotations.filter((a) => a.kind === "shape" && a.rects[0]);
-  const texts = pageAnnotations.filter((a) => a.kind === "text" && a.rects[0]);
+  const annsOn = (pn) => annotations.filter((a) => a.page === pn);
+  const isDrawing = (a) => a.kind === "drawing" && a.rects[0]?.path;
+  const isShape = (a) => a.kind === "shape" && a.rects[0];
+  const isText = (a) => a.kind === "text" && a.rects[0];
 
   // Client (viewport) coords -> page-local, unscaled (scale=1) coords —
   // same space every other annotation kind's rects are stored in, so
   // drawings redraw correctly at any zoom level too.
-  function toPagePoint(e) {
-    const wrap = pageWrapRef.current;
+  function toPagePoint(e, pn = drawPageRef.current) {
+    const wrap = pageEls.current[pn];
     const r = wrap.getBoundingClientRect();
     return { x: (e.clientX - r.left) / scale, y: (e.clientY - r.top) / scale };
   }
@@ -495,16 +488,16 @@ export default function PdfViewer({ runId, paper, onClose }) {
     if (tool !== "select") return;
     e.stopPropagation();
     e.preventDefault();
-    const p = toPagePoint(e);
+    const p = toPagePoint(e, ann.page);
     const r = ann.rects[0];
-    setDraggingText({ id: ann.id, dx: p.x - r.x, dy: p.y - r.y });
+    setDraggingText({ id: ann.id, page: ann.page, dx: p.x - r.x, dy: p.y - r.y });
     setLiveDragPos({ id: ann.id, x: r.x, y: r.y });
   }
 
   useEffect(() => {
     if (!draggingText) return;
     function onMove(e) {
-      const p = toPagePoint(e);
+      const p = toPagePoint(e, draggingText.page);
       setLiveDragPos({ id: draggingText.id, x: p.x - draggingText.dx, y: p.y - draggingText.dy });
     }
     function onUp() {
@@ -533,7 +526,8 @@ export default function PdfViewer({ runId, paper, onClose }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draggingText]);
 
-  function handleDrawPointerDown(e) {
+  function handleDrawPointerDown(e, pn) {
+    drawPageRef.current = pn;
     if (tool === "pen") {
       e.preventDefault();
       drawingRef.current = true;
@@ -550,7 +544,7 @@ export default function PdfViewer({ runId, paper, onClose }) {
     } else if (tool === "text") {
       e.preventDefault();
       const p = toPagePoint(e);
-      setTextDraft({ x: p.x, y: p.y, value: "" });
+      setTextDraft({ x: p.x, y: p.y, value: "", pn });
     }
   }
 
@@ -587,6 +581,8 @@ export default function PdfViewer({ runId, paper, onClose }) {
   // their own delete affordances (the selection toolbar / Notes panel).
   function eraseNear(pt) {
     const hitPx = ERASE_HIT_PX / scale;  // threshold in the same unscaled space as stored points
+    const on = annsOn(drawPageRef.current);
+    const drawings = on.filter(isDrawing), shapes = on.filter(isShape), texts = on.filter(isText);
     for (const a of drawings) {
       if (erasedRef.current.has(a.id)) continue;
       const path = a.rects[0].path;
@@ -641,6 +637,23 @@ export default function PdfViewer({ runId, paper, onClose }) {
           color: transparent; position: absolute; white-space: pre;
           cursor: text; transform-origin: 0% 0%; user-select: text;
         }
+        /* Size each invisible span to its real glyphs. Without these rules
+           pdf.js's --font-height / --scale-x never apply, every span takes the
+           page's font size, and highlights/underlines land off the text. */
+        .pdfv-text-layer-host .textLayer {
+          --min-font-size: 1;
+          --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+          --min-font-size-inv: calc(1 / var(--min-font-size));
+        }
+        .pdfv-text-layer-host .textLayer > :not(.markedContent),
+        .pdfv-text-layer-host .textLayer .markedContent span:not(.markedContent) {
+          z-index: 1;
+          --font-height: 0;
+          font-size: calc(var(--text-scale-factor) * var(--font-height));
+          --scale-x: 1;
+          --rotate: 0deg;
+          transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+        }
         .pdfv-text-layer-host .textLayer .markedContent { display: contents; }
         .pdfv-text-layer-host .textLayer span[role="img"] { user-select: none; cursor: default; }
         .pdfv-text-layer-host .textLayer ::selection { background: rgba(109,94,246,.35); }
@@ -654,7 +667,7 @@ export default function PdfViewer({ runId, paper, onClose }) {
           <button className="btn ghost sm" onClick={onClose}>
             <ArrowLeft size={14} /> Back
           </button>
-          <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ flex: "1 1 220px", minWidth: 0 }}>
             <div
               style={{
                 fontWeight: 700, fontSize: 13.5,
@@ -669,116 +682,32 @@ export default function PdfViewer({ runId, paper, onClose }) {
             </div>
           </div>
           {numPages > 0 && (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flex: "0 0 auto" }}>
-              <button className="btn ghost sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flex: "0 1 auto", flexWrap: "wrap", justifyContent: "flex-end", rowGap: 6 }}>
+              <button className="btn ghost sm" disabled={page <= 1} onClick={() => goToPage(page - 1)}>
                 ‹ Prev
               </button>
-              <span className="muted tiny" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-                Page {page} / {numPages}
-              </span>
-              <button className="btn ghost sm" disabled={page >= numPages} onClick={() => setPage((p) => p + 1)}>
+              <PageJump page={page} numPages={numPages} onGo={goToPage} />
+              <button className="btn ghost sm" disabled={page >= numPages} onClick={() => goToPage(page + 1)}>
                 Next ›
               </button>
               <span style={{ width: 1, height: 18, background: "var(--line)" }} />
-              <button className="btn ghost sm" onClick={() => setScale((s) => Math.max(0.6, s - 0.15))}>
-                −
+              {/* Zoom: magnifier buttons, with the current zoom between them
+                  (click it to go back to the default size). */}
+              <button className="btn ghost sm" title="Zoom out" disabled={scale <= 0.6}
+                onClick={() => setScale((s) => Math.max(0.6, +(s - 0.15).toFixed(2)))}>
+                <ZoomOut size={15} />
               </button>
-              <button className="btn ghost sm" onClick={() => setScale((s) => Math.min(2.5, s + 0.15))}>
-                +
+              <button className="btn ghost sm" title="Reset zoom" onClick={() => setScale(1.25)}
+                style={{ minWidth: 52, fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5 }}>
+                {Math.round((scale / 1.25) * 100)}%
+              </button>
+              <button className="btn ghost sm" title="Zoom in" disabled={scale >= 2.5}
+                onClick={() => setScale((s) => Math.min(2.5, +(s + 0.15).toFixed(2)))}>
+                <ZoomIn size={15} />
               </button>
               <span style={{ width: 1, height: 18, background: "var(--line)" }} />
-              {/* Pen — split button: the main half toggles the tool, the
-                  chevron half opens a color picker (picking a color also
-                  switches to Pen, since that's the button it lives under). */}
-              <span style={splitWrapStyle}>
-                <button
-                  className={"btn ghost sm" + (tool === "pen" ? " on" : "")}
-                  onClick={() => setTool((t) => (t === "pen" ? "select" : "pen"))}
-                  title="Pen — draw freehand marks on the page"
-                  style={splitMainStyle}
-                >
-                  <PenTool size={14} color={drawColor} /> Pen
-                </button>
-                <button
-                  className={"btn ghost sm" + (tool === "pen" ? " on" : "")}
-                  onClick={() => { setPenMenuOpen((v) => !v); setShapeMenuOpen(false); }}
-                  title="Pen color"
-                  style={splitChevronStyle}
-                >
-                  <ChevronDown size={11} />
-                </button>
-                {penMenuOpen && (
-                  <div style={colorMenuStyle} onMouseLeave={() => setPenMenuOpen(false)}>
-                    {PEN_COLORS.map((c) => (
-                      <button
-                        key={c}
-                        onClick={() => { setDrawColor(c); setTool("pen"); setPenMenuOpen(false); }}
-                        title={c}
-                        style={{
-                          width: 20, height: 20, borderRadius: "50%", background: c, cursor: "pointer",
-                          border: c === drawColor && tool === "pen" ? "2px solid var(--txt)" : "1px solid var(--line)", padding: 0,
-                        }}
-                      />
-                    ))}
-                  </div>
-                )}
-              </span>
-
-              <button
-                className={"btn ghost sm" + (tool === "text" ? " on" : "")}
-                onClick={() => setTool((t) => (t === "text" ? "select" : "text"))}
-                title="Text — click anywhere on the page to type a note"
-              >
-                <TypeIcon size={14} /> Text
-              </button>
-
-              {/* Shapes — split button: main half toggles the last-picked
-                  shape (rectangle or circle), chevron half lets you choose
-                  which one. */}
-              <span style={splitWrapStyle}>
-                <button
-                  className={"btn ghost sm" + (tool === "rect" || tool === "circle" ? " on" : "")}
-                  onClick={() => setTool((t) => (t === "rect" || t === "circle" ? "select" : shapeKind))}
-                  title={`Shapes — drag to draw a ${shapeKind === "circle" ? "circle" : "rectangle"}, sized by the drag`}
-                  style={splitMainStyle}
-                >
-                  {shapeKind === "circle" ? <CircleShape size={14} /> : <Square size={14} />} Shapes
-                </button>
-                <button
-                  className={"btn ghost sm" + (tool === "rect" || tool === "circle" ? " on" : "")}
-                  onClick={() => { setShapeMenuOpen((v) => !v); setPenMenuOpen(false); }}
-                  title="Choose shape"
-                  style={splitChevronStyle}
-                >
-                  <ChevronDown size={11} />
-                </button>
-                {shapeMenuOpen && (
-                  <div style={{ ...colorMenuStyle, flexDirection: "column", gap: 2, padding: 4 }} onMouseLeave={() => setShapeMenuOpen(false)}>
-                    <button
-                      className={"btn ghost sm" + (tool === "rect" ? " on" : "")}
-                      style={{ justifyContent: "flex-start" }}
-                      onClick={() => { setShapeKind("rect"); setTool("rect"); setShapeMenuOpen(false); }}
-                    >
-                      <Square size={13} /> Rectangle
-                    </button>
-                    <button
-                      className={"btn ghost sm" + (tool === "circle" ? " on" : "")}
-                      style={{ justifyContent: "flex-start" }}
-                      onClick={() => { setShapeKind("circle"); setTool("circle"); setShapeMenuOpen(false); }}
-                    >
-                      <CircleShape size={13} /> Circle
-                    </button>
-                  </div>
-                )}
-              </span>
-
-              <button
-                className={"btn ghost sm" + (tool === "eraser" ? " on" : "")}
-                onClick={() => setTool((t) => (t === "eraser" ? "select" : "eraser"))}
-                title="Eraser — click or drag over a pen mark, shape, or text box to remove it"
-              >
-                <Eraser size={14} /> Eraser
-              </button>
+              <ToolsMenu tool={tool} setTool={setTool} color={drawColor} setColor={setDrawColor}
+                setShapeKind={setShapeKind} />
               <span style={{ width: 1, height: 18, background: "var(--line)" }} />
               <button
                 className={"btn ghost sm" + (showPanel ? " on" : "")}
@@ -789,10 +718,18 @@ export default function PdfViewer({ runId, paper, onClose }) {
               </button>
             </div>
           )}
+          <button
+            className={"btn sm" + (showChat ? "" : " ghost")}
+            onClick={() => setShowChat((v) => !v)}
+            title={showChat ? "Hide the paper chat" : "Chat with this paper while you read"}
+            style={{ flex: "0 0 auto" }}
+          >
+            <Sparkles size={14} /> {showChat ? "Hide chat" : "Chat"}
+          </button>
         </div>
 
         <div style={{ flex: "1 1 auto", display: "flex", overflow: "hidden" }}>
-          <div style={bodyStyle}>
+          <div style={bodyStyle} ref={scrollRef} onScroll={onBodyScroll}>
             {loading && <div className="muted tiny" style={{ padding: 24 }}>Loading PDF…</div>}
             {error && (
               <div style={{ padding: 24, maxWidth: 440, textAlign: "center" }}>
@@ -805,14 +742,19 @@ export default function PdfViewer({ runId, paper, onClose }) {
                 )}
               </div>
             )}
-            {!loading && !error && (
-              <div ref={pageWrapRef} style={{ position: "relative" }}>
-                <canvas ref={canvasRef} style={{ display: "block", boxShadow: "0 4px 20px rgba(0,0,0,.15)", background: "#fff" }} />
-
+            {!loading && !error && doc && sizes.map((sz, i) => {
+              const pn = i + 1;
+              const on = annsOn(pn);
+              return (
+              <PdfPageView
+                key={pn} doc={doc} pn={pn} scale={scale} size={sz}
+                render={Math.abs(pn - page) <= 2}
+                setRef={(el) => { if (el) pageEls.current[pn] = el; else delete pageEls.current[pn]; }}
+                under={<>
                 {/* Highlight/underline fills sit between the canvas and the
                     (invisible) text layer so they don't intercept new selections. */}
                 <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
-                  {pageAnnotations.filter((a) => a.kind !== "comment").map((a) =>
+                  {on.filter((a) => a.kind !== "comment").map((a) =>
                     a.rects.map((r, i) => (
                       <div
                         key={`${a.id}-${i}`}
@@ -827,7 +769,7 @@ export default function PdfViewer({ runId, paper, onClose }) {
                     ))
                   )}
                   {/* comment-anchored snippets get a light tint so they're visible on the page */}
-                  {pageAnnotations.filter((a) => a.kind === "comment").map((a) =>
+                  {on.filter((a) => a.kind === "comment").map((a) =>
                     a.rects.map((r, i) => (
                       <div
                         key={`${a.id}-${i}`}
@@ -842,8 +784,8 @@ export default function PdfViewer({ runId, paper, onClose }) {
                   )}
                 </div>
 
-                {/* Selectable, invisible text layer (pdf.js TextLayerBuilder). */}
-                <div ref={textLayerContainerRef} className="pdfv-text-layer-host" style={{ position: "absolute", inset: 0 }} />
+                </>}
+              >
 
                 {/* Freehand pen marks — saved strokes plus the one currently
                     being drawn. Pointer-events are only "auto" while a draw
@@ -861,12 +803,12 @@ export default function PdfViewer({ runId, paper, onClose }) {
                       : "default",
                     touchAction: "none",
                   }}
-                  onPointerDown={handleDrawPointerDown}
+                  onPointerDown={(e) => handleDrawPointerDown(e, pn)}
                   onPointerMove={handleDrawPointerMove}
                   onPointerUp={handleDrawPointerUp}
                   onPointerLeave={handleDrawPointerUp}
                 >
-                  {drawings.map((a) => (
+                  {on.filter(isDrawing).map((a) => (
                     <polyline
                       key={a.id}
                       points={a.rects[0].path.map(([x, y]) => `${x * scale},${y * scale}`).join(" ")}
@@ -877,7 +819,7 @@ export default function PdfViewer({ runId, paper, onClose }) {
                       strokeLinejoin="round"
                     />
                   ))}
-                  {stroke && stroke.length > 1 && (
+                  {stroke && drawPageRef.current === pn && stroke.length > 1 && (
                     <polyline
                       points={stroke.map((p) => `${p.x * scale},${p.y * scale}`).join(" ")}
                       fill="none"
@@ -888,7 +830,7 @@ export default function PdfViewer({ runId, paper, onClose }) {
                       opacity={0.85}
                     />
                   )}
-                  {shapes.map((a) => {
+                  {on.filter(isShape).map((a) => {
                     const r = a.rects[0];
                     const props = {
                       fill: "none", stroke: a.color || PEN_COLORS[0], strokeWidth: PEN_WIDTH * scale,
@@ -900,7 +842,7 @@ export default function PdfViewer({ runId, paper, onClose }) {
                       <rect key={a.id} x={r.x * scale} y={r.y * scale} width={r.w * scale} height={r.h * scale} {...props} />
                     );
                   })}
-                  {shapePreview && (() => {
+                  {shapePreview && drawPageRef.current === pn && (() => {
                     const x = Math.min(shapePreview.x, shapePreview.x + shapePreview.w);
                     const y = Math.min(shapePreview.y, shapePreview.y + shapePreview.h);
                     const w = Math.abs(shapePreview.w), h = Math.abs(shapePreview.h);
@@ -914,7 +856,7 @@ export default function PdfViewer({ runId, paper, onClose }) {
                 </svg>
 
                 {/* Saved text annotations — draggable in "select" mode. */}
-                {texts.map((a) => {
+                {on.filter(isText).map((a) => {
                   const dragged = liveDragPos && liveDragPos.id === a.id;
                   const r = dragged ? { ...a.rects[0], x: liveDragPos.x, y: liveDragPos.y } : a.rects[0];
                   return (
@@ -941,19 +883,19 @@ export default function PdfViewer({ runId, paper, onClose }) {
                   );
                 })}
 
-                {textDraft && (
+                {textDraft && textDraft.pn === pn && (
                   <TextComposer
                     draft={textDraft}
                     scale={scale}
                     color={drawColor}
                     onChange={(value) => setTextDraft((d) => ({ ...d, value }))}
-                    onSave={() => { saveText(textDraft.x, textDraft.y, textDraft.value); setTextDraft(null); }}
+                    onSave={() => { saveText(textDraft.x, textDraft.y, textDraft.value, pn); setTextDraft(null); }}
                     onCancel={() => setTextDraft(null)}
                   />
                 )}
 
                 {/* Clickable comment markers, above the text layer. */}
-                {pageAnnotations.filter((a) => a.kind === "comment" && a.rects[0]).map((a) => {
+                {on.filter((a) => a.kind === "comment" && a.rects[0]).map((a) => {
                   const r = a.rects[0];
                   return (
                     <div
@@ -973,7 +915,7 @@ export default function PdfViewer({ runId, paper, onClose }) {
                   );
                 })}
 
-                {openComment != null && annotations.find((a) => a.id === openComment) && (
+                {openComment != null && annotations.find((a) => a.id === openComment)?.page === pn && (
                   <CommentPopup
                     ann={annotations.find((a) => a.id === openComment)}
                     scale={scale}
@@ -982,17 +924,23 @@ export default function PdfViewer({ runId, paper, onClose }) {
                   />
                 )}
 
-                {toolbar && !commentDraft && (
+                {toolbar && toolbar.pn === pn && !commentDraft && (
                   <SelectionToolbar
                     toolbar={toolbar}
                     onHighlight={() => saveAnnotation("highlight", toolbar)}
                     onUnderline={() => saveAnnotation("underline", toolbar)}
                     onComment={() => setCommentDraft({ ...toolbar, value: "" })}
+                    onAsk={() => {
+                      setChatSeed({ text: toolbar.text, n: Date.now() });
+                      setShowChat(true);
+                      setToolbar(null);
+                      window.getSelection()?.removeAllRanges();
+                    }}
                     onDismiss={() => setToolbar(null)}
                   />
                 )}
 
-                {commentDraft && (
+                {commentDraft && commentDraft.pn === pn && (
                   <CommentComposer
                     draft={commentDraft}
                     onChange={(value) => setCommentDraft((d) => ({ ...d, value }))}
@@ -1003,19 +951,37 @@ export default function PdfViewer({ runId, paper, onClose }) {
                     }}
                   />
                 )}
-              </div>
-            )}
+              </PdfPageView>
+              );
+            })}
           </div>
 
           {showPanel && (
             <AnnotationsPanel
               annotations={annotations}
               currentPage={page}
-              onJump={(p) => setPage(p)}
+              onJump={(p) => goToPage(p)}
               onDelete={removeAnnotation}
               onClose={() => setShowPanel(false)}
               err={annErr}
             />
+          )}
+
+          {showChat && (
+            <>
+              <div
+                onMouseDown={startChatResize}
+                title="Drag to resize"
+                style={{ flex: "0 0 6px", cursor: "ew-resize", background: "var(--line)", opacity: 0.7 }}
+              />
+              <div style={{ flex: `0 0 ${chatW}px`, minWidth: 0, background: "var(--card, #fff)", display: "flex" }}>
+                <PaperChatPanel
+                  docked runId={runId} paper={paper} extraction={extraction} cite={cite}
+                  apiKey={apiKey} model={model} seed={chatSeed}
+                  onClose={() => setShowChat(false)}
+                />
+              </div>
+            </>
           )}
         </div>
       </div>
@@ -1024,7 +990,7 @@ export default function PdfViewer({ runId, paper, onClose }) {
 }
 
 /* ── Floating toolbar shown on text selection ────────────────────────── */
-function SelectionToolbar({ toolbar, onHighlight, onUnderline, onComment, onDismiss }) {
+function SelectionToolbar({ toolbar, onHighlight, onUnderline, onComment, onAsk, onDismiss }) {
   return (
     <div
       style={{
@@ -1043,6 +1009,11 @@ function SelectionToolbar({ toolbar, onHighlight, onUnderline, onComment, onDism
       <button style={toolbarBtn} title="Comment" onClick={onComment}>
         <MessageSquare size={13} />
       </button>
+      {onAsk && (
+        <button style={{ ...toolbarBtn, gap: 4, fontSize: 12, fontWeight: 600 }} title="Ask the chat about this passage" onClick={onAsk}>
+          <Sparkles size={13} /> Ask
+        </button>
+      )}
       <button style={{ ...toolbarBtn, opacity: 0.6 }} title="Dismiss" onClick={onDismiss}>
         <X size={13} />
       </button>
@@ -1151,6 +1122,200 @@ function CommentPopup({ ann, onClose, onDelete }) {
   );
 }
 
+/* ── Tools: one button that drops down Pen, Text, Shapes and Eraser ──────
+   The button shows the active tool; "Select text" returns to normal reading
+   (select to highlight, underline, comment or ask). */
+const TOOL_OPTIONS = [
+  ["select", "Select text", MousePointer, "Select text to highlight, underline, comment or ask"],
+  ["pen", "Pen", PenTool, "Draw freehand marks on the page"],
+  ["text", "Text", TypeIcon, "Click anywhere on the page to type a note"],
+  ["rect", "Rectangle", Square, "Drag to draw a rectangle"],
+  ["circle", "Circle", CircleShape, "Drag to draw a circle"],
+  ["eraser", "Eraser", Eraser, "Click or drag over a pen mark, shape or text note to remove it"],
+];
+
+function ToolsMenu({ tool, setTool, color, setColor, setShapeKind }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const esc = (e) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", esc);
+    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", esc); };
+  }, [open]);
+  const cur = TOOL_OPTIONS.find(([k]) => k === tool) || TOOL_OPTIONS[0];
+  const CurIc = cur[2];
+  const active = tool !== "select";
+  const pick = (k) => {
+    if (k === "rect" || k === "circle") setShapeKind(k);
+    setTool(k);
+    setOpen(false);
+  };
+  return (
+    <span ref={ref} style={{ position: "relative" }}>
+      <button
+        className={"btn ghost sm" + (active ? " on" : "")}
+        onClick={() => setOpen((v) => !v)}
+        title="Markup tools: pen, text, shapes, eraser"
+        aria-haspopup="menu" aria-expanded={open}
+      >
+        {active ? <CurIc size={14} color={tool === "eraser" ? undefined : color} /> : <PenTool size={14} />}
+        {active ? cur[1] : "Tools"}
+        <ChevronDown size={11} />
+      </button>
+      {open && (
+        <div role="menu" style={{
+          position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 30, minWidth: 210,
+          background: "var(--card, #fff)", border: "1px solid var(--line)", borderRadius: 10,
+          boxShadow: "0 10px 28px rgba(0,0,0,.18)", padding: 6,
+        }}>
+          {TOOL_OPTIONS.map(([k, label, Icon, tip]) => (
+            <button key={k} role="menuitemradio" aria-checked={tool === k} title={tip}
+              onClick={() => pick(k)}
+              style={{
+                display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left",
+                padding: "7px 10px", border: "none", borderRadius: 7, cursor: "pointer", fontSize: 13,
+                background: tool === k ? "var(--indigo-soft)" : "transparent",
+                color: "var(--txt)", fontWeight: tool === k ? 600 : 400,
+              }}>
+              <Icon size={15} color={k === "select" || k === "eraser" ? undefined : color} />
+              <span style={{ flex: 1 }}>{label}</span>
+              {tool === k && <span style={{ color: "var(--indigo)" }}>✓</span>}
+            </button>
+          ))}
+          <div style={{ borderTop: "1px solid var(--line)", margin: "6px 4px 0", padding: "8px 6px 2px",
+            display: "flex", alignItems: "center", gap: 8 }}>
+            <span className="muted tiny" style={{ flex: 1 }}>Ink colour</span>
+            {PEN_COLORS.map((c) => (
+              <button key={c} title={c} onClick={() => setColor(c)}
+                style={{
+                  width: 18, height: 18, borderRadius: "50%", background: c, cursor: "pointer", padding: 0,
+                  border: c === color ? "2px solid var(--txt)" : "1px solid var(--line)",
+                }} />
+            ))}
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+/* ── One page of the scrolling column ────────────────────────────────────
+   Every page keeps its full size so the scroll bar and jumps are right, but
+   only pages near the one being read are drawn (canvas + selectable text);
+   the rest are blank placeholders until you scroll to them. */
+function PdfPageView({ doc, pn, scale, size, render, setRef, under, children }) {
+  const canvasRef = useRef(null);
+  const textRef = useRef(null);
+  const taskRef = useRef(null);
+
+  useEffect(() => {
+    if (!render || !doc) return;
+    let cancelled = false;
+    (async () => {
+      const pdfPage = await doc.getPage(pn);
+      if (cancelled) return;
+      const viewport = pdfPage.getViewport({ scale });
+      const canvas = canvasRef.current;
+      if (canvas) {
+        // Render the backing store at >= 2x and pin the CSS size, so text is
+        // crisp on ordinary and HiDPI screens alike.
+        const outputScale = Math.max(2, window.devicePixelRatio || 1);
+        canvas.width = Math.floor(viewport.width * outputScale);
+        canvas.height = Math.floor(viewport.height * outputScale);
+        canvas.style.width = `${viewport.width}px`;
+        canvas.style.height = `${viewport.height}px`;
+        try { taskRef.current?.cancel(); } catch (e) { /* already done */ }
+        const task = pdfPage.render({
+          canvasContext: canvas.getContext("2d"), viewport,
+          transform: [outputScale, 0, 0, outputScale, 0, 0],
+        });
+        taskRef.current = task;
+        try { await task.promise; } catch (e) { /* superseded by a newer render */ }
+      }
+      if (cancelled) return;
+      const container = textRef.current;
+      if (container) {
+        container.innerHTML = "";
+        container.style.width = `${viewport.width}px`;
+        container.style.height = `${viewport.height}px`;
+        try {
+          const textLayer = new TextLayerBuilder({ pdfPage });
+          // Must match the canvas scale, or selections drift off the glyphs.
+          textLayer.div.style.setProperty("--total-scale-factor", String(scale));
+          container.appendChild(textLayer.div);
+          await textLayer.render({ viewport });
+        } catch (e) {
+          /* text layer is a selection nicety -- a failure here shouldn't block reading */
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      try { taskRef.current?.cancel(); } catch (e) { /* ignore */ }
+    };
+  }, [doc, pn, scale, render]);
+
+  return (
+    <div
+      ref={setRef}
+      data-pn={pn}
+      style={{
+        position: "relative", flex: "0 0 auto", marginBottom: 18,
+        width: size.w * scale, height: size.h * scale,
+        background: "#fff", boxShadow: "0 4px 20px rgba(0,0,0,.15)",
+      }}
+    >
+      {render && <canvas ref={canvasRef} style={{ display: "block" }} />}
+      {under}
+      {render && <div ref={textRef} className="pdfv-text-layer-host" style={{ position: "absolute", inset: 0 }} />}
+      {!render && (
+        <div className="muted tiny" style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          Page {pn}
+        </div>
+      )}
+      {children}
+    </div>
+  );
+}
+
+/* ── "Page [ 3 ] / 15": type a number and press Enter to jump there ───── */
+function PageJump({ page, numPages, onGo }) {
+  const [val, setVal] = useState(String(page));
+  useEffect(() => { setVal(String(page)); }, [page]);
+  function go() {
+    const n = parseInt(val, 10);
+    if (Number.isFinite(n)) onGo(Math.min(numPages, Math.max(1, n)));
+    else setVal(String(page));
+  }
+  return (
+    <span className="muted tiny" style={{ display: "inline-flex", alignItems: "center", gap: 6, fontFamily: "'JetBrains Mono', monospace" }}>
+      Page
+      <input
+        value={val}
+        inputMode="numeric"
+        aria-label="Go to page"
+        title="Type a page number and press Enter"
+        onChange={(e) => setVal(e.target.value.replace(/[^0-9]/g, ""))}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { go(); e.currentTarget.blur(); }
+          if (e.key === "Escape") { setVal(String(page)); e.currentTarget.blur(); }
+        }}
+        onBlur={go}
+        onFocus={(e) => e.currentTarget.select()}
+        style={{
+          width: `${Math.max(2, String(numPages).length) + 1.6}ch`, textAlign: "center",
+          font: "inherit", color: "var(--txt)", padding: "3px 4px",
+          border: "1px solid var(--line)", borderRadius: 6, background: "var(--card, #fff)",
+        }}
+      />
+      / {numPages}
+    </span>
+  );
+}
+
 /* ── Side panel listing every mark on this paper ─────────────────────── */
 function AnnotationsPanel({ annotations, currentPage, onJump, onDelete, onClose, err }) {
   const KIND_LABEL = {
@@ -1255,13 +1420,13 @@ const panelStyle = {
 };
 
 const headerStyle = {
-  display: "flex", alignItems: "center", gap: 14,
+  display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", rowGap: 8,
   padding: "12px 18px", borderBottom: "1px solid var(--line)",
   background: "var(--card, #fff)", flex: "0 0 auto",
 };
 
 const bodyStyle = {
-  flex: "1 1 auto", overflow: "auto",
-  display: "flex", alignItems: "flex-start", justifyContent: "center",
+  flex: "1 1 auto", overflow: "auto", position: "relative",
+  display: "flex", flexDirection: "column", alignItems: "safe center",
   padding: 24, background: "var(--panel2, #eef0f4)",
 };

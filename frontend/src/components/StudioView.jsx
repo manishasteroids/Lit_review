@@ -61,11 +61,22 @@ export default function StudioView({ runId, papers = [], extractions = [], apiKe
   const [artifact, setArtifact] = useState(null);   // {kind,title,content}
   const [working, setWorking] = useState(null);
   const [err, setErr] = useState(null);
+  // Sources / Studio panels collapse to free up width for the center chat —
+  // Studio now stays mounted the whole time the run is open (see App.jsx),
+  // so these choices persist across leaving and reopening Studio too.
+  const [collapsedLeft, setCollapsedLeft] = useState(false);
+  const [collapsedRight, setCollapsedRight] = useState(false);
   const logRef = useRef(null);
   const artRef = useRef(null);
   // Guards against saving an empty/in-flight message list over real saved
   // history — flips true only once the initial load for this run resolves.
   const loadedRef = useRef(false);
+  // Studio stays mounted across tab switches so in-progress work (selected
+  // sources, draft, artifact) survives leaving and coming back. But it also
+  // means `selected` must be reset by hand when the user switches to a
+  // DIFFERENT run — otherwise stale indices from the previous project leak
+  // into the new one's selection.
+  const lastRunRef = useRef(runId);
 
   const extByIdx = {};
   extractions.forEach((e) => (extByIdx[e.idx] = e));
@@ -88,6 +99,19 @@ export default function StudioView({ runId, papers = [], extractions = [], apiKe
       loadedRef.current = true;
     }).catch(() => { loadedRef.current = true; });
     return () => { alive = false; };
+  }, [runId]);
+
+  // Switched to a different project's run — the old selection/artifact no
+  // longer make sense, so reset. (A re-render of the SAME run, e.g. new
+  // extractions landing, must NOT reset the user's in-progress selection.)
+  useEffect(() => {
+    if (lastRunRef.current === runId) return;
+    lastRunRef.current = runId;
+    setSelected(new Set(papers.map((p) => p.idx)));
+    setArtifact(null);
+    setFollowups([]);
+    setErr(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId]);
 
   const toggle = (idx) => setSelected((s) => {
@@ -138,39 +162,54 @@ export default function StudioView({ runId, papers = [], extractions = [], apiKe
   }
 
   return (
-    <div className="studio">
+    <div className="studio" style={{
+      "--lw": collapsedLeft ? "44px" : "250px",
+      "--rw": collapsedRight ? "44px" : "300px",
+    }}>
       {/* ── Left: sources ─────────────────────────────── */}
-      <aside className="studio-col">
-        <div className="studio-h">
-          <span>Sources</span>
-          <span className="studio-count">{selected.size}/{papers.length}</span>
-        </div>
-        <div className="studio-selall">
-          <label>
-            <input type="checkbox" checked={allOn}
-              onChange={() => setSelected(allOn ? new Set() : new Set(all))} />
-            <span>Select all</span>
-          </label>
-        </div>
-        <div className="studio-list">
-          {papers.map((p, i) => (
-            <label key={p.idx} className={"studio-src" + (selected.has(p.idx) ? " on" : "")}>
-              <input type="checkbox" checked={selected.has(p.idx)} onChange={() => toggle(p.idx)} />
-              <span className="studio-n">[{i + 1}]</span>
-              <span className="studio-st">
-                {p.title}
-                <span className="studio-sm">
-                  {(p.authors || "—").split(",")[0]} · {p.year || "—"}
-                  {extByIdx[p.idx] ? "" : " · no data"}
-                </span>
+      <aside className={"studio-col" + (collapsedLeft ? " collapsed" : "")}>
+        {collapsedLeft ? (
+          <button className="studio-col-rail" onClick={() => setCollapsedLeft(false)} title="Show sources">
+            <span>›</span>
+            <span className="studio-col-rail-t">Sources · {selected.size}/{papers.length}</span>
+          </button>
+        ) : (
+          <>
+            <div className="studio-h">
+              <span>Sources</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span className="studio-count">{selected.size}/{papers.length}</span>
+                <button className="studio-collapse" onClick={() => setCollapsedLeft(true)} title="Collapse">‹</button>
               </span>
-            </label>
-          ))}
-          {papers.length === 0 && <div className="muted tiny">No sources yet — run a review first.</div>}
-        </div>
-        <div className="studio-foot muted tiny">
-          Add or remove papers from the <b>Sources</b> tab.
-        </div>
+            </div>
+            <div className="studio-selall">
+              <label>
+                <input type="checkbox" checked={allOn}
+                  onChange={() => setSelected(allOn ? new Set() : new Set(all))} />
+                <span>Select all</span>
+              </label>
+            </div>
+            <div className="studio-list">
+              {papers.map((p, i) => (
+                <label key={p.idx} className={"studio-src" + (selected.has(p.idx) ? " on" : "")}>
+                  <input type="checkbox" checked={selected.has(p.idx)} onChange={() => toggle(p.idx)} />
+                  <span className="studio-n">[{i + 1}]</span>
+                  <span className="studio-st">
+                    {p.title}
+                    <span className="studio-sm">
+                      {(p.authors || "—").split(",")[0]} · {p.year || "—"}
+                      {extByIdx[p.idx] ? "" : " · no data"}
+                    </span>
+                  </span>
+                </label>
+              ))}
+              {papers.length === 0 && <div className="muted tiny">No sources yet — run a review first.</div>}
+            </div>
+            <div className="studio-foot muted tiny">
+              Add or remove papers from the <b>Sources</b> tab.
+            </div>
+          </>
+        )}
       </aside>
 
       {/* ── Center: chat ──────────────────────────────── */}
@@ -230,44 +269,56 @@ export default function StudioView({ runId, papers = [], extractions = [], apiKe
       </section>
 
       {/* ── Right: tools ──────────────────────────────── */}
-      <aside className="studio-col">
-        <div className="studio-h"><span>Studio</span></div>
-        <div className="studio-tools">
-          {TOOLS.map(([kind, ic, label, desc]) => (
-            <button key={kind} className="studio-tool" title={desc}
-              disabled={!!working} onClick={() => generate(kind, label)}>
-              <span className="studio-tool-ic">{ic}</span>
-              <span>
-                <span className="studio-tool-t">{working === kind ? "Generating…" : label}</span>
-                <span className="studio-tool-d">{desc}</span>
-              </span>
-            </button>
-          ))}
-        </div>
-
-        {artifact && (
-          <div className="studio-art">
-            <div className="studio-art-h">
-              <b>{artifact.title}</b>
-              <button className="studio-x" onClick={() => setArtifact(null)}>×</button>
+      <aside className={"studio-col" + (collapsedRight ? " collapsed" : "")}>
+        {collapsedRight ? (
+          <button className="studio-col-rail" onClick={() => setCollapsedRight(false)} title="Show Studio tools">
+            <span>‹</span>
+            <span className="studio-col-rail-t">Studio{artifact ? ` · ${artifact.title}` : ""}</span>
+          </button>
+        ) : (
+          <>
+            <div className="studio-h">
+              <span>Studio</span>
+              <button className="studio-collapse" onClick={() => setCollapsedRight(true)} title="Collapse">›</button>
             </div>
-            <div className="studio-dl">
-              {[["pdf", "PDF"], ["docx", "Word"], ["pptx", "PPT"]].map(([f, l]) => (
-                <button key={f} className="btn ghost sm" disabled={!!working}
-                  onClick={() => download(f)}>
-                  {working === `dl-${f}` ? "…" : `↓ ${l}`}
+            <div className="studio-tools">
+              {TOOLS.map(([kind, ic, label, desc]) => (
+                <button key={kind} className="studio-tool" title={desc}
+                  disabled={!!working} onClick={() => generate(kind, label)}>
+                  <span className="studio-tool-ic">{ic}</span>
+                  <span>
+                    <span className="studio-tool-t">{working === kind ? "Generating…" : label}</span>
+                    <span className="studio-tool-d">{desc}</span>
+                  </span>
                 </button>
               ))}
             </div>
-            <div className="studio-art-body chat-md" ref={artRef}
-              dangerouslySetInnerHTML={{ __html: md(artifact.content) }} />
-          </div>
-        )}
-        {!artifact && (
-          <div className="studio-foot muted tiny">
-            Generate a report, deck or briefing from the selected sources — then download it
-            as PDF, Word or PowerPoint.
-          </div>
+
+            {artifact && (
+              <div className="studio-art">
+                <div className="studio-art-h">
+                  <b>{artifact.title}</b>
+                  <button className="studio-x" onClick={() => setArtifact(null)}>×</button>
+                </div>
+                <div className="studio-dl">
+                  {[["pdf", "PDF"], ["docx", "Word"], ["pptx", "PPT"]].map(([f, l]) => (
+                    <button key={f} className="btn ghost sm" disabled={!!working}
+                      onClick={() => download(f)}>
+                      {working === `dl-${f}` ? "…" : `↓ ${l}`}
+                    </button>
+                  ))}
+                </div>
+                <div className="studio-art-body chat-md" ref={artRef}
+                  dangerouslySetInnerHTML={{ __html: md(artifact.content) }} />
+              </div>
+            )}
+            {!artifact && (
+              <div className="studio-foot muted tiny">
+                Generate a report, deck or briefing from the selected sources — then download it
+                as PDF, Word or PowerPoint.
+              </div>
+            )}
+          </>
         )}
       </aside>
     </div>

@@ -1,0 +1,97 @@
+import React from "react";
+
+function Ic({ name, size = 16, color, className, style }) {
+  const c = {
+    width: size, height: size, viewBox: "0 0 24 24", fill: "none",
+    stroke: color || "currentColor", strokeWidth: 2, strokeLinecap: "round",
+    strokeLinejoin: "round", className, style,
+  };
+  switch (name) {
+    case "search": return <svg {...c}><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>;
+    case "message-square": return <svg {...c}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>;
+    case "file-text": return <svg {...c}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg>;
+    case "brain": return <svg {...c}><path d="M9.5 2a3 3 0 0 0-3 3 3 3 0 0 0-1.5 2.6A3 3 0 0 0 6 13.5V16a3 3 0 0 0 5.5 1.6V5A3 3 0 0 0 9.5 2z" /><path d="M14.5 2a3 3 0 0 1 3 3 3 3 0 0 1 1.5 2.6A3 3 0 0 1 18 13.5V16a3 3 0 0 1-5.5 1.6" /></svg>;
+    case "pen-tool": return <svg {...c}><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" /></svg>;
+    case "sparkles": return <svg {...c}><path d="M12 3l1.6 4.8L18 9l-4.4 1.2L12 15l-1.6-4.8L6 9l4.4-1.2z" /><path d="M19 14l.7 2.1L22 17l-2.3.6L19 20l-.7-2.4L16 17l2.3-.9z" /></svg>;
+    case "network": return <svg {...c}><rect x="9" y="2" width="6" height="6" rx="1" /><rect x="2" y="16" width="6" height="6" rx="1" /><rect x="16" y="16" width="6" height="6" rx="1" /><path d="M12 8v4M5 16v-2h14v2" /></svg>;
+    case "list-ordered": return <svg {...c}><line x1="10" y1="6" x2="21" y2="6" /><line x1="10" y1="12" x2="21" y2="12" /><line x1="10" y1="18" x2="21" y2="18" /><path d="M4 6h1v4M4 10h2" /><path d="M6 18H4l2-2.5V14H4" /></svg>;
+    case "help-circle": return <svg {...c}><circle cx="12" cy="12" r="10" /><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12" y2="17.01" /></svg>;
+    case "play": return <svg {...c}><polygon points="6 4 20 12 6 20" /></svg>;
+    case "check": return <svg {...c}><polyline points="20 6 9 17 4 12" /></svg>;
+    case "x": return <svg {...c}><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>;
+    case "rotate-cw": return <svg {...c}><path d="M21 12a9 9 0 1 1-3-6.7" /><polyline points="21 4 21 9 16 9" /></svg>;
+    case "chevron-right": return <svg {...c}><polyline points="9 6 15 12 9 18" /></svg>;
+    case "layers": return <svg {...c}><polygon points="12 2 2 7 12 12 22 7 12 2" /><polyline points="2 12 12 17 22 12" /><polyline points="2 17 12 22 22 17" /></svg>;
+    case "flask": return <svg {...c}><path d="M9 2v6.5L4 18a2 2 0 0 0 1.8 3h12.4A2 2 0 0 0 20 18l-5-9.5V2" /><line x1="8" y1="2" x2="16" y2="2" /><line x1="7" y1="14" x2="17" y2="14" /></svg>;
+    case "book": return <svg {...c}><path d="M2 4h7a3 3 0 0 1 3 3v13a2.5 2.5 0 0 0-2.5-2.5H2z" /><path d="M22 4h-7a3 3 0 0 0-3 3v13a2.5 2.5 0 0 1 2.5-2.5H22z" /></svg>;
+    case "bar-chart": return <svg {...c}><path d="M3 3v18h18" /><rect x="7" y="11" width="3" height="6" /><rect x="12" y="7" width="3" height="10" /><rect x="17" y="13" width="3" height="4" /></svg>;
+    case "alert": return <svg {...c}><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12" y2="17.01" /></svg>;
+    case "cpu": return <svg {...c}><rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" /><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3" /></svg>;
+    case "filter": return <svg {...c}><polygon points="22 3 2 3 10 12.5 10 19 14 21 14 12.5" /></svg>;
+    case "plus": return <svg {...c}><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>;
+    case "clock": return <svg {...c}><circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15 14" /></svg>;
+    case "trash2": return <svg {...c}><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /><line x1="10" y1="11" x2="10" y2="17" /><line x1="14" y1="11" x2="14" y2="17" /></svg>;
+    case "coins": return <svg {...c}><circle cx="8" cy="8" r="6" /><path d="M18.09 10.37A6 6 0 1 1 10.34 18" /><path d="M7 6h1v4" /><path d="M16.71 13.88l.7.71-2.82 2.82" /></svg>;
+    case "zap": return <svg {...c}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" /></svg>;
+    case "arrow-left": return <svg {...c}><line x1="19" y1="12" x2="5" y2="12" /><polyline points="12 19 5 12 12 5" /></svg>;
+    case "chevron-up": return <svg {...c}><polyline points="18 15 12 9 6 15" /></svg>;
+    case "chevron-down": return <svg {...c}><polyline points="6 9 12 15 18 9" /></svg>;
+    case "folder": return <svg {...c}><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>;
+    case "download": return <svg {...c}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>;
+    case "zoom-in": return <svg {...c}><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16" y2="16" /><line x1="11" y1="8" x2="11" y2="14" /><line x1="8" y1="11" x2="14" y2="11" /></svg>;
+    case "zoom-out": return <svg {...c}><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16" y2="16" /><line x1="8" y1="11" x2="14" y2="11" /></svg>;
+    case "pointer": return <svg {...c}><path d="M4 3l7 17 2.5-7.5L21 10z" /></svg>;
+    case "eraser": return <svg {...c}><path d="M20 20H8.5L3 14.5a2 2 0 0 1 0-2.8l8-8a2 2 0 0 1 2.8 0l6.5 6.5a2 2 0 0 1 0 2.8L14 19" /><path d="M9 13.5 15.5 20" /></svg>;
+    case "type": return <svg {...c}><polyline points="4 7 4 4 20 4 20 7" /><line x1="12" y1="4" x2="12" y2="20" /><line x1="9" y1="20" x2="15" y2="20" /></svg>;
+    case "square": return <svg {...c}><rect x="4" y="4" width="16" height="16" rx="2" /></svg>;
+    case "circle-shape": return <svg {...c}><circle cx="12" cy="12" r="8.5" /></svg>;
+    case "lightbulb": return <svg {...c}><path d="M9 18h6" /><path d="M10 22h4" /><path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.3 1 2.1V17h6v-.2c0-.8.4-1.6 1-2.1A7 7 0 0 0 12 2z" /></svg>;
+    case "maximize": return <svg {...c}><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3" /></svg>;
+    case "external-link": return <svg {...c}><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>;
+    case "sigma": return <svg {...c}><path d="M18 6V4H6l6 8-6 8h12v-2" /></svg>;
+    default: return <svg {...c}><circle cx="12" cy="12" r="9" /></svg>;
+  }
+}
+
+export const Search = (p) => <Ic name="search" {...p} />;
+export const FileText = (p) => <Ic name="file-text" {...p} />;
+export const Brain = (p) => <Ic name="brain" {...p} />;
+export const PenTool = (p) => <Ic name="pen-tool" {...p} />;
+export const Sparkles = (p) => <Ic name="sparkles" {...p} />;
+export const Network = (p) => <Ic name="network" {...p} />;
+export const ListOrdered = (p) => <Ic name="list-ordered" {...p} />;
+export const HelpCircle = (p) => <Ic name="help-circle" {...p} />;
+export const Play = (p) => <Ic name="play" {...p} />;
+export const Check = (p) => <Ic name="check" {...p} />;
+export const X = (p) => <Ic name="x" {...p} />;
+export const RotateCw = (p) => <Ic name="rotate-cw" {...p} />;
+export const ChevronRight = (p) => <Ic name="chevron-right" {...p} />;
+export const Layers = (p) => <Ic name="layers" {...p} />;
+export const FlaskConical = (p) => <Ic name="flask" {...p} />;
+export const BookOpen = (p) => <Ic name="book" {...p} />;
+export const BarChart3 = (p) => <Ic name="bar-chart" {...p} />;
+export const AlertTriangle = (p) => <Ic name="alert" {...p} />;
+export const Cpu = (p) => <Ic name="cpu" {...p} />;
+export const Filter = (p) => <Ic name="filter" {...p} />;
+export const Plus = (p) => <Ic name="plus" {...p} />;
+export const Trash2 = (p) => <Ic name="trash2" {...p} />;
+export const Clock = (p) => <Ic name="clock" {...p} />;
+export const Coins = (p) => <Ic name="coins" {...p} />;
+export const Zap = (p) => <Ic name="zap" {...p} />;
+export const MessageSquare = (p) => <Ic name="message-square" {...p} />;
+export const ArrowLeft = (p) => <Ic name="arrow-left" {...p} />;
+export const ChevronUp = (p) => <Ic name="chevron-up" {...p} />;
+export const ChevronDown = (p) => <Ic name="chevron-down" {...p} />;
+export const Folder = (p) => <Ic name="folder" {...p} />;
+export const Download = (p) => <Ic name="download" {...p} />;
+export const Eraser = (p) => <Ic name="eraser" {...p} />;
+export const ZoomIn = (p) => <Ic name="zoom-in" {...p} />;
+export const ZoomOut = (p) => <Ic name="zoom-out" {...p} />;
+export const MousePointer = (p) => <Ic name="pointer" {...p} />;
+export const TypeIcon = (p) => <Ic name="type" {...p} />;
+export const Square = (p) => <Ic name="square" {...p} />;
+export const CircleShape = (p) => <Ic name="circle-shape" {...p} />;
+export const Lightbulb = (p) => <Ic name="lightbulb" {...p} />;
+export const Maximize = (p) => <Ic name="maximize" {...p} />;
+export const ExternalLink = (p) => <Ic name="external-link" {...p} />;
+export const Sigma = (p) => <Ic name="sigma" {...p} />;

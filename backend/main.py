@@ -28,6 +28,7 @@ from api.routes import router
 from api.hypothesis_routes import router as hypothesis_router
 from api.data_analysis_routes import router as data_analysis_router
 from api.manuscript_routes import router as manuscript_router
+from api.watch_routes import router as watch_router
 from core.config import settings
 from core.db import init_db
 
@@ -74,6 +75,7 @@ app.include_router(router)
 app.include_router(hypothesis_router)
 app.include_router(data_analysis_router)
 app.include_router(manuscript_router)
+app.include_router(watch_router)
 
 
 @app.get("/api/health")

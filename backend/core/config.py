@@ -120,5 +120,24 @@ class Settings:
     # cover letter attachments) instead of a plain text message.
     hr_email: str = os.environ.get("HR_EMAIL", "hr@orcusintelligencelab.com")
 
+    # ── Plans, free trial & Stripe (core/billing.py) ─────────────────────
+    # Master switch. Off = the trial/plan status is computed and shown in the
+    # UI, but no limit is applied to anyone.
+    billing_enforce: bool = os.environ.get("BILLING_ENFORCE", "0") in ("1", "true", "True")
+    trial_days: int = int(os.environ.get("TRIAL_DAYS", "7"))
+    trial_credit_usd: float = float(os.environ.get("TRIAL_CREDIT_USD", "3.0"))
+    # Comma-separated emails that always get full access, never metered.
+    billing_bypass_emails: str = os.environ.get("BILLING_BYPASS_EMAILS", "")
+    # Stripe Payment Links (Dashboard > Payment Links), one per paid plan.
+    stripe_link_pro: str = os.environ.get("STRIPE_LINK_PRO", "")
+    stripe_link_max: str = os.environ.get("STRIPE_LINK_MAX", "")
+    # Webhook signing secret (whsec_...) for /api/billing/webhook.
+    stripe_webhook_secret: str = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+    # Optional: Stripe Price ids, so plan changes made in the customer portal
+    # map back to Pro/Max; and the customer-portal link for "Manage".
+    stripe_price_pro: str = os.environ.get("STRIPE_PRICE_PRO", "")
+    stripe_price_max: str = os.environ.get("STRIPE_PRICE_MAX", "")
+    stripe_portal_url: str = os.environ.get("STRIPE_PORTAL_URL", "")
+
 
 settings = Settings()

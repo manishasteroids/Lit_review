@@ -1,5 +1,4 @@
 import React, { useState, useMemo } from "react";
-import PaperChatPanel from "./PaperChatPanel.jsx";
 import PdfViewer from "./PdfViewer.jsx";
 import { useConfirm } from "./ConfirmModal.jsx";
 import MathText from "./MathText.jsx";
@@ -274,8 +273,8 @@ export default function SourcesView({
                           <div className="pt-meta">{p.authors || "—"} · {p.year || "—"} · {p.venue || "preprint"}</div>
                           <div className="pt-actions">
                             {p.url && <a href={p.url} target="_blank" rel="noreferrer" className="pt-link">link</a>}
-                            <button className="pt-chat-btn" onClick={() => setReadPaper(p)}>read</button>
-                            <button className="pt-chat-btn" onClick={() => setChatPaper(p)}>chat</button>
+                            <button className="pt-chat-btn" onClick={() => setChatPaper(p)}
+                              title="Open the paper with the chat beside it">read &amp; chat</button>
                             {editable && <button className="pt-chat-btn" onClick={() => setDetailPaper(p)}>details</button>}
                             {editable && <button className="pt-chat-btn" onClick={() => removeOne(p.idx)}>remove</button>}
                           </div>
@@ -358,15 +357,17 @@ export default function SourcesView({
         />
       )}
  
-      {chatPaper && (
-        <PaperChatPanel runId={runId} paper={chatPaper} extraction={extByIdx[chatPaper.idx]}
-          cite={citeNumOf(chatPaper.idx)} apiKey={apiKey} model={model}
-          onClose={() => setChatPaper(null)} />
-      )}
-
-      {readPaper && (
-        <PdfViewer runId={runId} paper={readPaper} onClose={() => setReadPaper(null)} />
-      )}
+      {/* Reading and chatting are one window: the paper on the left, the
+          chat in a side bar. "chat" opens it with the side bar showing. */}
+      {(readPaper || chatPaper) && (() => {
+        const p = readPaper || chatPaper;
+        return (
+          <PdfViewer key={(p.url || p.title || "") + (chatPaper ? ":c" : ":r")}
+            runId={runId} paper={p} extraction={extByIdx[p.idx]} cite={citeNumOf(p.idx)}
+            apiKey={apiKey} model={model} initialChat={!readPaper}
+            onClose={() => { setReadPaper(null); setChatPaper(null); }} />
+        );
+      })()}
 
       {confirmModal}
     </div>
@@ -600,8 +601,7 @@ function PaperDetail({ paper, ext, onClose, onRemove, onChat, onRead }) {
       )}
  
       <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-        <button className="btn sm" onClick={onChat}>Chat with paper</button>
-        {onRead && <button className="btn ghost sm" onClick={onRead}>Read PDF</button>}
+        <button className="btn sm" onClick={onChat}>Read &amp; chat</button>
         <span style={{ flex: 1 }} />
         <button className="btn ghost sm" onClick={onClose}>Keep</button>
         {onRemove && <button className="btn ghost sm" onClick={onRemove} style={{ color: "#c0392b" }}>Remove</button>}

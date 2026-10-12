@@ -231,9 +231,20 @@ a{color:var(--indigo);}
 .chat-md pre code{background:none;border:none;padding:0;}
 .chat-md hr{border:none;border-top:1px solid var(--line);margin:10px 0;}
 /* ── Studio: NotebookLM-style three-pane workspace ───────────────────── */
-.studio{display:grid;grid-template-columns:250px minmax(0,1fr) 300px;gap:12px;
-  height:calc(100vh - 260px);min-height:520px;}
+.studio{display:grid;grid-template-columns:var(--lw,250px) minmax(0,1fr) var(--rw,300px);gap:12px;
+  height:calc(100vh - 150px);min-height:520px;transition:grid-template-columns .15s ease;}
 @media(max-width:1200px){ .studio{grid-template-columns:1fr;height:auto;} }
+.studio-col.collapsed{padding:0;overflow:hidden;}
+.studio-col-rail{width:100%;height:100%;min-height:200px;border:none;background:transparent;
+  cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;
+  gap:10px;padding:14px 0;color:var(--muted);}
+.studio-col-rail:hover{color:var(--indigo);}
+.studio-col-rail span:first-child{font-size:15px;}
+.studio-col-rail-t{writing-mode:vertical-rl;text-orientation:mixed;font-size:11px;
+  font-weight:600;letter-spacing:.02em;white-space:nowrap;}
+.studio-collapse{background:none;border:1px solid var(--line);border-radius:6px;
+  color:var(--muted);width:20px;height:20px;line-height:1;cursor:pointer;flex-shrink:0;}
+.studio-collapse:hover{border-color:var(--indigo);color:var(--indigo);}
 .studio-col{display:flex;flex-direction:column;min-height:0;border:1px solid var(--line);
   border-radius:12px;background:var(--card,#fff);overflow:hidden;}
 .studio-h{display:flex;align-items:center;justify-content:space-between;gap:8px;
@@ -352,8 +363,14 @@ a{color:var(--indigo);}
 .grid3{display:grid;grid-template-columns:196px minmax(0,1fr) 208px;gap:14px;align-items:start;}
 @media(min-width:1700px){ .grid3{grid-template-columns:210px minmax(0,1fr) 220px;gap:18px;} }
 @media(max-width:1100px){ .grid3{grid-template-columns:1fr;} .lcol,.rcol{position:relative!important;top:0!important;} }
-.lcol{display:flex;flex-direction:column;gap:18px;position:sticky;top:18px;}
-.rcol{position:sticky;top:18px;}
+/* Sticky columns need their OWN scroll once their content is taller than
+   the viewport -- sticky alone just pins the column near the top while the
+   center column scrolls underneath, so anything below the fold in the
+   sidebar was only reachable by scrolling the WHOLE page to its very end
+   (e.g. a long Agent Pipeline / Side Modules list on .rcol). max-height +
+   overflow-y:auto lets each column scroll independently instead. */
+.lcol{display:flex;flex-direction:column;gap:18px;position:sticky;top:18px;max-height:calc(100vh - 36px);overflow-y:auto;}
+.rcol{position:sticky;top:18px;max-height:calc(100vh - 36px);overflow-y:auto;}
 .ccol{min-width:0;}
 .panel{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px;box-shadow:0 1px 2px rgba(20,28,50,.04);}
 .tool-item{display:flex;align-items:center;gap:9px;width:100%;text-align:left;

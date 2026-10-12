@@ -272,6 +272,16 @@ export const api = {
   quickAskHistory: () => getJSON("/api/quick-ask/history"),
   // New papers in the user's own research areas (cached a day server-side).
   getFrontier: (refresh) => getJSON(`/api/frontier${refresh ? "?refresh=true" : ""}`),
+  // Scholars / laboratories the user follows and their new papers (core/watch.py).
+  getWatchlist: (refresh) => getJSON(`/api/watch${refresh ? "?refresh=true" : ""}`),
+  watchSearch: (kind, q, institution) => getJSON(`/api/watch/search?kind=${encodeURIComponent(kind)}&q=${encodeURIComponent(q)}${institution ? `&institution=${encodeURIComponent(institution)}` : ""}`),
+  suggestLabMembers: (institution, topic) => getJSON(`/api/watch/suggest-members?institution=${encodeURIComponent(institution)}&topic=${encodeURIComponent(topic)}`),
+  createLab: (body) => request("/api/watch/group", body),
+  labFromUrl: (url) => getJSON(`/api/watch/from-url?url=${encodeURIComponent(url)}`),
+  updateLab: (id, body) => request(`/api/watch/group/${id}`, body),
+  follow: (body) => request("/api/watch", body),
+  unfollow: (id) => del(`/api/watch/${id}`),
+  watchSeen: (id) => request(`/api/watch/seen${id ? `?fid=${encodeURIComponent(id)}` : ""}`, {}),
   deleteQuickAskHistory: (id) => del(`/api/quick-ask/history/${id}`),
 
   // Studio-only entry: a run with no search — just a place to upload your
@@ -654,6 +664,11 @@ export const api = {
   // Per-day token + cost trend for the signed-in user (grouped in local time)
   getUsageTrend: (days = 30) =>
     getJSON("/api/usage/trend?days=" + days + "&tz_offset=" + new Date().getTimezoneOffset()),
+
+  // Plan, free-trial progress, and which Stripe upgrade links are configured
+  getBillingStatus: () => getJSON("/api/billing/status"),
+  // Stripe Payment Link for "pro" | "max", tagged with this user's id
+  getCheckoutUrl: (plan) => getJSON("/api/billing/checkout?plan=" + encodeURIComponent(plan)),
 
   // Usage grouped by run + by project; days=0 → all time
   getUsageBreakdown: (days = 0, projectId = "", model = "") =>

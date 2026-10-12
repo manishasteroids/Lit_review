@@ -31,7 +31,7 @@ PER_AREA = 4
 POOL = 40                             # papers looked at per area to find who recurs
 MAX_LABS = 4
 MAX_PEOPLE = 5
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 WINDOW_DAYS = 240                     # "recent" = published in roughly the last 8 months
 OPENALEX = "https://api.openalex.org/works"
 ARXIV = "https://export.arxiv.org/api/query"
@@ -197,6 +197,7 @@ def _who(found: list[dict]) -> tuple[list[dict], list[dict]]:
     top_labs = sorted(labs.values(), key=lambda x: (-x["papers"], x["name"]))[:MAX_LABS]
     top_people = sorted(people.values(), key=lambda x: (-x["papers"], x["name"]))[:MAX_PEOPLE]
     for l in top_labs:
+        l["openalex"] = l.get("id") or ""
         l["url"] = l.pop("ror") or l.get("id") or ""
         l.pop("id", None)
     for p in top_people:
@@ -255,7 +256,7 @@ def get_frontier(user_id: str, refresh: bool = False) -> dict:
     else:
         results = []
     out = {"v": CACHE_VERSION, "areas": [
-        {"label": a["label"], "topic": a["topic"], "project_id": a["project_id"], **res}
+        {"label": a["label"], "topic": a["topic"], "project_id": a["project_id"], "keywords": a["keywords"], **res}
         for a, res in zip(areas, results) if res["items"]
     ], "had_areas": bool(areas)}
     now = datetime.now(timezone.utc).isoformat()

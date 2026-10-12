@@ -138,7 +138,10 @@ function WindowControls({ os, side, ...props }) {
   return os === "mac" ? <TrafficLights {...props} /> : <WinControls {...props} />;
 }
 
-export default function PaperChatPanel({ runId, paper, extraction, cite, apiKey, model, onClose }) {
+// `docked`: render as a plain column that fills its parent (the PDF reader's
+// side bar) instead of a floating window. `seed`: {text, n} -- a passage the
+// reader selected; it is put in the input box, ready to ask about.
+export default function PaperChatPanel({ runId, paper, extraction, cite, apiKey, model, onClose, docked = false, seed = null }) {
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
   const [images, setImages] = useState([]); // [{ media_type, data, preview }]
@@ -146,6 +149,14 @@ export default function PaperChatPanel({ runId, paper, extraction, cite, apiKey,
   const [chatMode, setChatMode] = useState("quick"); // quick (Gemini) | deep (Sonnet)
   const logRef = useRef(null);
   const fileRef = useRef(null);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (!seed?.text) return;
+    const t = seed.text.length > 600 ? seed.text.slice(0, 600) + "…" : seed.text;
+    setDraft(`About this passage: "${t}" — `);
+    setTimeout(() => { const el = inputRef.current; if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }, 0);
+  }, [seed?.n]);
 
   // ── Window state: position, size, minimized, maximized ───────────────
   const MIN_W = 340, MIN_H = 240;
@@ -157,6 +168,7 @@ export default function PaperChatPanel({ runId, paper, extraction, cite, apiKey,
   const prevRect = useRef(null); // remembers size/pos before maximize
 
   useEffect(() => {
+    if (docked) { setPos({ x: 0, y: 0 }); return; }
     // Open docked to the right edge as a tall side panel.
     const w = Math.min(DOCK_W, window.innerWidth - 2 * MARGIN);
     const h = window.innerHeight - 2 * MARGIN;
@@ -343,6 +355,7 @@ export default function PaperChatPanel({ runId, paper, extraction, cite, apiKey,
 
   // Lock the page behind the modal so the background doesn't scroll with it.
   useEffect(() => {
+    if (docked) return;   // the reader already covers the page
     const { overflow, paddingRight } = document.body.style;
     const gap = window.innerWidth - document.documentElement.clientWidth;
     document.body.style.overflow = "hidden";
@@ -416,7 +429,12 @@ export default function PaperChatPanel({ runId, paper, extraction, cite, apiKey,
 
   // Window container overrides the .chat-panel CSS (fixed/centered) with a
   // draggable, resizable, maximizable floating window. No scrim = non-blocking.
-  const panelStyle = {
+  const panelStyle = docked ? {
+    position: "relative", left: "auto", top: "auto", width: "100%", height: "100%", margin: 0,
+    transform: "none", animation: "none", zIndex: "auto",
+    display: "flex", flexDirection: "column", maxHeight: "none",
+    borderRadius: 0, border: "none", boxShadow: "none", overflow: "hidden",
+  } : {
     position: "fixed", left: pos.x, top: pos.y,
     width: size.w, height: size.h,
     right: "auto", bottom: "auto", margin: 0, transform: "none",
@@ -427,6 +445,12 @@ export default function PaperChatPanel({ runId, paper, extraction, cite, apiKey,
 
   return (
     <div className="chat-panel" style={panelStyle}>
+      {docked ? (
+        <div className="chat-head" style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 10 }}>
+          <span className="eyebrow" style={{ flex: 1, minWidth: 0 }}>Chat with this paper · [{cite}]</span>
+          <button className="btn ghost sm" style={{ padding: "4px 6px" }} title="Hide chat" onClick={onClose}>✕</button>
+        </div>
+      ) : (
       <div className="chat-head" onMouseDown={startDrag} onDoubleClick={toggleMaximize}
         style={{ cursor: maximized ? "default" : "move", userSelect: "none", flexShrink: 0,
           display: "flex", flexDirection: "column", alignItems: "stretch", gap: 8 }}>
@@ -442,6 +466,7 @@ export default function PaperChatPanel({ runId, paper, extraction, cite, apiKey,
           <div className="chat-paper-meta">{paper.authors || "—"} · {paper.year || "—"}</div>
         </div>
       </div>
+      )}
 
       {(
         <>
@@ -476,6 +501,7 @@ export default function PaperChatPanel({ runId, paper, extraction, cite, apiKey,
                 questions read the full PDF on Gemini (cheap). <b>Deep</b> — chips and questions
                 re-read the full paper with Sonnet for thorough, reasoned answers (costs more).
                 You can also attach a figure and ask it to explain or compare it with the paper.
+                {docked && <> Select text on the page and press <b>Ask</b> to ask about that passage.</>}
               </div>
             )}
             {messages.map((m, i) => (
@@ -516,7 +542,7 @@ export default function PaperChatPanel({ runId, paper, extraction, cite, apiKey,
               onClick={() => fileRef.current?.click()}
               style={{ background: "var(--ink)", border: "1px solid var(--line)", borderRadius: 9, color: "var(--muted)", cursor: "pointer", fontSize: 16, padding: "0 12px" }}
             >＋</button>
-            <input autoFocus value={draft} placeholder="Ask about this paper"
+            <input ref={inputRef} autoFocus={!docked} value={draft} placeholder="Ask about this paper"
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && send()} />
             <button onClick={send} disabled={sending || (!draft.trim() && images.length === 0)}>send</button>
@@ -527,7 +553,7 @@ export default function PaperChatPanel({ runId, paper, extraction, cite, apiKey,
       )}
 
       {/* Resize handles — every edge and corner */}
-      {!maximized && HANDLES.map(([dir, style]) => (
+      {!maximized && !docked && HANDLES.map(([dir, style]) => (
         <div key={dir} onMouseDown={(e) => startResize(dir, e)}
           style={{ position: "absolute", zIndex: 5, ...style }} />
       ))}

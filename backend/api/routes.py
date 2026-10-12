@@ -9,7 +9,7 @@ import logging
 import re
 from datetime import datetime, timezone
  
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
  
@@ -23,6 +23,15 @@ from core.usage import get_usage
 from pipeline.orchestrator import RUNS, RunState, SiftPipeline
  
 router = APIRouter(prefix="/api")
+
+from core.billing import clamp_chat_mode, clamp_mode  # noqa: E402
+
+
+def _plan_mode(user_id: str, mode):
+    """The search mode this user's plan allows (no-op unless billing is
+    enforced). Used on later pipeline steps so a run started before a trial
+    ended can't keep using a mode the plan no longer includes."""
+    return clamp_mode(user_id, mode)[0]
 log = logging.getLogger("sift.routes")
  
  
@@ -158,14 +167,15 @@ async def create_run_stream(body: CreateRunBody, user_id: str = Depends(require_
     """
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_event_loop()
- 
+    use_mode, plan_notice = await asyncio.to_thread(clamp_mode, user_id, body.mode)
+
     def on_progress(event: dict):
         """Called from a worker thread — pushes into the async queue."""
         loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", **event})
  
     async def run_pipeline():
         try:
-            pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=body.mode)
+            pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=use_mode)
             run = await asyncio.to_thread(
                 pipeline.reformulate_and_search, body.topic, on_progress
             )
@@ -196,6 +206,7 @@ async def create_run_stream(body: CreateRunBody, user_id: str = Depends(require_
                 "reform": run.reform,
                 "papers": run.papers,
                 "stage": run.stage,
+                "plan_notice": plan_notice,
             })
         except Exception as e:  # noqa: BLE001
             await queue.put({"type": "error", "message": str(e)})
@@ -220,7 +231,8 @@ async def create_run_stream(body: CreateRunBody, user_id: str = Depends(require_
  
 @router.post("/runs")
 def create_run(body: CreateRunBody, user_id: str = Depends(require_user)):
-    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=body.mode)
+    use_mode, plan_notice = clamp_mode(user_id, body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=use_mode)
     try:
         run = pipeline.reformulate_and_search(body.topic)
     except Exception as e:
@@ -239,7 +251,8 @@ def create_run(body: CreateRunBody, user_id: str = Depends(require_user)):
     if body.project_id:
         from core.projects import assign_session
         assign_session(run.run_id, user_id, body.project_id)
-    return {"run_id": run.run_id, "reform": run.reform, "papers": run.papers, "stage": run.stage}
+    return {"run_id": run.run_id, "reform": run.reform, "papers": run.papers, "stage": run.stage,
+            "plan_notice": plan_notice}
 
 
 class BlankRunBody(BaseModel):
@@ -366,7 +379,7 @@ def _persist_experiments(run, user_id) -> None:
 @router.post("/runs/{run_id}/synthesize")
 def synthesize(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
-    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=_plan_mode(user_id, run.mode or body.mode))
     try:
         pipeline.extract_and_synthesize(run)
     except Exception as e:
@@ -390,7 +403,7 @@ async def synthesize_stream(run_id: str, body: SynthesizeBody, user_id: str = De
     async def work():
         try:
             pipeline = SiftPipeline(api_key=body.api_key, model=body.model,
-                                       mode=run.mode or body.mode)
+                                       mode=_plan_mode(user_id, run.mode or body.mode))
             await asyncio.to_thread(pipeline.extract_and_synthesize, run, on_progress)
             side = _persist_done(run, user_id, notes=body.notes)
             await queue.put({
@@ -420,7 +433,7 @@ async def synthesize_stream(run_id: str, body: SynthesizeBody, user_id: str = De
 @router.post("/runs/{run_id}/write")
 def write(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
-    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=_plan_mode(user_id, run.mode or body.mode))
     try:
         pipeline.write(run)
     except Exception as e:
@@ -894,7 +907,7 @@ def add_paper(run_id: str, body: AddPaperBody, user_id: str = Depends(require_us
     if _is_duplicate(run, body.paper):
         raise HTTPException(409, "This paper is already in your sources.")
     pipeline = SiftPipeline(api_key=body.api_key, model=body.model,
-                               mode=run.mode or getattr(body, "mode", None))
+                               mode=_plan_mode(user_id, run.mode or getattr(body, "mode", None)))
     try:
         res = pipeline.add_paper(run, body.paper)
     except Exception as e:
@@ -911,7 +924,7 @@ def reanalyze(run_id: str, body: ReanalyzeBody, user_id: str = Depends(require_u
     if len(body.included_indices) < 1:
         raise HTTPException(400, "Include at least one source before updating the analysis.")
     pipeline = SiftPipeline(api_key=body.api_key, model=body.model,
-                               mode=run.mode or getattr(body, "mode", None))
+                               mode=_plan_mode(user_id, run.mode or getattr(body, "mode", None)))
     try:
         pipeline.reanalyze(run, body.included_indices)
     except Exception as e:
@@ -925,7 +938,7 @@ def reanalyze(run_id: str, body: ReanalyzeBody, user_id: str = Depends(require_u
 @router.post("/runs/{run_id}/evaluate")
 def evaluate(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
-    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=_plan_mode(user_id, run.mode or body.mode))
     try:
         result = pipeline.evaluate(run)
     except Exception as e:
@@ -935,7 +948,7 @@ def evaluate(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_u
 @router.post("/runs/{run_id}/experiments")
 def design_experiments(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
-    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=_plan_mode(user_id, run.mode or body.mode))
     try:
         result = pipeline.design_experiments(run)
     except Exception as e:
@@ -950,7 +963,7 @@ def refine_experiments(run_id: str, body: SynthesizeBody, user_id: str = Depends
     and revise any hypothesis that scores below the bar, up to a couple of
     rounds. Designs a plan first if this run doesn't have one yet."""
     run = get_run(run_id, user_id)
-    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=_plan_mode(user_id, run.mode or body.mode))
     try:
         result = pipeline.refine_experiments(run)
     except Exception as e:
@@ -988,7 +1001,7 @@ def dispute_hypothesis(run_id: str, index: int, body: DisputeBody, user_id: str 
     argument = (body.argument or "").strip()
     if not argument:
         raise HTTPException(400, "Provide your objection in `argument`.")
-    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=_plan_mode(user_id, run.mode or body.mode))
     try:
         result = pipeline.dispute_hypothesis(run, index, argument)
     except ValueError as e:
@@ -1284,6 +1297,7 @@ def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require
  
     # Chat mode picks the model: Quick = Gemini (cheap), Deep = Sonnet (stronger
     # reasoning). Grounding source (text/excerpts/PDF) is chosen below by cost.
+    body.chat_mode = clamp_chat_mode(user_id, body.chat_mode)
     chat_models = {"quick": settings.gemini_model or "gemini-2.5-flash", "deep": "claude-sonnet-4-6"}
     chat_model = chat_models.get(body.chat_mode) if body.chat_mode else body.model
     llm = LLMClient(api_key=body.api_key, model=chat_model, run_id=run_id, stage="chat")
@@ -1473,6 +1487,7 @@ def studio_chat(run_id: str, body: StudioChatBody, user_id: str = Depends(requir
         convo += f"{role}: {m.get('content','')}\n"
     convo += f"User: {body.question}\nAssistant:"
 
+    body.chat_mode = clamp_chat_mode(user_id, body.chat_mode)
     chat_models = {"quick": settings.gemini_model or "gemini-2.5-flash",
                    "deep": "claude-sonnet-4-6"}
     model = chat_models.get(body.chat_mode) if body.chat_mode else (body.model or settings.mid_model)
@@ -2556,6 +2571,57 @@ def usage_breakdown(days: int = 0, project_id: str = "", model: str = "", tz_off
     from core.usage import get_usage_breakdown
     return get_usage_breakdown(user_id, days if days > 0 else None,
                                project_id or None, model or None, tz_offset)
+
+
+# ── Plans, free trial & Stripe ────────────────────────────────────────────
+
+@router.get("/billing/status")
+def billing_status(user_id: str = Depends(require_user)):
+    """Plan, trial progress and which upgrade links are configured."""
+    from core.billing import get_entitlement
+    return get_entitlement(user_id)
+
+
+@router.get("/billing/checkout")
+def billing_checkout(plan: str, user_id: str = Depends(require_user)):
+    """The Stripe Payment Link for `plan`, tagged with this user's id so the
+    webhook knows who paid."""
+    from core.billing import checkout_url
+    if plan not in ("pro", "max"):
+        raise HTTPException(400, "Unknown plan.")
+    email = None
+    try:
+        from core.db import _conn, _PH
+        with _conn() as conn:
+            row = conn.execute(f"SELECT email FROM known_users WHERE user_id = {_PH}", (user_id,)).fetchone()
+        email = dict(row)["email"] if row else None
+    except Exception:  # noqa: BLE001
+        pass
+    url = checkout_url(user_id, email, plan)
+    if not url:
+        raise HTTPException(503, "Checkout isn't set up yet.")
+    return {"url": url}
+
+
+@router.post("/billing/webhook")
+async def billing_webhook(request: Request):
+    """Stripe -> us. No user auth; authenticity comes from the signature."""
+    from core.billing import handle_stripe_event, verify_stripe_signature
+    if not settings.stripe_webhook_secret:
+        raise HTTPException(503, "Webhook not configured.")
+    payload = await request.body()
+    if not verify_stripe_signature(payload, request.headers.get("stripe-signature", ""),
+                                   settings.stripe_webhook_secret):
+        raise HTTPException(400, "Bad signature.")
+    try:
+        event = json.loads(payload)
+    except ValueError:
+        raise HTTPException(400, "Bad payload.")
+    outcome = await asyncio.to_thread(handle_stripe_event, event)
+    logging.getLogger("sift.billing").info("stripe %s -> %s", event.get("type"), outcome)
+    if outcome == "unmapped":
+        raise HTTPException(409, "Customer not linked yet; retry.")
+    return {"ok": True, "outcome": outcome}
 
 
 @router.get("/modes")

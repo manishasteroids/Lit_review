@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { api } from "../api/client.js";
 import { BarChart3, BookOpen, Lightbulb, Clock, ChevronDown } from "./icons.jsx";
-
+import WatchList, { WATCH_CHANGED } from "./WatchList.jsx";
 /**
  * The post-login dashboard home (architecture doc: claude/architecture-
  * dashboard-upgrade.md). Everything on this page reads real data already
@@ -36,7 +36,7 @@ function renderLiteMarkdown(text) {
 
 export default function HomePage({
   userName, projects, onStartTopic, onStartLiteReview, onOpenLitReview, onOpenHypothesisPicker,
-  onOpenDataAnalysis, onOpenProject,
+  onOpenDataAnalysis, onOpenProject, onManageFollowing,
 }) {
   const [q, setQ] = useState("");
   const [scope, setScope] = useState("projects"); // "projects" | "review"
@@ -57,6 +57,11 @@ export default function HomePage({
   // "From the frontier": new papers in the user's own areas (backend core/frontier.py).
   const [frontier, setFrontier] = useState(null);
   const [frontierBusy, setFrontierBusy] = useState(false);
+  // Scholars / laboratories the user follows, and their new papers.
+  const [watch, setWatch] = useState(null);
+  const watchRef = useRef(null);
+  const loadWatch = (refresh) => api.getWatchlist(refresh).then(setWatch)
+    .catch(() => setWatch((w) => w || { follows: [], new_total: 0 }));
   const loadFrontier = (refresh) => {
     setFrontierBusy(true);
     return api.getFrontier(refresh).then(setFrontier).catch(() => setFrontier((f) => f || { areas: [] }))
@@ -75,7 +80,10 @@ export default function HomePage({
     api.getUsageTrend(30).then((d) => { if (!cancelled) setUsage(d); }).catch(() => {});
     api.quickAskHistory().then((d) => { if (!cancelled) setHistory(d.items || []); }).catch(() => {});
     loadFrontier(false);
-    return () => { cancelled = true; };
+    loadWatch(false);
+    const reloadWatch = () => loadWatch(false);
+    window.addEventListener(WATCH_CHANGED, reloadWatch);
+    return () => { cancelled = true; window.removeEventListener(WATCH_CHANGED, reloadWatch); };
   }, []);
 
   useEffect(() => {
@@ -178,6 +186,21 @@ export default function HomePage({
   return (
     <div className="hp">
       <style>{HP_CSS}</style>
+
+      {watch?.new_total > 0 && (
+        <button type="button" className="wl-banner"
+          onClick={() => watchRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+          <i aria-hidden="true" />
+          <span>
+            <b>{watch.new_total} new paper{watch.new_total === 1 ? "" : "s"}</b> from{" "}
+            {(() => {
+              const who = watch.follows.filter((f) => f.new_count > 0).map((f) => f.name);
+              return who.length <= 2 ? who.join(" and ") : `${who.slice(0, 2).join(", ")} and ${who.length - 2} more`;
+            })()}
+          </span>
+          <span>See them ↓</span>
+        </button>
+      )}
 
       <header className="hp-head">
         <div className="hp-eyebrow">{today}</div>
@@ -351,6 +374,8 @@ export default function HomePage({
           </div>
         </aside>
       </div>
+
+      <WatchList watch={watch} onChanged={() => loadWatch(false)} sectionRef={watchRef} onManage={onManageFollowing} />
 
       {(frontier?.areas?.length > 0 || (frontier === null && (projects || []).length > 0)) && (
         <section className="hp-frontier" aria-label="New papers in your research areas">

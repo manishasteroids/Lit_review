@@ -14,6 +14,7 @@ import KnowledgeGraphView from "./components/KnowledgeGraphView.jsx";
 import DataAnalysisView from "./components/DataAnalysisView.jsx";
 import EvaluationView from "./components/EvaluationView.jsx";
 import UsageView from "./components/UsageView.jsx";
+import PlanPanel from "./components/PlanPanel.jsx";
 import LandingPage from "./components/LandingPage.jsx";
 import HistoryView from "./components/HistoryView.jsx";
 import ProfileModal from "./components/ProfileModal.jsx";
@@ -53,7 +54,6 @@ const SOURCE_ICON = {
 const TOOLS = [
   ["review", BookOpen, "Review"],
   ["sources", Layers, "Sources"],
-  ["studio", MessageSquare, "Studio"],
   ["critique", Brain, "Critique"],
   ["graph", Network, "Knowledge graph"],
   ["data", BarChart3, "Data analysis"],
@@ -221,6 +221,8 @@ export default function App() {
   const [done, setDone] = useState({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  // Set when the user's plan downgraded the requested search mode (trial over)
+  const [planNotice, setPlanNotice] = useState(null);
 
   const [notes, setNotes] = useState({}); // paper idx -> note text
   const [accountTab, setAccountTab] = useState(null);  // "profile" | "settings" | null
@@ -912,7 +914,7 @@ export default function App() {
     // Gated action: anyone can browse, but running the pipeline needs an account.
     if (!(await ensureAuth())) return;
 
-    setBusy(true); setError(null); setStage("reformulate"); setProgressMsgs([]);
+    setBusy(true); setError(null); setPlanNotice(null); setStage("reformulate"); setProgressMsgs([]);
     try {
       const res = await api.createRunStream(
         topic.trim(),
@@ -937,6 +939,7 @@ export default function App() {
       );
       setRunId(res.run_id);
       setReform(res.reform);
+      if (res.plan_notice) setPlanNotice(res.plan_notice);
       const p = res.papers || [];
       setPapers(p);
       const ap = {}; p.forEach((x) => (ap[x.idx] = true));
@@ -1285,43 +1288,38 @@ export default function App() {
     <div className="sm-root">
       {confirmModal}
 
-      {/* Studio opens as a near-full-screen overlay instead of a cramped
-          embedded panel — it's a whole workspace (chat + report/deck/brief
-          generation), not a small side tool. Back returns to whatever tab
-          was showing before Studio was opened. */}
-      {tab === "studio" && isDone && (
+      {/* Studio takes the full window (no dialog chrome, no backdrop) —
+          it's a whole workspace, not a small side tool. Back returns to
+          whatever tab was showing before Studio was opened. The panel stays
+          mounted once a run is loaded and is only hidden (not unmounted)
+          while another tab is active, so in-progress work here — which
+          sources are selected, an unsaved chat draft, a generated-but-not-
+          downloaded artifact — survives leaving and coming back, instead of
+          resetting every time Studio reopens. */}
+      {isDone && (
         <div
           style={{
-            position: "fixed", inset: 0, background: "rgba(20,20,30,.55)",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            zIndex: 800, padding: "3vh 3vw",
+            position: "fixed", inset: 0, zIndex: 800,
+            display: tab === "studio" ? "flex" : "none",
+            flexDirection: "column",
+            background: "var(--bg, #f4f5f9)",
           }}
-          onMouseDown={(e) => { if (e.target === e.currentTarget) setTab(prevTab); }}
         >
           <div
             style={{
-              width: "100%", height: "100%", maxWidth: "100%",
-              background: "var(--bg, #f4f5f9)", borderRadius: 14,
-              boxShadow: "0 30px 90px rgba(0,0,0,.35)",
-              display: "flex", flexDirection: "column", overflow: "hidden",
+              display: "flex", alignItems: "center", gap: 10,
+              padding: "12px 18px", borderBottom: "1px solid var(--line)",
+              background: "var(--card, #fff)", flex: "0 0 auto",
             }}
           >
-            <div
-              style={{
-                display: "flex", alignItems: "center", gap: 10,
-                padding: "12px 18px", borderBottom: "1px solid var(--line)",
-                background: "var(--card, #fff)", flex: "0 0 auto",
-              }}
-            >
-              <button className="btn ghost sm" onClick={() => setTab(prevTab)}>
-                <ArrowLeft size={14} /> Back
-              </button>
-              <span style={{ fontWeight: 700, fontSize: 14.5 }}>Studio</span>
-              <span className="muted tiny">Chat, report, deck & briefing across your sources</span>
-            </div>
-            <div style={{ flex: "1 1 auto", overflow: "auto", padding: 18 }}>
-              <StudioView runId={runId} papers={citeOrder} extractions={extractions} apiKey={apiKey} />
-            </div>
+            <button className="btn ghost sm" onClick={() => setTab(prevTab)}>
+              <ArrowLeft size={14} /> Back
+            </button>
+            <span style={{ fontWeight: 700, fontSize: 14.5 }}>Studio</span>
+            <span className="muted tiny">Chat, report, deck & briefing across your sources</span>
+          </div>
+          <div style={{ flex: "1 1 auto", overflow: "auto", padding: 18 }}>
+            <StudioView runId={runId} papers={citeOrder} extractions={extractions} apiKey={apiKey} />
           </div>
         </div>
       )}
@@ -1367,6 +1365,7 @@ export default function App() {
             onOpenDataAnalysis={(which) => { setDataAnalysisWhich(which); setView("data-analysis"); }}
             onOpenProject={async (proj) => { await openProject(proj); setView("workspace"); }}
             onStartLiteReview={(t) => { startNewChat(); setMode("lite"); setTopic(t); setAutoStartTopic(true); setView("workspace"); }}
+            onManageFollowing={() => setAccountTab("following")}
           />
         )}
         {view === "physical-ai" && <PhysicalAIView onBack={() => setView("home")} />}
@@ -1694,9 +1693,10 @@ export default function App() {
               <Coins size={19} /> Account and Billing
             </div>
             <div className="muted tiny" style={{ marginBottom: 20 }}>
-              Sift doesn't run a subscription/credits plan, so there's no "remaining balance" to
-              show — this is your actual usage and cost so far, across every project.
+              Your plan and free-trial credits are below, followed by your actual usage and
+              cost so far across every project.
             </div>
+            <PlanPanel />
             <div className="card">
               <UsageView runId={null} />
             </div>
@@ -1967,6 +1967,28 @@ export default function App() {
               })}
             </div>
 
+            {/* Studio is a workspace of its own (chat, report, deck, briefing
+                across the sources), so it sits beside Infinity as its own
+                card rather than as a row in Tools. */}
+            <div className={"panel hyp-cta" + (tab === "studio" ? " on" : "")}>
+              <div className="hyp-cta-head">
+                <span className="hyp-cta-ic"><MessageSquare size={15} /></span>
+                <span className="hyp-cta-kicker">Studio</span>
+              </div>
+              <div className="hyp-cta-title">Want to understand these papers better?</div>
+              <div className="hyp-cta-body">
+                {isDone
+                  ? "Ask questions across your sources, or turn them into a report, slide deck or briefing."
+                  : "Studio opens once your sources have been read. Run a review, or add your own papers first."}
+              </div>
+              <button
+                className="btn sm" style={{ width: "100%" }} disabled={!isDone}
+                onClick={() => { if (tab !== "studio") setPrevTab(tab); setTab("studio"); }}
+              >
+                Open Studio →
+              </button>
+            </div>
+
             {/* Infinity (hypothesis generation) is a separate agent, so it is a
                 call-out of its own rather than one more row in Tools. With a
                 finished review it opens on that review; without one it opens
@@ -2037,6 +2059,20 @@ export default function App() {
             }}>
               <ModeBar modes={modes} mode={mode} setMode={setMode} apiKey={apiKey} setApiKey={setApiKey} />
             </div>
+
+            {planNotice && (
+              <div style={{
+                marginBottom: 16, padding: "10px 14px", borderRadius: 10, fontSize: 13,
+                background: "rgba(224,163,62,.12)", border: "1px solid rgba(224,163,62,.45)",
+                display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap",
+              }}>
+                <span>{planNotice}</span>
+                <span style={{ display: "flex", gap: 8 }}>
+                  <button className="btn sm" onClick={() => setView("billing")}>See plans</button>
+                  <button className="btn ghost sm" onClick={() => setPlanNotice(null)}>Dismiss</button>
+                </span>
+              </div>
+            )}
 
             {error && (
               <div className="err" style={{ marginBottom: 16 }}>

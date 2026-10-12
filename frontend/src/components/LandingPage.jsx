@@ -1222,7 +1222,7 @@ const PLANS = [
     blurb: "Explore the full pipeline on small reviews.",
     features: ["Up to 20 papers per review", "Lite search mode", "Abstract-level extraction",
                "Paper chat (Quick mode)", "Export Markdown & BibTeX"],
-    cta: "Start free", highlight: false,
+    cta: "Start 7-day free trial", highlight: false,
   },
   {
     name: "Pro", price: "$10", per: "per month",
@@ -1265,7 +1265,7 @@ function Pricing({ login }) {
         ))}
       </div>
 
-      <p className="lp-p-foot">All plans include unlimited searches. Cancel anytime.</p>
+      <p className="lp-p-foot">Every new account gets a 7-day Pro trial with $3 in credits — no card required. When it ends you stay on Free and keep your saved work. Cancel paid plans anytime.</p>
     </section>
   );
 }
