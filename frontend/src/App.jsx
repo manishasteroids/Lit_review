@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { api } from "./api/client.js";
-import { ensureAuth, useSession } from "./Auth.jsx";
+import { ensureAuth, useSession, useAuthReady } from "./Auth.jsx";
 import { authEnabled } from "./supabase.js";
 
 import PipelineRail from "./components/PipelineRail.jsx";
@@ -15,6 +15,7 @@ import DataAnalysisView from "./components/DataAnalysisView.jsx";
 import EvaluationView from "./components/EvaluationView.jsx";
 import UsageView from "./components/UsageView.jsx";
 import LandingPage from "./components/LandingPage.jsx";
+import HistoryView from "./components/HistoryView.jsx";
 import ProfileModal from "./components/ProfileModal.jsx";
 import ProjectsModal from "./components/ProjectsModal.jsx";
 import ExportBar from "./components/ExportBar.jsx";
@@ -28,13 +29,14 @@ import { useConfirm } from "./components/ConfirmModal.jsx";
 import {
   RotateCw, AlertTriangle, Sparkles, PenTool,
   BookOpen, Layers, Brain, Network, BarChart3, FlaskConical,
-  Plus, Trash2, Coins, MessageSquare, ArrowLeft, Folder, ChevronDown,
+  Plus, Trash2, Coins, Clock, MessageSquare, ArrowLeft, Folder, ChevronDown,
   Lightbulb,
 } from "./components/icons.jsx";
 
 import MethodsPanel from "./components/MethodsPanel.jsx";
 import HypothesisAgentPanel from "./components/HypothesisAgentPanel.jsx";
 import HypothesisPipelineRail from "./components/HypothesisPipelineRail.jsx";
+import PublishPanel from "./components/PublishPanel.jsx";
 
 // Source icons shown in the progress feed
 const SOURCE_ICON = {
@@ -56,10 +58,15 @@ const TOOLS = [
   ["graph", Network, "Knowledge graph"],
   ["data", BarChart3, "Data analysis"],
   ["eval", FlaskConical, "Evaluation"],
-  ["methods", FlaskConical, "Methods"],
-  ["hypothesis", Lightbulb, "Hypothesis"],
-  ["usage", Coins, "Token usage"],
 ];
+// Not in this list on purpose:
+//  - Methods (the first, two-hypothesis version of hypothesis generation) is
+//    retired: Infinity does the same job with its refine loop and export
+//    carried over. MethodsPanel.jsx stays because Infinity's panel reuses
+//    its citation/score components.
+//  - Hypothesis generation is its own agent (Infinity), so it gets the
+//    "Want to generate hypotheses?" card under Tools instead of a row here.
+//  - Token usage lives on the Account and Billing page.
 
 // The standalone Hypothesis workspace (Flow B, sidebar's "Hypothesis
 // Generation" entry) gets its own small Tools list rather than Sift's full
@@ -68,8 +75,8 @@ const TOOLS = [
 // components as Sift's own tabs (same session data), just a narrower menu.
 const HYP_TOOLS = [
   ["hypothesis", Lightbulb, "Hypothesis"],
-  ["review", BookOpen, "Review"],
   ["sources", Layers, "Sources"],
+  ["review", BookOpen, "Review"],   // after Sources: analysing the sources is what produces the review
   ["graph", Network, "Knowledge graph"],
 ];
 
@@ -97,6 +104,18 @@ function formatTimestamp(iso, tz) {
   }
 }
 
+// Short date for the narrow History rail: the time for today's runs, the day
+// otherwise ("Sep 14"), with the year only when it isn't this year. The full
+// timestamp stays available as the row's tooltip.
+function formatShortDate(iso, tz) {
+  if (!iso) return "";
+  const d = new Date(iso), now = new Date();
+  const zone = tz ? { timeZone: tz } : {};
+  const fmt = (o) => { try { return d.toLocaleString(undefined, { ...o, ...zone }); } catch { return d.toLocaleString(undefined, o); } };
+  if (now - d < 86400000 && d.getDate() === now.getDate()) return fmt({ hour: "numeric", minute: "2-digit" });
+  return fmt(d.getFullYear() === now.getFullYear() ? { month: "short", day: "numeric" } : { month: "short", day: "numeric", year: "numeric" });
+}
+
 function groupSessions(sessions) {
   const now = Date.now();
   const buckets = { Today: [], Yesterday: [], "This week": [], Older: [] };
@@ -115,7 +134,11 @@ const H = {
   head: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
   newBtn: { background: "none", border: "1px solid var(--line)", borderRadius: 7, color: "var(--muted)", cursor: "pointer", padding: "3px 5px", display: "flex", alignItems: "center" },
   empty: { fontFamily: "'JetBrains Mono',monospace", fontSize: 11, color: "var(--muted2)", lineHeight: 1.6, padding: "8px 2px" },
-  scroll: { maxHeight: "calc(100vh - 340px)", overflowY: "auto", margin: "0 -4px", padding: "0 4px" },
+  scroll: { maxHeight: "max(260px, calc(100vh - 380px))", overflowY: "auto", margin: "0 -4px", padding: "0 4px" },
+  search: { width: "100%", boxSizing: "border-box", padding: "6px 9px", marginBottom: 6, borderRadius: 7, border: "1px solid var(--line)", background: "var(--card,#fff)", color: "var(--txt)", fontFamily: "inherit", fontSize: 12, outline: "none" },
+  count: { fontFamily: "'JetBrains Mono',monospace", fontSize: 10, color: "var(--muted2)" },
+  proj: { display: "flex", alignItems: "center", gap: 5, marginTop: 4, fontSize: 11, color: "var(--muted)", minWidth: 0 },
+  projName: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 },
   bucket: { fontFamily: "'JetBrains Mono',monospace", fontSize: 9.5, fontWeight: 500, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted2)", padding: "10px 4px 4px" },
   item: { padding: "8px 9px", borderRadius: 8, cursor: "pointer", marginBottom: 2 },
   itemActive: { background: "var(--indigo-soft)" },
@@ -123,7 +146,7 @@ const H = {
   itemTopic: { fontSize: 12.5, color: "var(--txt)", lineHeight: 1.35, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", flex: 1, minWidth: 0 },
   del: { background: "none", border: "none", cursor: "pointer", color: "var(--muted2)", padding: "2px 3px", borderRadius: 4, display: "flex", alignItems: "center", flexShrink: 0 },
   delConfirm: { color: "#f08a8a" },
-  meta: { display: "flex", alignItems: "center", gap: 4, marginTop: 5, fontFamily: "'JetBrains Mono',monospace", fontSize: 10, color: "var(--muted)" },
+  meta: { display: "flex", alignItems: "center", gap: 5, marginTop: 5, fontFamily: "'JetBrains Mono',monospace", fontSize: 10, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden" },
   dot: { color: "var(--muted2)" },
   badge: { fontFamily: "'JetBrains Mono',monospace", fontSize: 9.5, fontWeight: 500, borderRadius: 4, padding: "1px 5px" },
   badgeDone: { background: "var(--green-soft)", color: "var(--green)" },
@@ -185,6 +208,7 @@ const PICK = {
 
 export default function App() {
   const session = useSession();
+  const authReady = useAuthReady();
   const signedOut = authEnabled && !session;
 
   const [apiKey, setApiKey] = useState("");
@@ -407,6 +431,8 @@ export default function App() {
   const [sessions, setSessions] = useState([]);
   const [confirmId, setConfirmId] = useState(null);
   const [fileMenuId, setFileMenuId] = useState(null); // which History row's "add to project" popover is open
+  const [historyOpen, setHistoryOpen] = useState(false); // full-size History overlay (HistoryView)
+  const [projectTabOpen, setProjectTabOpen] = useState(false); // Project drop-down under the top tab
   const [fileMenuNewOpen, setFileMenuNewOpen] = useState(false);
   const [fileMenuNewName, setFileMenuNewName] = useState("");
   const [fileMenuBusy, setFileMenuBusy] = useState(false);
@@ -465,7 +491,7 @@ export default function App() {
         // ran if the Designer produced hypotheses to check (see pipeline.py).
         const d = full?.data || {};
         setHypothesisStageDone({
-          fetch: true, designer: true, critic: true,
+          fetch: true, designer: true, critic: true, refine: !!d.refinement,
           novelty: !!(d.novelty_checks && Object.keys(d.novelty_checks).length > 0),
           ranking: !!d.bracket, meta_review: !!d.meta_review,
           plausibility: !!d.plausibility_check,
@@ -533,7 +559,7 @@ export default function App() {
       // any individual progress event was raced or dropped in transit.
       const d = final.run?.data || {};
       setHypothesisStageDone({
-        fetch: true, designer: true, critic: true,
+        fetch: true, designer: true, critic: true, refine: !!d.refinement,
         novelty: !!(d.novelty_checks && Object.keys(d.novelty_checks).length > 0),
         ranking: !!d.bracket, meta_review: !!d.meta_review,
         plausibility: !!d.plausibility_check,
@@ -652,6 +678,15 @@ export default function App() {
     setSelectedProject("");
     reset();
     setTopic("");
+  }
+
+  // A fresh question that STAYS in the open project: clears the run on
+  // screen but keeps currentProject/selectedProject, so the next search is
+  // filed under the same project (the "+ New" menu inside a project).
+  function startNewSearchInProject() {
+    reset();
+    setTopic("");
+    setTab("review");
   }
 
   // Enter a project's workspace: every new search now files under it
@@ -1236,11 +1271,14 @@ export default function App() {
     }
   }
 
-  const grouped = groupSessions(sessions);
+  const projectNameOf = (id) => projects.find((p) => p.id === id)?.name || "";
 
   // Signed-out visitors see the public landing page; the tools app is gated
   // behind login. (All hooks above run unconditionally, so this early return
   // is safe.)
+  // Still checking for a saved sign-in: show a blank page for that instant
+  // rather than the landing page, which would flash before the workspace.
+  if (signedOut && !authReady) return <div style={{ minHeight: "100vh", background: "#fff" }} />;
   if (signedOut) return <LandingPage />;
 
   return (
@@ -1396,23 +1434,14 @@ export default function App() {
                   just to pick a different project. */}
               <div className="lcol">
                 <div className="panel">
-                  <div className="panel-head-label" style={{ marginBottom: 12 }}>Tools</div>
-                  {HYP_TOOLS.map(([k, Ic, lab]) => (
-                    <button
-                      key={k}
-                      className={"tool-item" + (hypTab === k ? " on" : "")}
-                      onClick={() => setHypTab(k)}
-                    >
-                      <Ic size={14} /> {lab}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="panel">
                   <div className="panel-head-label" style={{ marginBottom: 10 }}>Project</div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--txt)", marginBottom: 8 }}>
-                    {currentProject ? currentProject.name : "—"}
-                  </div>
+                  {currentProject ? (
+                    <div style={{ fontSize: 13, fontWeight: 700, color: "var(--txt)", marginBottom: 8 }}>
+                      {currentProject.name}
+                    </div>
+                  ) : (
+                    <div className="muted tiny" style={{ marginBottom: 8 }}>No project open yet. Pick one below.</div>
+                  )}
 
                   {!switchProjectOpen ? (
                     <button
@@ -1472,6 +1501,37 @@ export default function App() {
                       </div>
                     </div>
                   )}
+                </div>
+
+                <div className="panel">
+                  <div className="panel-head-label" style={{ marginBottom: 12 }}>Tools</div>
+                  {HYP_TOOLS.map(([k, Ic, lab]) => (
+                    <button
+                      key={k}
+                      className={"tool-item" + (hypTab === k ? " on" : "")}
+                      onClick={() => setHypTab(k)}
+                    >
+                      <Ic size={14} /> {lab}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Publish: its own card, like Project -- the step after the
+                    hypotheses, not one more view of them. */}
+                <div className="panel">
+                  <div className="panel-head-label" style={{ marginBottom: 10 }}>Publish</div>
+                  <div className="muted tiny" style={{ lineHeight: 1.5, marginBottom: 10 }}>
+                    Write this work up as a paper in a journal's own format.
+                  </div>
+                  <button
+                    className={"tool-item" + (hypTab === "publish" ? " on" : "")}
+                    style={{ marginBottom: 0 }}
+                    disabled={!runId || !isDone}
+                    title={!runId || !isDone ? "Open a project with a completed Literature Review first" : ""}
+                    onClick={() => setHypTab("publish")}
+                  >
+                    <PenTool size={14} /> Write a paper
+                  </button>
                 </div>
 
                 {/* Which completed review, of possibly several in this
@@ -1569,6 +1629,9 @@ export default function App() {
                       disputeBusy={disputeBusy}
                       disputeError={disputeError}
                     />
+                  )}
+                  {hypTab === "publish" && (
+                    <PublishPanel runId={runId} hypRunId={hypothesisRun?.id} apiKey={apiKey} model={model} topic={topic} />
                   )}
                   {hypTab === "review" && (
                     Object.keys(sections || {}).length > 0
@@ -1670,87 +1733,30 @@ export default function App() {
           </div>
         </div>
 
-        <div className="grid3">
-          {/* LEFT: Tools + History */}
-          <div className="lcol">
-            <div style={{ position: "relative" }}>
+        {/* Project sits up here as a tab rather than in the left rail; it
+            opens a drop-down panel. (History is the card under Infinity in
+            the rail, and opens the full-size table, HistoryView.) */}
+        <div className="sift-tabs">
+          {!signedOut && (
+            <div className="sift-tab-wrap">
               <button
-                className="btn"
-                disabled={busy}
-                onClick={() => setNewMenuOpen((o) => !o)}
-                style={{ width: "100%", justifyContent: "center", display: "flex", alignItems: "center", gap: 6 }}
+                className={"sift-tab" + (projectTabOpen ? " on" : "")}
+                aria-expanded={projectTabOpen}
+                onClick={() => setProjectTabOpen((o) => !o)}
               >
-                <Plus size={14} /> New {newMenuOpen ? "▴" : "▾"}
+                <Folder size={14} />
+                <span>Project</span>
+                <b>
+                  {currentProject
+                    ? currentProject.name
+                    : (selectedProject && projects.find((p) => p.id === selectedProject)?.name) || "None"}
+                </b>
+                <ChevronDown size={13} style={{ opacity: .6 }} />
               </button>
-              {newMenuOpen && (
-                <div style={NEWMENU.menu} onMouseLeave={() => setNewMenuOpen(false)}>
-                  <button style={NEWMENU.item2} onClick={() => { setNewMenuOpen(false); if (!busy) startNewChat(); }}>
-                    <span style={NEWMENU.itemIc}><MessageSquare size={15} /></span>
-                    <span>
-                      <span style={NEWMENU.itemTitle}>New chat</span>
-                      <span style={NEWMENU.itemSub}>Start a fresh research question</span>
-                    </span>
-                  </button>
-                  <button style={NEWMENU.item2} onClick={() => { setNewMenuOpen(false); setNewProjectOpen(true); }}>
-                    <span style={NEWMENU.itemIc}><Folder size={15} /></span>
-                    <span>
-                      <span style={NEWMENU.itemTitle}>New project</span>
-                      <span style={NEWMENU.itemSub}>Group searches, papers &amp; notes together</span>
-                    </span>
-                  </button>
-                  <button style={NEWMENU.item2} onClick={() => { setNewMenuOpen(false); setShowProjects(true); }}>
-                    <span style={NEWMENU.itemIc}><Layers size={15} /></span>
-                    <span>
-                      <span style={NEWMENU.itemTitle}>Open existing project</span>
-                      <span style={NEWMENU.itemSub}>Browse, share &amp; manage your projects</span>
-                    </span>
-                  </button>
-                </div>
-              )}
-              {newProjectOpen && (
-                <form onSubmit={createProjectAndOpen} style={NEWMENU.popover}>
-                  <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>New project</div>
-                  <input autoFocus style={NEWMENU.input} placeholder="Project name"
-                    value={newProjectName} onChange={(e) => setNewProjectName(e.target.value)} />
-                  <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-                    <button type="submit" disabled={newProjectBusy} className="btn sm" style={{ flex: 1 }}>
-                      {newProjectBusy ? "Creating…" : "Create & open"}
-                    </button>
-                    <button type="button" className="btn ghost sm" onClick={() => setNewProjectOpen(false)}>Cancel</button>
-                  </div>
-                  {newProjectErr && <div style={{ color: "#f08a8a", fontSize: 11.5, marginTop: 6 }}>{newProjectErr}</div>}
-                </form>
-              )}
-            </div>
-
-            <div className="panel">
-              <div className="panel-head-label" style={{ marginBottom: 12 }}>Tools</div>
-              {TOOLS.map(([k, Ic, lab]) => {
-                // Token usage isn't tied to any one run — it's useful with no
-                // active session too (spend trend, all-time totals) — so it
-                // stays enabled regardless of where the current run is.
-                const enabled = isDone || k === "usage";
-                return (
-                  <button
-                    key={k}
-                    className={"tool-item" + (enabled && tab === k ? " on" : "") + (enabled ? "" : " disabled")}
-                    disabled={!enabled}
-                    onClick={() => {
-                      if (!enabled) return;
-                      // Studio opens as a full-screen overlay (see below) —
-                      // remember what was showing underneath so Back returns
-                      // to it instead of an arbitrary tab.
-                      if (k === "studio" && tab !== "studio") setPrevTab(tab);
-                      setTab(k);
-                    }}
-                  >
-                    <Ic size={14} /> {lab}
-                  </button>
-                );
-              })}
-            </div>
-
-            {!signedOut && (
+              {projectTabOpen && (
+                <>
+                  <div className="sift-pop-veil" onClick={() => setProjectTabOpen(false)} />
+                  <div className="sift-pop">
               <div className="panel">
                 <div style={H.head}>
                   <span className="panel-head-label">Project</span>
@@ -1859,132 +1865,164 @@ export default function App() {
                   </div>
                 ) : null}
               </div>
-            )}
-
-            <div className="panel">
-              <div style={H.head}>
-                <span className="panel-head-label">History</span>
-              </div>
-
-              {signedOut ? (
-                <div style={H.loginCard}>
-                  <div style={H.loginText}>
-                    Log in to save your runs and access your history and library.
                   </div>
-                  <button className="btn sm" style={{ width: "100%" }} onClick={() => ensureAuth()}>
-                    Log in
+                </>
+              )}
+            </div>
+          )}
+        </div>
+        {historyOpen && !signedOut && (
+          <HistoryView
+            sessions={sessions} projects={projects} tz={profileTz} activeId={runId} busy={busy}
+            onOpen={restoreSession} onDelete={deleteSession} onFile={fileSessionUnderProject}
+            onClose={() => setHistoryOpen(false)}
+          />
+        )}
+
+        <div className="grid3">
+          {/* LEFT: Tools + Infinity */}
+          <div className="lcol">
+            <div style={{ position: "relative" }}>
+              <button
+                className="btn"
+                disabled={busy}
+                onClick={() => setNewMenuOpen((o) => !o)}
+                style={{ width: "100%", justifyContent: "center", display: "flex", alignItems: "center", gap: 6 }}
+              >
+                <Plus size={14} /> New {newMenuOpen ? "▴" : "▾"}
+              </button>
+              {newMenuOpen && (
+                <div style={NEWMENU.menu} onMouseLeave={() => setNewMenuOpen(false)}>
+                  {currentProject && (
+                    <button style={NEWMENU.item2} onClick={() => { setNewMenuOpen(false); if (!busy) startNewSearchInProject(); }}>
+                      <span style={NEWMENU.itemIc}><Plus size={15} /></span>
+                      <span>
+                        <span style={NEWMENU.itemTitle}>New search in this project</span>
+                        <span style={NEWMENU.itemSub}>A fresh question, filed under {currentProject.name}</span>
+                      </span>
+                    </button>
+                  )}
+                  <button style={NEWMENU.item2} onClick={() => { setNewMenuOpen(false); if (!busy) startNewChat(); }}>
+                    <span style={NEWMENU.itemIc}><MessageSquare size={15} /></span>
+                    <span>
+                      <span style={NEWMENU.itemTitle}>{currentProject ? "New chat outside the project" : "New chat"}</span>
+                      <span style={NEWMENU.itemSub}>
+                        {currentProject ? "Leaves this project and starts a stand-alone question" : "Start a fresh research question"}
+                      </span>
+                    </span>
+                  </button>
+                  <button style={NEWMENU.item2} onClick={() => { setNewMenuOpen(false); setNewProjectOpen(true); }}>
+                    <span style={NEWMENU.itemIc}><Folder size={15} /></span>
+                    <span>
+                      <span style={NEWMENU.itemTitle}>New project</span>
+                      <span style={NEWMENU.itemSub}>Group searches, papers &amp; notes together</span>
+                    </span>
+                  </button>
+                  <button style={NEWMENU.item2} onClick={() => { setNewMenuOpen(false); setShowProjects(true); }}>
+                    <span style={NEWMENU.itemIc}><Layers size={15} /></span>
+                    <span>
+                      <span style={NEWMENU.itemTitle}>Open existing project</span>
+                      <span style={NEWMENU.itemSub}>Browse, share &amp; manage your projects</span>
+                    </span>
                   </button>
                 </div>
-              ) : sessions.length === 0 ? (
-                <div style={H.empty}>No runs yet. Run a search to start.</div>
-              ) : (
-                <div style={H.scroll}>
-                  {Object.entries(grouped).map(([bucket, items]) => (
-                    items.length ? (
-                      <div key={bucket}>
-                        <div style={H.bucket}>{bucket}</div>
-                        {items.map((s) => (
-                          <div
-                            key={s.id}
-                            style={{ ...H.item, position: "relative", ...(s.id === runId ? H.itemActive : {}) }}
-                            onClick={() => !busy && restoreSession(s.id)}
-                            onMouseLeave={() => setConfirmId(null)}
-                            title={s.topic}
-                          >
-                            <div style={H.itemTop}>
-                              <span style={H.itemTopic}>{s.topic}</span>
-                              <span style={{ display: "flex", flexShrink: 0 }}>
-                                <button
-                                  style={{ ...H.del, ...(fileMenuId === s.id ? { color: "var(--indigo)" } : {}) }}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setFileMenuNewOpen(false);
-                                    setFileMenuId((id) => (id === s.id ? null : s.id));
-                                  }}
-                                  title="Add to project"
-                                >
-                                  <Folder size={12} />
-                                </button>
-                                <button
-                                  style={{ ...H.del, ...(confirmId === s.id ? H.delConfirm : {}) }}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    if (confirmId === s.id) { deleteSession(s.id); setConfirmId(null); }
-                                    else setConfirmId(s.id);
-                                  }}
-                                  title={confirmId === s.id ? "Click again to confirm" : "Delete"}
-                                >
-                                  <Trash2 size={12} />
-                                </button>
-                              </span>
-                            </div>
-                            <div style={H.meta}>
-                              <span style={{ ...H.badge, ...(s.stage === "done" ? H.badgeDone : H.badgeFilter) }}>
-                                {s.stage === "done" ? "✓ review" : "◦ filter"}
-                              </span>
-                              <span style={H.dot}>·</span>
-                              <span>{s.paper_count}p</span>
-                              <span style={H.dot}>·</span>
-                              <span title={relativeTime(s.updated_at)}>{formatTimestamp(s.updated_at, profileTz)}</span>
-                              {s.project_id && (
-                                <>
-                                  <span style={H.dot}>·</span>
-                                  <span title="Filed under this project">
-                                    📁 {projects.find((p) => p.id === s.project_id)?.name || "project"}
-                                  </span>
-                                </>
-                              )}
-                            </div>
-
-                            {fileMenuId === s.id && (
-                              <div style={NEWMENU.menu} onClick={(e) => e.stopPropagation()}>
-                                {s.project_id && (
-                                  <button style={NEWMENU.item} disabled={fileMenuBusy}
-                                    onClick={() => fileSessionUnderProject(s.id, null)}>
-                                    Remove from project
-                                  </button>
-                                )}
-                                {projects.filter((p) => p.id !== s.project_id).map((p) => (
-                                  <button key={p.id} style={NEWMENU.item} disabled={fileMenuBusy}
-                                    onClick={() => fileSessionUnderProject(s.id, p.id)}>
-                                    {p.name}
-                                  </button>
-                                ))}
-                                {projects.length === 0 && !fileMenuNewOpen && (
-                                  <div style={{ ...H.empty, padding: "4px 9px" }}>No projects yet.</div>
-                                )}
-                                {fileMenuNewOpen ? (
-                                  <form onSubmit={(e) => createProjectAndFile(s.id, e)} style={{ padding: 6 }}>
-                                    <input autoFocus style={NEWMENU.input} placeholder="Project name"
-                                      value={fileMenuNewName} onChange={(e) => setFileMenuNewName(e.target.value)} />
-                                    <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-                                      <button type="submit" disabled={fileMenuBusy} className="btn sm" style={{ flex: 1 }}>
-                                        {fileMenuBusy ? "Creating…" : "Create & file"}
-                                      </button>
-                                    </div>
-                                  </form>
-                                ) : (
-                                  <button style={{ ...NEWMENU.item, color: "var(--indigo)" }}
-                                    onClick={() => setFileMenuNewOpen(true)}>
-                                    + New project
-                                  </button>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    ) : null
-                  ))}
-                </div>
               )}
-
-              <div style={H.foot}>
-                {signedOut
-                  ? "Your runs are saved to your account · nothing is stored while signed out"
-                  : "Sessions saved to your account · no LLM needed to restore"}
-              </div>
+              {newProjectOpen && (
+                <form onSubmit={createProjectAndOpen} style={NEWMENU.popover}>
+                  <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>New project</div>
+                  <input autoFocus style={NEWMENU.input} placeholder="Project name"
+                    value={newProjectName} onChange={(e) => setNewProjectName(e.target.value)} />
+                  <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                    <button type="submit" disabled={newProjectBusy} className="btn sm" style={{ flex: 1 }}>
+                      {newProjectBusy ? "Creating…" : "Create & open"}
+                    </button>
+                    <button type="button" className="btn ghost sm" onClick={() => setNewProjectOpen(false)}>Cancel</button>
+                  </div>
+                  {newProjectErr && <div style={{ color: "#f08a8a", fontSize: 11.5, marginTop: 6 }}>{newProjectErr}</div>}
+                </form>
+              )}
             </div>
+
+            <div className="panel">
+              <div className="panel-head-label" style={{ marginBottom: 12 }}>Tools</div>
+              {TOOLS.map(([k, Ic, lab]) => {
+                const enabled = isDone;
+                return (
+                  <button
+                    key={k}
+                    className={"tool-item" + (enabled && tab === k ? " on" : "") + (enabled ? "" : " disabled")}
+                    disabled={!enabled}
+                    onClick={() => {
+                      if (!enabled) return;
+                      // Studio opens as a full-screen overlay (see below) —
+                      // remember what was showing underneath so Back returns
+                      // to it instead of an arbitrary tab.
+                      if (k === "studio" && tab !== "studio") setPrevTab(tab);
+                      setTab(k);
+                    }}
+                  >
+                    <Ic size={14} /> {lab}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Infinity (hypothesis generation) is a separate agent, so it is a
+                call-out of its own rather than one more row in Tools. With a
+                finished review it opens on that review; without one it opens
+                the picker for a past review. */}
+            <div className={"panel hyp-cta" + (tab === "hypothesis" ? " on" : "")}>
+              <div className="hyp-cta-head">
+                <span className="hyp-cta-ic"><Lightbulb size={15} /></span>
+                <span className="hyp-cta-kicker">Infinity</span>
+              </div>
+              <div className="hyp-cta-title">Want to generate hypotheses?</div>
+              <div className="hyp-cta-body">
+                {isDone
+                  ? "Turn this review's findings into ranked, testable hypotheses."
+                  : "Infinity builds hypotheses from a finished literature review. Run one here, or start from a past review."}
+              </div>
+              <button
+                className="btn sm" style={{ width: "100%" }}
+                onClick={() => {
+                  // Always the Hypothesis Generation workspace, never an in-page
+                  // tab. With a finished review loaded, it opens on THIS review.
+                  if (!isDone) { openHypothesisWorkspaceBlank(); return; }
+                  setHypTab("hypothesis"); setPinnedHypRunId(null); setSwitchProjectOpen(false);
+                  setView("hypothesis-workspace");
+                }}
+              >
+                {isDone ? "Generate hypotheses →" : "Use a past review →"}
+              </button>
+            </div>
+
+            {/* Publish: the step after the review (and Infinity, if run) --
+                write it up in a journal's own Word or LaTeX template. */}
+            {isDone && (
+              <button className="hist-entry" style={{ marginBottom: 10 }} onClick={() => setTab("publish")}>
+                <span className="hist-entry-ic"><PenTool size={15} /></span>
+                <span className="hist-entry-txt">
+                  <b>Publish</b>
+                  <small>Write it up in a journal's format</small>
+                </span>
+                <span className="hist-entry-go" aria-hidden="true">→</span>
+              </button>
+            )}
+
+            {/* History: one row here, the full table opens on click. */}
+            <button className="hist-entry" onClick={() => (signedOut ? ensureAuth() : setHistoryOpen(true))}>
+              <span className="hist-entry-ic"><Clock size={15} /></span>
+              <span className="hist-entry-txt">
+                <b>History</b>
+                <small>
+                  {signedOut ? "Log in to see your saved runs"
+                    : sessions.length === 0 ? "No runs yet"
+                    : `${sessions.length} saved ${sessions.length === 1 ? "run" : "runs"}`}
+                </small>
+              </span>
+              <span className="hist-entry-go" aria-hidden="true">→</span>
+            </button>
+
           </div>
 
           {/* CENTER: Model selection + prompt / stage content */}
@@ -2200,6 +2238,9 @@ export default function App() {
                       papers={papers}
                       extractions={extractions}
                     />
+                  )}
+                  {tab === "publish" && (
+                    <PublishPanel runId={runId} hypRunId={hypothesisRun?.id} apiKey={apiKey} model={model} topic={topic} />
                   )}
                   {tab === "hypothesis" && (
                     <HypothesisAgentPanel

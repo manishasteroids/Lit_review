@@ -27,6 +27,7 @@ from slowapi.util import get_remote_address
 from api.routes import router
 from api.hypothesis_routes import router as hypothesis_router
 from api.data_analysis_routes import router as data_analysis_router
+from api.manuscript_routes import router as manuscript_router
 from core.config import settings
 from core.db import init_db
 
@@ -66,11 +67,13 @@ app.add_middleware(
     allow_origins=[settings.cors_origin, "http://localhost:5173", "http://127.0.0.1:5173"],
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],  # lets the browser read download filenames
 )
 
 app.include_router(router)
 app.include_router(hypothesis_router)
 app.include_router(data_analysis_router)
+app.include_router(manuscript_router)
 
 
 @app.get("/api/health")

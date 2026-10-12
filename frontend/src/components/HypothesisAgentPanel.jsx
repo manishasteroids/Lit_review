@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { CiteLink, CitedText, KgBridgePanel, ScoreLegend, ScoreBars } from "./MethodsPanel.jsx";
+import { api } from "../api/client.js";
 
 // One accent color per hypothesis slot (by index, wraps past 6) — a plain
 // left-edge stripe so a wide grid of cards reads as distinct entrants at a
@@ -63,6 +64,20 @@ export default function HypothesisAgentPanel({
   // Grid stays the default; this is a display-only toggle, no data changes.
   const [hypLayout, setHypLayout] = useState("grid");
   const [hypCursor, setHypCursor] = useState(0);
+  // Export this run as .docx / .pdf (carried over from the retired Methods tab).
+  const [exporting, setExporting] = useState(null);
+  const [exportErr, setExportErr] = useState("");
+  async function exportRun(fmt) {
+    if (!result?.id) return;
+    setExporting(fmt); setExportErr("");
+    try { await api.downloadHypothesisExport(result.id, fmt); }
+    catch (e) { setExportErr(e.message || "Export failed."); }
+    finally { setExporting(null); }
+  }
+  // What the Refine stage did: which hypotheses were rewritten, and their
+  // score before and after. Absent on runs saved before that stage existed.
+  const refined = data?.refinement?.revised || [];
+
   const critiqueByIndex = Object.fromEntries(
     (critique?.critiques || []).map((c) => [c.index, c])
   );
@@ -92,6 +107,16 @@ export default function HypothesisAgentPanel({
         >
           <span aria-hidden="true">ⓘ</span> {showAbout ? "Hide" : "About"} this tool
         </button>
+        {plan?.hypotheses?.length > 0 && result?.id && (
+          <span style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
+            <button type="button" onClick={() => exportRun("docx")} disabled={!!exporting}>
+              {exporting === "docx" ? "Exporting…" : "Export .docx"}
+            </button>
+            <button type="button" onClick={() => exportRun("pdf")} disabled={!!exporting}>
+              {exporting === "pdf" ? "Exporting…" : "Export .pdf"}
+            </button>
+          </span>
+        )}
         {plan?.domain && (
           <span style={{
             fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 999,
@@ -102,12 +127,35 @@ export default function HypothesisAgentPanel({
         )}
       </div>
 
+      {exportErr && <div style={{ color: "#c0392b", fontSize: 13, margin: "0 0 12px" }}>{exportErr}</div>}
+      {data?.refinement && (
+        <div style={{
+          fontSize: 13, lineHeight: 1.55, margin: "0 0 14px", padding: "10px 14px", borderRadius: 10,
+          background: "var(--indigo-soft,#eeecfd)", color: "var(--txt)",
+        }}>
+          <b>Refine:</b>{" "}
+          {refined.length === 0
+            ? `every hypothesis scored ${data.refinement.threshold} or above, so none needed rewriting.`
+            : <>
+                {refined.length} {refined.length === 1 ? "hypothesis" : "hypotheses"} scored below{" "}
+                {data.refinement.threshold} and {refined.length === 1 ? "was" : "were"} rewritten before ranking:{" "}
+                {refined.map((r, n) => (
+                  <span key={r.index}>
+                    {n > 0 && "; "}
+                    H{r.index + 1} {r.before_overall ?? "?"} → {r.after_overall ?? "?"}
+                    {r.kept ? "" : " (rewrite scored lower, original kept)"}
+                  </span>
+                ))}.
+              </>}
+        </div>
+      )}
+
       {showAbout && (
         <div style={{ ...muted, fontSize: 13, margin: "0 0 16px", lineHeight: 1.5, maxWidth: READING_WIDTH }}>
           Reads this literature review's extractions and synthesis, generates up to 6
           genuinely distinct hypotheses, critiques each one, then runs them through a
-          head-to-head ranking bracket and writes a final recommendation. Its own
-          separate pipeline and saved run, so you can compare against Methods.
+          head-to-head ranking bracket and writes a final recommendation. Hypotheses
+          the critic scores low are rewritten and re-scored once before ranking.
           Read-only for now: no editing or challenging a hypothesis here yet.
         </div>
       )}

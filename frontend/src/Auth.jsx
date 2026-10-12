@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from "react";
-import { authEnabled, supabase } from "./supabase.js";
+import { authEnabled, supabase, authRedirectError } from "./supabase.js";
 
 // True when frontend/.env still has the template value from .env.example, in
 // which case every sign-in request goes to a host that doesn't exist.
-const SUPABASE_PLACEHOLDER = /your-project\.supabase\.co/.test(import.meta.env.VITE_SUPABASE_URL || "");
+// const SUPABASE_PLACEHOLDER = /your-project\.supabase\.co/.test(import.meta.env.VITE_SUPABASE_URL || "");
+const url = import.meta.env.VITE_SUPABASE_URL || "";
+const SUPABASE_PLACEHOLDER = !url || /your-project\.supabase\.co/.test(url);
 const NOT_CONFIGURED_MSG = "Sign-in isn't set up on this build: VITE_SUPABASE_URL in frontend/.env is still the placeholder. Put your real Supabase URL and anon key there, then restart the dev server.";
 // A browser reports any unreachable server as "Failed to fetch" — say what that means instead.
 function friendlyAuthError(err) {
@@ -42,6 +44,21 @@ export async function signOut() {
 }
  
 /** Current session (null when signed out or auth disabled). */
+// False until Supabase has finished working out whether someone is signed in
+// (reading the saved session, or the tokens in the address after a Google /
+// GitHub return). App waits for this before choosing between the landing page
+// and the workspace, so a signed-in visitor never sees the landing page flash.
+export function useAuthReady() {
+  const [ready, setReady] = useState(!authEnabled);
+  useEffect(() => {
+    if (!authEnabled) return;
+    let live = true;
+    supabase.auth.getSession().finally(() => { if (live) setReady(true); });
+    return () => { live = false; };
+  }, []);
+  return ready;
+}
+
 export function useSession() {
   const [session, setSession] = useState(null);
   useEffect(() => {
@@ -204,6 +221,17 @@ export function AuthModalHost() {
   const [open, setOpen] = useState(false);
   const [initialMode, setInitialMode] = useState("signin");
   const resolver = useRef(null);
+  const [redirectError, setRedirectError] = useState(null);
+
+  // Came back from Google/GitHub with a failure: open the dialog and say why,
+  // then drop the error from the address so a refresh doesn't show it again.
+  useEffect(() => {
+    if (!authEnabled || !authRedirectError) return;
+    setRedirectError(`Sign-in didn't complete: ${authRedirectError.description}`);
+    setInitialMode("signin");
+    setOpen(true);
+    window.history.replaceState(null, "", window.location.pathname);
+  }, []);
 
   useEffect(() => {
     if (!authEnabled) return;
@@ -233,7 +261,7 @@ export function AuthModalHost() {
   }
  
   if (!open) return null;
-  return <LoginModal onDismiss={dismiss} initialMode={initialMode} />;
+  return <LoginModal onDismiss={dismiss} initialMode={initialMode} initialMsg={redirectError} />;
 }
  
 /* ------------------------------------------------------------------ */
@@ -264,7 +292,7 @@ function Field({ label, ...props }) {
   );
 }
 
-function LoginModal({ onDismiss, initialMode }) {
+function LoginModal({ onDismiss, initialMode, initialMsg = null }) {
   const [mode, setMode] = useState(initialMode || "signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -275,7 +303,7 @@ function LoginModal({ onDismiss, initialMode }) {
   const [affiliation, setAffiliation] = useState("");
   const [phone, setPhone] = useState("");
   const [address, setAddress] = useState("");
-  const [msg, setMsg] = useState(null);
+  const [msg, setMsg] = useState(initialMsg);
   // "success" renders green, "error" red — the signup confirmation notice
   // used to share the error colour and read like a failure.
   const [msgKind, setMsgKind] = useState("error");

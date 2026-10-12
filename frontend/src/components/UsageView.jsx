@@ -101,6 +101,215 @@ const S = {
   badge: (t) => ({ fontFamily: "'JetBrains Mono',monospace", fontSize: 9.5, fontWeight: 600, borderRadius: 4, padding: "1px 6px", color: TIER_META[t]?.color, background: TIER_META[t]?.bg }),
 };
 
+/* Usage grouped by Time / Project / Search, with a time-range filter.
+   Project and Search come from /api/usage/breakdown (re-fetched when the range
+   changes); Time reuses the per-day rows already loaded in `trend`. */
+const RANGES = [[7, "7 days"], [30, "30 days"], [90, "90 days"], [0, "All time"]];
+
+function UsageGroups({ trend }) {
+  const [group, setGroup] = useState("project"); // time | project | run
+  const [days, setDays] = useState(30);
+  const [projectId, setProjectId] = useState("");   // "" = all, "none" = Unassigned
+  const [model, setModel] = useState("");           // "" = all models
+  const [data, setData] = useState(null);
+  const [options, setOptions] = useState({ projects: [], models: [] });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [openRun, setOpenRun] = useState(null);       // session_id being expanded
+  const [runDetail, setRunDetail] = useState({});      // session_id -> usage
+
+  // One fetch serves all three views, so switching Group by is instant and
+  // filters apply consistently to Time, Project and Search.
+  useEffect(() => {
+    let cancelled = false;
+    setBusy(true); setErr(null);
+    api.getUsageBreakdown(days, projectId, model)
+      .then((d) => {
+        if (cancelled) return;
+        setData(d);
+        // Keep the dropdown options stable while a filter is active: only
+        // refresh them when no project/model filter is narrowing the list.
+        if (!projectId && !model) setOptions(d.options || { projects: [], models: [] });
+      })
+      .catch((e) => { if (!cancelled) setErr(e.message || "Failed to load breakdown"); })
+      .finally(() => { if (!cancelled) setBusy(false); });
+    return () => { cancelled = true; };
+  }, [days, projectId, model]);
+
+  // CSV of whatever view + filters are currently showing.
+  function exportCsv() {
+    if (!data) return;
+    const esc = (v) => {
+      const s = String(v ?? "");
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    let head, rows;
+    if (group === "time") {
+      head = ["day", "calls", "input_tokens", "output_tokens", "cost_usd"];
+      rows = (data.by_day || []).map((d) => [d.day, d.calls, d.in_tok, d.out_tok, d.cost_usd.toFixed(6)]);
+    } else if (group === "project") {
+      head = ["project", "runs", "calls", "input_tokens", "output_tokens", "cost_usd"];
+      rows = data.by_project.map((p) => [p.project_name, p.runs, p.calls, p.in_tok, p.out_tok, p.cost_usd.toFixed(6)]);
+    } else {
+      head = ["search", "project", "last_activity_utc", "calls", "input_tokens", "output_tokens", "cost_usd"];
+      rows = data.by_run.map((r) => [r.topic, r.project_name || "", r.at, r.calls, r.in_tok, r.out_tok, r.cost_usd.toFixed(6)]);
+    }
+    const csv = [head, ...rows].map((r) => r.map(esc).join(",")).join("\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `sift-usage-${group}-${days ? days + "d" : "all"}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function toggleRun(id) {
+    if (openRun === id) { setOpenRun(null); return; }
+    setOpenRun(id);
+    if (!runDetail[id]) {
+      api.getUsage(id).then((u) => setRunDetail((m) => ({ ...m, [id]: u }))).catch(() => {});
+    }
+  }
+
+  const sel = {
+    fontFamily: "'JetBrains Mono',monospace", fontSize: 11, padding: "4px 8px", borderRadius: 8,
+    border: "1px solid var(--line)", background: "var(--card, #fff)", color: "var(--txt)", maxWidth: 220,
+  };
+  const pill = (active) => ({
+    fontFamily: "'JetBrains Mono',monospace", fontSize: 11, padding: "4px 10px", borderRadius: 999,
+    border: "1px solid " + (active ? "var(--indigo)" : "var(--line)"),
+    background: active ? "var(--indigo)" : "transparent",
+    color: active ? "#fff" : "var(--txt)", cursor: "pointer",
+  });
+
+  // Time view: per-day rows (newest first) from the same filtered fetch.
+  const dayRows = data?.by_day || [];
+
+  const maxProjCost = Math.max(...(data?.by_project || []).map((p) => p.cost_usd), 1e-9);
+
+  return (
+    <div style={{ marginTop: 22 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ ...S.label, marginRight: 4 }}>group by</span>
+          {[["time", "Time"], ["project", "Project"], ["run", "Search"]].map(([k, l]) => (
+            <button key={k} style={pill(group === k)} onClick={() => setGroup(k)}>{l}</button>
+          ))}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ ...S.label, marginRight: 4 }}>range</span>
+          {RANGES.map(([d, l]) => (
+            <button key={d} style={pill(days === d)} onClick={() => setDays(d)}>{l}</button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+        <span style={{ ...S.label, marginRight: 2 }}>filter</span>
+        <select value={projectId} onChange={(e) => setProjectId(e.target.value)} style={sel}>
+          <option value="">All projects</option>
+          {options.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+        <select value={model} onChange={(e) => setModel(e.target.value)} style={sel}>
+          <option value="">All models</option>
+          {options.models.map((m) => <option key={m} value={m}>{m}</option>)}
+        </select>
+        {(projectId || model) && (
+          <button style={pill(false)} onClick={() => { setProjectId(""); setModel(""); }}>Clear</button>
+        )}
+        <span style={{ flex: 1 }} />
+        <button style={pill(false)} onClick={exportCsv} disabled={!data}>Export CSV</button>
+      </div>
+
+      {err && <div className="err" style={{ marginBottom: 10 }}>{err}</div>}
+      {busy && <div className="muted tiny">Loading…</div>}
+
+      {group === "time" && data && (
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr>
+            <th style={S.th}>Day</th><th style={{ ...S.th, textAlign: "right" }}>Calls</th>
+            <th style={{ ...S.th, textAlign: "right" }}>Tokens</th><th style={{ ...S.th, textAlign: "right" }}>Cost</th>
+          </tr></thead>
+          <tbody>
+            {dayRows.length === 0 && <tr><td style={S.td} colSpan={4}>No usage in this range.</td></tr>}
+            {dayRows.map((d) => (
+              <tr key={d.day}>
+                <td style={S.td}>{d.day}</td>
+                <td style={S.tdNum}>{d.calls}</td>
+                <td style={S.tdNum}>{fmtTok((d.in_tok || 0) + (d.out_tok || 0))}</td>
+                <td style={S.tdNum}>{fmtUSD(d.cost_usd)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {group === "project" && data && (
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr>
+            <th style={S.th}>Project</th><th style={{ ...S.th, textAlign: "right" }}>Runs</th>
+            <th style={{ ...S.th, textAlign: "right" }}>Tokens</th><th style={{ ...S.th, textAlign: "right" }}>Cost</th>
+            <th style={S.th}>Share</th>
+          </tr></thead>
+          <tbody>
+            {data.by_project.length === 0 && <tr><td style={S.td} colSpan={5}>No usage in this range.</td></tr>}
+            {data.by_project.map((p) => (
+              <tr key={p.project_id || "none"}>
+                <td style={{ ...S.td, fontStyle: p.project_id ? "normal" : "italic" }}>{p.project_name}</td>
+                <td style={S.tdNum}>{p.runs}</td>
+                <td style={S.tdNum}>{fmtTok(p.in_tok + p.out_tok)}</td>
+                <td style={S.tdNum}>{fmtUSD(p.cost_usd)}</td>
+                <td style={{ ...S.td, width: 140 }}>
+                  <div style={{ height: 8, borderRadius: 4, background: "var(--line)" }}>
+                    <div style={{ height: 8, borderRadius: 4, background: "var(--indigo)", width: Math.max(2, (p.cost_usd / maxProjCost) * 100) + "%" }} />
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {group === "run" && data && (
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr>
+            <th style={S.th}>Search</th><th style={S.th}>Project</th><th style={S.th}>Last activity</th>
+            <th style={{ ...S.th, textAlign: "right" }}>Tokens</th><th style={{ ...S.th, textAlign: "right" }}>Cost</th>
+          </tr></thead>
+          <tbody>
+            {data.by_run.length === 0 && <tr><td style={S.td} colSpan={5}>No usage in this range.</td></tr>}
+            {data.by_run.map((r) => (
+              <React.Fragment key={r.session_id}>
+                <tr style={{ cursor: "pointer" }} onClick={() => toggleRun(r.session_id)}>
+                  <td style={S.td}>{openRun === r.session_id ? "▾ " : "▸ "}{r.topic}</td>
+                  <td style={S.td}>{r.project_name || <span className="muted">—</span>}</td>
+                  <td style={S.td}>{fmtDT(r.at)}</td>
+                  <td style={S.tdNum}>{fmtTok(r.in_tok + r.out_tok)}</td>
+                  <td style={S.tdNum}>{fmtUSD(r.cost_usd)}</td>
+                </tr>
+                {openRun === r.session_id && (
+                  <tr><td style={{ ...S.td, background: "var(--card, #fafafa)" }} colSpan={5}>
+                    {!runDetail[r.session_id] ? <span className="muted tiny">Loading stages…</span> : (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 18px", fontSize: 12 }}>
+                        {runDetail[r.session_id].by_stage.map((s) => (
+                          <span key={s.stage}>{STAGE_LABEL[s.stage] || s.stage}: <b>{fmtUSD(s.cost_usd)}</b></span>
+                        ))}
+                      </div>
+                    )}
+                  </td></tr>
+                )}
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {group === "run" && data && data.by_run.length >= 200 && (
+        <div className="muted tiny" style={{ marginTop: 6 }}>Showing the 200 most recent searches.</div>
+      )}
+    </div>
+  );
+}
+
 // Stale-while-revalidate cache (module scope survives tab unmount/remount) so
 // re-opening the Token usage tab renders instantly and refreshes in the
 // background instead of showing a blank page for a few seconds each time.
@@ -216,6 +425,7 @@ export default function UsageView({ runId }) {
               showCumulative
             />
           </div>
+          <UsageGroups trend={trend} />
         </div>
       )}
 

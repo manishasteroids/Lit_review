@@ -405,7 +405,7 @@ export const HYPO_STAGES = [
 function buildHypo(st, ctl) {
   const r = rng(41), g = gaussOf(r);
   const SCORE = [0.62, 0.81, 0.9, 0.55, 0.74, 0.47, 0.86, 0.68], FLAG = [0, 0, 0, 1, 0, 1, 0, 0];
-  const SPEED = 1.5; // playback rate of the stage animations; LandingPage's stage timer is 7s / SPEED
+  const SPEED = 2.25; // (1.5x, then 1.5x again) playback rate of the stage animations; LandingPage's stage timer is 7s / SPEED
   const R0 = 7, PH = 2.6, TIER = [[4.7, 3.7], [2.5, 5.3], [0, 6.9]]; // [radius, height] of each round's winners
   const angOf = (i) => (i / 8) * 6.2832 + 0.39;
   const polar = (rad, a, y) => new THREE.Vector3(Math.cos(a) * rad, y, Math.sin(a) * rad);
@@ -637,7 +637,8 @@ function buildLoop(st, ctl) {
 
   return (t, dt) => {
     ctl.now = t;
-    const mode = ctl.mode, lt = t - ctl.t0;
+    const LOOP_SPEED = 2; // playback rate; LandingPage's loop stage timer is 14s / LOOP_SPEED
+    const mode = ctl.mode, lt = (t - ctl.t0) * LOOP_SPEED;
     surf.visible = mode !== 1; plate.visible = mode === 1;
     ob.target.y += ((mode === 1 ? 0.4 : 1.5) - ob.target.y) * Math.min(1, dt * 4); ob.apply(dt);
     let info = "";

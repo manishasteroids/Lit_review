@@ -552,7 +552,12 @@ function ZoteroTab({ projectId, onImported }) {
         </a>.
       </div>
       <label style={S.lbl}>API key</label>
-      <input style={S.input} type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)}
+      {/* Not type="password": browsers treat any password field as a login and
+          offer to save the key as this site's password, then fill it into the
+          sign-in form. A masked text field keeps it hidden without that. */}
+      <input style={{ ...S.input, WebkitTextSecurity: "disc" }} type="text" name="zotero-api-key"
+        autoComplete="off" spellCheck={false} data-1p-ignore data-lpignore="true"
+        value={apiKey} onChange={(e) => setApiKey(e.target.value)}
         placeholder="Read-only Zotero API key" />
       <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
         <div style={{ flex: 1 }}>

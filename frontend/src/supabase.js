@@ -3,6 +3,25 @@ import { createClient } from "@supabase/supabase-js";
 const url = import.meta.env.VITE_SUPABASE_URL;
 const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
+// When a Google/GitHub sign-in fails, Supabase sends the visitor back here
+// with the reason in the address (…#error=…&error_description=…). Read it
+// now, before the client below starts up and tidies the address, so the
+// sign-in dialog can show it instead of silently landing on the home page.
+function readAuthRedirectError() {
+  try {
+    const grab = (str) => {
+      const q = new URLSearchParams(str.replace(/^[#?]/, ""));
+      const code = q.get("error_code") || q.get("error");
+      const desc = q.get("error_description");
+      return code || desc ? { code: code || "", description: (desc || code || "").replace(/\+/g, " ") } : null;
+    };
+    return grab(window.location.hash) || grab(window.location.search);
+  } catch {
+    return null;
+  }
+}
+export const authRedirectError = readAuthRedirectError();
+
 export const authEnabled = Boolean(url && anon);
 export const supabase = authEnabled
   ? createClient(url, anon, {

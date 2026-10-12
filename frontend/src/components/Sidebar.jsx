@@ -32,9 +32,9 @@ export default function Sidebar({
 
       <div style={S.sectionLabel}>Workspace</div>
       <nav style={{ flex: 1, overflowY: "auto" }}>
-        <NavItem icon={<BookOpen size={15} />} label="Literature Review"
+        <NavItem icon={<BookOpen size={15} />} label={<><b style={{ fontWeight: 700 }}>Sift</b> - Literature Review</>}
           active={activeView === "workspace"} onClick={onLiteratureReview} />
-        <NavItem icon={<Lightbulb size={15} />} label="Hypothesis Generation"
+        <NavItem icon={<Lightbulb size={15} />} label={<><b style={{ fontWeight: 700 }}>Infinity</b> - Hypothesis Generation</>}
           active={activeView === "hypothesis-picker" || activeView === "hypothesis-workspace"}
           onClick={onHypothesisGeneration} />
         <NavItem icon={<Cpu size={15} />} label="Physical AI"
@@ -45,7 +45,7 @@ export default function Sidebar({
       </nav>
 
       <div style={S.footer}>
-        <NavItem icon={<Coins size={15} />} label="Account and Billing"
+        <NavItem icon={<Coins size={16} />} label={<span style={{ fontWeight: 600 }}>Account and Billing</span>}
           active={activeView === "billing"} onClick={onOpenBilling} />
         <div style={{ padding: "8px 10px 2px" }}>
           {session ? (
@@ -91,7 +91,7 @@ function AccountRow({ session, onOpenProfile, onOpenSettings, onDeleteAllData })
     <div ref={wrap} style={{ position: "relative" }}>
       <div style={S.acctRow}>
         <button type="button" style={S.acctMain} onClick={onOpenProfile} title="View profile">
-          <Avatar name={name} url={avatarUrl} size={26} />
+          <Avatar name={name} url={avatarUrl} size={30} />
           <span style={S.acctName}>{name}</span>
         </button>
         <button
@@ -141,7 +141,8 @@ function MenuItem({ children, onClick, danger }) {
 function NavItem({ icon, label, active, onClick }) {
   return (
     <button type="button" onClick={onClick} style={{ ...S.navItem, ...(active ? S.navItemActive : null) }}>
-      {icon} {label}
+      <span style={{ display: "inline-flex", flexShrink: 0 }}>{icon}</span>
+      <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
     </button>
   );
 }
@@ -149,7 +150,7 @@ function NavItem({ icon, label, active, onClick }) {
 
 const S = {
   sidebar: {
-    width: 226, flexShrink: 0, display: "flex", flexDirection: "column",
+    width: 268, flexShrink: 0, display: "flex", flexDirection: "column",
     background: "var(--panel2, #f1f3f9)", borderRight: "1px solid var(--line, #e4e7ef)",
     height: "100vh", position: "sticky", top: 0, fontFamily: "inherit",
   },
@@ -169,8 +170,8 @@ const S = {
   },
   navItem: {
     width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "9px 16px",
-    fontSize: 13.5, color: "var(--txt, #1c2128)", background: "none", border: "none",
-    cursor: "pointer", textAlign: "left", fontFamily: "inherit",
+    fontSize: 13.5, fontWeight: 500, color: "var(--txt, #1c2128)", background: "none", border: "none",
+    cursor: "pointer", textAlign: "left", fontFamily: "inherit", whiteSpace: "nowrap",
   },
   navItemActive: { background: "#e8e5fd", color: "var(--indigo, #6d5df6)", fontWeight: 600 },
   subNavItem: {
@@ -178,7 +179,10 @@ const S = {
     color: "var(--muted, #5b6472)", background: "none", border: "none", cursor: "pointer",
     textAlign: "left", fontFamily: "inherit",
   },
-  footer: { borderTop: "1px solid var(--line, #e4e7ef)", padding: "6px 0" },
+  footer: {
+    borderTop: "1px solid var(--line, #e4e7ef)", padding: "8px 0 10px", background: "var(--panel, #fff)",
+    boxShadow: "0 -6px 16px -12px rgba(20,28,50,.25)",
+  },
   acctRow: {
     display: "flex", alignItems: "center", gap: 4, borderRadius: 8,
   },
@@ -188,12 +192,12 @@ const S = {
     borderRadius: 8,
   },
   acctName: {
-    fontSize: 13, fontWeight: 500, color: "var(--txt, #1c2128)", overflow: "hidden",
+    fontSize: 14, fontWeight: 600, color: "var(--txt, #1c2128)", overflow: "hidden",
     textOverflow: "ellipsis", whiteSpace: "nowrap",
   },
   acctChevron: {
     flexShrink: 0, background: "none", border: "none", cursor: "pointer", padding: 6,
-    borderRadius: 8, color: "var(--muted, #5b6472)", display: "flex", alignItems: "center",
+    borderRadius: 8, color: "var(--txt, #1c2128)", display: "flex", alignItems: "center",
   },
   acctMenu: {
     position: "absolute", bottom: "calc(100% + 6px)", left: 0, right: 0, minWidth: 200,

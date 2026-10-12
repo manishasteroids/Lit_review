@@ -770,8 +770,8 @@ function useAutoStage(count, ms) {
 }
 
 function HypothesisSection({ login }) {
-  const [h, pickH, refH, holdH, seenH, turnH] = useAutoStage(HYPO_PIPELINE.length, 4700);
-  const [i, pickI, refI, holdI, seenI, turnI] = useAutoStage(LOOP.length, 14000);
+  const [h, pickH, refH, holdH, seenH, turnH] = useAutoStage(HYPO_PIPELINE.length, 3130);
+  const [i, pickI, refI, holdI, seenI, turnI] = useAutoStage(LOOP.length, 7000);
   const stage = LOOP[i];
 
   return (

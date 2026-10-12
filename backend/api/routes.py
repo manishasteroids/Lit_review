@@ -81,6 +81,9 @@ class QuickAskBody(BaseModel):
     # a brief live web-search lookup, then answers on the open-weight model
     # (see settings.quick_ask_model) instead of Gemini.
     scope: str = "general"
+    # Earlier turns of the same Home-page conversation, oldest first:
+    # [{"question": ..., "answer": ...}] -- lets a follow-up ("and for robotics?") be understood.
+    history: list[dict] | None = None
 
 
 class FilterBody(BaseModel):
@@ -296,6 +299,17 @@ def _persist_done(run, user_id, notes=None, side=None):
     if side is None:
         side = pipeline.side_modules(run)
     approved_map = {p["idx"]: True for p in run.approved_papers}
+    # A run started without a question ("Analyze documents" / adding a paper
+    # by link) is saved as "Untitled documents". Once it holds papers, name it
+    # after them so it can be told apart in History and in its project.
+    titles = [str(p.get("title") or "").strip() for p in run.approved_papers if p.get("title")]
+    cur = (run.topic or "").strip()
+    # "auto-named" = still the placeholder, or a name this code gave it earlier
+    # (it starts with one of the run's own paper titles) -- never a question the user typed.
+    auto = cur.lower() in ("", "untitled documents") or any(t and cur.startswith(t[:60]) for t in titles)
+    if auto and titles:
+        first = titles[0] if len(titles[0]) <= 90 else titles[0][:87].rstrip() + "…"
+        run.topic = first if len(titles) == 1 else f"{first} + {len(titles) - 1} more"
     save_session(
         session_id=run.run_id,
         topic=run.topic,
@@ -1157,9 +1171,18 @@ def quick_ask(body: QuickAskBody, user_id: str = Depends(require_user)):
     context_blocks = []
     sources = []
 
+    # A follow-up is only meaningful with what came before it. Keep the last
+    # few turns (trimmed) and search with the previous question alongside the
+    # new one, so "what about the second one?" still finds the right project.
+    turns = []
+    for t in (body.history or [])[-4:]:
+        if isinstance(t, dict) and str(t.get("question") or "").strip():
+            turns.append((str(t["question"]).strip()[:400], str(t.get("answer") or "").strip()[:1200]))
+    search_q = f"{turns[-1][0]} {q}" if turns else q
+
     if body.scope == "projects":
         from core.project_search import search_user_projects
-        hits = search_user_projects(user_id, q, limit=6)
+        hits = search_user_projects(user_id, search_q, limit=6)
         if hits:
             lines = [f"- [{h['project_name']}] {h['title']}: {h['snippet']}" for h in hits if h.get("snippet") or h["type"] == "project"]
             if lines:
@@ -1178,7 +1201,7 @@ def quick_ask(body: QuickAskBody, user_id: str = Depends(require_user)):
                 "already found it in their account."
             )
 
-        web_text = _quick_ask_web_leg(q)
+        web_text = _quick_ask_web_leg(search_q)
         if web_text:
             context_blocks.append("Web search findings:\n" + web_text)
 
@@ -1188,8 +1211,13 @@ def quick_ask(body: QuickAskBody, user_id: str = Depends(require_user)):
     if context_blocks:
         system += "\n\n" + "\n\n".join(context_blocks)
 
+    user_text = q
+    if turns:
+        earlier = "\n\n".join(f"User: {a}\nYou: {b}" for a, b in turns)
+        user_text = (f"Earlier in this conversation:\n{earlier}\n\n"
+                     f"The user's follow-up (answer this, using the conversation above for context):\n{q}")
     try:
-        answer = llm.call(user_text=q, system=system, max_tokens=700)
+        answer = llm.call(user_text=user_text, system=system, max_tokens=700)
     except Exception as e:
         raise HTTPException(502, f"Couldn't get an answer: {e}")
 
@@ -1846,6 +1874,15 @@ def export_experiments(run_id: str, fmt: str, user_id: str = Depends(require_use
         content=data, media_type=media,
         headers={"Content-Disposition": f'attachment; filename="{stem}.{fmt}"'},
     )
+
+
+@router.get("/frontier")
+def frontier_feed(refresh: bool = False, user_id: str = Depends(require_user)):
+    """New papers in the areas this user works on, for the bottom of Home.
+    No model calls: areas come from their own recent runs, papers from public
+    scholarly search (core/frontier.py), cached per user for a day."""
+    from core.frontier import get_frontier
+    return get_frontier(user_id, refresh=refresh)
 
 
 @router.get("/news")
@@ -2507,6 +2544,18 @@ def usage_trend(days: int = 30, tz_offset: int = 0, user_id: str = Depends(requi
     getTimezoneOffset() so days are grouped in the user's local time. DB read."""
     from core.usage import get_usage_trend
     return get_usage_trend(user_id, days, tz_offset)
+
+
+@router.get("/usage/breakdown")
+def usage_breakdown(days: int = 0, project_id: str = "", model: str = "", tz_offset: int = 0,
+                    user_id: str = Depends(require_user)):
+    """Usage grouped by run, project and day for the signed-in user.
+    `days` = 0 means all time. Optional filters: `project_id` ("none" =
+    Unassigned) and `model`. `tz_offset` is the browser's getTimezoneOffset()
+    so days are bucketed in local time."""
+    from core.usage import get_usage_breakdown
+    return get_usage_breakdown(user_id, days if days > 0 else None,
+                               project_id or None, model or None, tz_offset)
 
 
 @router.get("/modes")

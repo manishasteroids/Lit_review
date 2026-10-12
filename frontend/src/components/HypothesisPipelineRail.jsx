@@ -1,7 +1,9 @@
 import React from "react";
 import { FileText, FlaskConical, Brain, Search, ListOrdered, Sparkles, BarChart3, Check, RotateCw } from "./icons.jsx";
 
-// Mirrors backend/hypothesis_agent/pipeline.py's seven stages, in order:
+// Mirrors backend/hypothesis_agent/pipeline.py's stages, in order ("Refine"
+// sits between the Critic and the novelty check: hypotheses scoring under
+// the threshold are rewritten against their critique and re-scored). The rest:
 // bridge lookup (fast, folded into "Literature Package" — it reads the same
 // extractions), Experiment Designer, Hypothesis Critic, Novelty verification
 // (a real literature search per hypothesis, see agents/hypothesis_novelty.py
@@ -19,6 +21,7 @@ const STAGES = [
   { key: "fetch", label: "Literature Package", sub: "Reads Sift's extractions + synthesis", icon: FileText, kind: "entry" },
   { key: "designer", label: "Experiment Designer", sub: "Generates hypotheses", icon: FlaskConical, kind: "step" },
   { key: "critic", label: "Hypothesis Critic", sub: "Scores & critiques", icon: Brain, kind: "step" },
+  { key: "refine", label: "Refine", sub: "Rewrites weak hypotheses, then re-scores", icon: RotateCw, kind: "step" },
   { key: "novelty", label: "Novelty check", sub: "Live search for prior art, per hypothesis", icon: Search, kind: "step" },
   { key: "ranking", label: "Ranking bracket", sub: "Head-to-head matches, single elimination", icon: ListOrdered, kind: "step" },
   { key: "meta_review", label: "Meta-Review", sub: "Final recommendation", icon: Sparkles, kind: "step" },

@@ -170,6 +170,10 @@ def init_db() -> None:
     init_data_analysis_table()
     from core.quick_ask_history import init_quick_ask_history_table
     init_quick_ask_history_table()
+    from core.frontier import init_frontier_table
+    init_frontier_table()
+    from core.manuscript_db import init_manuscript_tables
+    init_manuscript_tables()
 
 
 # ── Write ───────────────────────────────────────────────────────────────────

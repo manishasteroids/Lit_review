@@ -26,11 +26,11 @@ extracted metrics/findings -- the closest thing to "empirical validation"
 this tool can do without a dataset or code execution to actually run the
 experiment against; see that module's docstring for exactly what it does
 and doesn't check). This is the architecture doc's SS5 "best-outcome
-pipeline" -- MVP version: no per-hypothesis refine/debate loop yet (that's a
-further enhancement, not required for "raise the cap and pick the best
-one"). Methods (the Sift-embedded panel) is untouched -- it still calls
-ExperimentDesignerAgent.run() with the default max_hypotheses=2 and never
-reaches the novelty check/ranker/meta-reviewer/plausibility check at all.
+pipeline", plus one Refine round between Critique and the novelty check:
+hypotheses the Critic scores below REFINE_THRESHOLD are rewritten against
+their critique and re-scored before anything is ranked. That loop used to
+live only in the Sift-embedded Methods tab (now retired from the UI);
+orchestrator.refine_experiments is its original, two-round form.
 
 Every LLM call this run makes (Designer, Critic, each ranker match,
 Meta-Review, Plausibility) is captured into an `audit_log` -- see
@@ -60,6 +60,10 @@ from pipeline.knowledge_graph import find_bridge_candidates
 # hypothesis_agent_architecture.md SS5 -- more real alternatives for the
 # bracket to actually choose between, at the cost of more LLM calls/run.
 BEST_OUTCOME_MAX_HYPOTHESES = 6
+
+# Hypotheses the Critic scores below this (0-100, its "overall") get one
+# rewrite-and-rescore pass before ranking. Same bar Methods' loop used.
+REFINE_THRESHOLD = 75
 
 # How many candidate papers a novelty check's live search pulls in per
 # hypothesis -- small on purpose: this only needs enough to catch a real
@@ -200,7 +204,7 @@ def run_hypothesis_pipeline(
     separately when persisting the result (core/hypothesis_db.py).
 
     `on_progress`, if given, is called synchronously with
-    {"stage": "fetch"|"designer"|"critic"|"novelty"|"ranking"|"meta_review",
+    {"stage": "fetch"|"designer"|"critic"|"refine"|"novelty"|"ranking"|"meta_review",
     "status": "start"|"done", ...} at each stage boundary -- lets a caller
     (api/hypothesis_routes.py's SSE stream) surface live progress in the
     portal instead of one opaque spinner. Two stages attach extra detail on
@@ -283,10 +287,77 @@ def run_hypothesis_pipeline(
     critique = critic.run(topic, plan, extractions)
     emit("critic", "done")
 
-    critiques_by_index = {
-        c["index"]: c for c in (critique.get("critiques") or [])
-        if isinstance(c, dict) and isinstance(c.get("index"), int)
-    }
+    def _index_critiques(c: dict) -> dict[int, dict]:
+        return {
+            x["index"]: x for x in ((c or {}).get("critiques") or [])
+            if isinstance(x, dict) and isinstance(x.get("index"), int)
+        }
+
+    critiques_by_index = _index_critiques(critique)
+
+    # Refine: the self-critique loop carried over from the retired Methods
+    # tab (pipeline/orchestrator.py's refine_experiments). Every hypothesis
+    # the Critic scored below REFINE_THRESHOLD is rewritten by the Designer
+    # against its own critique, then the whole field is scored again -- so
+    # the novelty check and the bracket below judge the improved versions,
+    # not first drafts. ONE round here (Methods ran up to two): each round
+    # is one rewrite per weak hypothesis plus one more Critic call, and it
+    # has to finish before ranking for the ranking to mean anything.
+    # ExperimentDesignerAgent.refine() returns the original hypothesis
+    # unchanged if its call fails, so a failed rewrite never drops one.
+    refinement = None
+    if hyps:
+        weak = sorted(
+            i for i, c in critiques_by_index.items()
+            if 0 <= i < len(hyps) and (c.get("overall") or 0) < REFINE_THRESHOLD
+        )
+        emit("refine", "start", hypotheses=len(weak))
+        revised_log: list[dict] = []
+        if weak:
+            llm.stage = "hypothesis_refine"
+            before = {
+                i: {"hypothesis": hyps[i].get("hypothesis"),
+                    "overall": critiques_by_index[i].get("overall")}
+                for i in weak
+            }
+            original_hyp = {i: hyps[i] for i in weak}
+            original_crit = {i: critiques_by_index[i] for i in weak}
+
+            def _refine_one(i: int) -> tuple[int, dict]:
+                return i, designer.refine(topic, hyps[i], critiques_by_index[i], extractions)
+
+            with ThreadPoolExecutor(max_workers=min(3, len(weak))) as ex:
+                for i, new_h in ex.map(_refine_one, weak):
+                    hyps[i] = new_h
+            # `hyps` is plan["hypotheses"] itself, so the plan the UI reads
+            # now carries the rewritten text; re-score against that.
+            plan["hypotheses"] = hyps
+            llm.stage = "hypothesis_critic"
+            critique = critic.run(topic, plan, extractions)
+            critiques_by_index = _index_critiques(critique)
+            for i in weak:
+                after = (critiques_by_index.get(i) or {}).get("overall")
+                # A rewrite is only kept if it didn't score worse than the
+                # draft it replaced; otherwise the original text AND its
+                # original critique go back, so nothing downstream ranks a
+                # hypothesis the loop made weaker.
+                kept = after is not None and after >= (before[i]["overall"] or 0)
+                if not kept:
+                    hyps[i] = original_hyp[i]
+                    critiques_by_index[i] = original_crit[i]
+                    critique["critiques"] = [
+                        original_crit[i] if (isinstance(c, dict) and c.get("index") == i) else c
+                        for c in (critique.get("critiques") or [])
+                    ]
+                revised_log.append({
+                    "index": i,
+                    "before_hypothesis": before[i]["hypothesis"],
+                    "before_overall": before[i]["overall"],
+                    "after_overall": after,
+                    "kept": kept,
+                })
+        refinement = {"threshold": REFINE_THRESHOLD, "rounds": 1 if weak else 0, "revised": revised_log}
+        emit("refine", "done", revised=len(revised_log))
 
     novelty_checks: dict[int, dict] = {}
     if hyps:
@@ -402,6 +473,7 @@ def run_hypothesis_pipeline(
         "kg_bridges": bridges,
         "plan": plan,
         "critique": critique,
+        "refinement": refinement,
         "novelty_checks": novelty_checks,
         "bracket": bracket,
         "champion_index": champion_index,

@@ -260,13 +260,18 @@ export const api = {
   // is created and nothing is filed under a project. scope="projects" also
   // searches the user's own projects/notes/runs and does a brief live web
   // lookup, then answers on the open-weight model instead of Gemini.
-  quickAsk: (question, { apiKey, scope } = {}) =>
-    request("/api/quick-ask", { question, api_key: apiKey || undefined, scope: scope || "general" }),
+  // `history` = earlier turns of the same conversation ([{question, answer}]),
+  // so a follow-up question is understood in context.
+  quickAsk: (question, { apiKey, scope, history } = {}) =>
+    request("/api/quick-ask", { question, api_key: apiKey || undefined, scope: scope || "general",
+      history: history && history.length ? history : undefined }),
 
   // Last few days of this user's Home-page quick-ask searches (auto-expires
   // on the backend -- see core/quick_ask_history.py), so they can reopen one
   // instead of retyping it.
   quickAskHistory: () => getJSON("/api/quick-ask/history"),
+  // New papers in the user's own research areas (cached a day server-side).
+  getFrontier: (refresh) => getJSON(`/api/frontier${refresh ? "?refresh=true" : ""}`),
   deleteQuickAskHistory: (id) => del(`/api/quick-ask/history/${id}`),
 
   // Studio-only entry: a run with no search — just a place to upload your
@@ -340,6 +345,93 @@ export const api = {
 
   // Download the hypothesis + experiment plan as .docx or .pdf — same
   // generated-from-existing-content, no-LLM-cost approach as downloadExport.
+  // Same download as downloadExperimentsExport below, for an Infinity
+  // (Hypothesis Agent) run instead of a Sift run's Methods plan.
+  downloadHypothesisExport: async (hypRunId, fmt) => {
+    const res = await fetch(`${BASE}/api/hypothesis/runs/${hypRunId}/export/${fmt}`, {
+      headers: await authHeaders(),
+    });
+    if (!res.ok) {
+      let detail = `Export failed (${res.status})`;
+      try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="?([^"]+)"?/.exec(cd);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = m ? m[1] : `hypotheses.${fmt}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
+  // ── Publish step (backend/api/manuscript_routes.py). Every call returns
+  // the whole manuscript, so the panel just swaps its state for the result.
+  openManuscript: (sourceRunId, hypRunId) =>
+    request("/api/manuscripts/open", { source_run_id: sourceRunId, hyp_run_id: hypRunId }),
+  patchManuscript: (id, body) => patch(`/api/manuscripts/${id}`, body),
+  uploadManuscriptTemplate: (id, file, apiKey, model) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (apiKey) fd.append("api_key", apiKey);
+    if (model) fd.append("model", model);
+    return postForm(`/api/manuscripts/${id}/template`, fd, WRITE_TIMEOUT_MS);
+  },
+  setManuscriptGuidelines: (id, url, apiKey, model) =>
+    request(`/api/manuscripts/${id}/guidelines`, { url, api_key: apiKey, model }, WRITE_TIMEOUT_MS),
+  uploadManuscriptGuidelinesFile: (id, file, apiKey, model) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (apiKey) fd.append("api_key", apiKey);
+    if (model) fd.append("model", model);
+    return postForm(`/api/manuscripts/${id}/guidelines/file`, fd, WRITE_TIMEOUT_MS);
+  },
+  removeManuscriptGuidelinesFile: (id) => del(`/api/manuscripts/${id}/guidelines/file`),
+  rebuildManuscriptSpec: (id, apiKey, model) =>
+    request(`/api/manuscripts/${id}/spec/rebuild`, { api_key: apiKey, model }, WRITE_TIMEOUT_MS),
+  uploadManuscriptFile: (id, file, description) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("description", description || "");
+    return postForm(`/api/manuscripts/${id}/files`, fd, WRITE_TIMEOUT_MS);
+  },
+  // An object URL for a drawn diagram or uploaded figure (needs the auth
+  // header, so it can't be a plain <img src>). Caller revokes it.
+  getManuscriptImageUrl: async (id, fileId) =>
+    URL.createObjectURL(new Blob([await getBinary(`/api/manuscripts/${id}/files/${fileId}/image`)], { type: "image/png" })),
+  patchManuscriptFile: (id, fileId, body) => patch(`/api/manuscripts/${id}/files/${fileId}`, body),
+  deleteManuscriptFile: (id, fileId) => del(`/api/manuscripts/${id}/files/${fileId}`),
+  // One request writes every section (in parallel server-side), so it gets
+  // the long Writer timeout rather than the single-call one.
+  generateManuscript: (id, apiKey, model) =>
+    request(`/api/manuscripts/${id}/generate`, { api_key: apiKey, model }, WRITE_TIMEOUT_MS_DEEP),
+  resetManuscript: (id) => request(`/api/manuscripts/${id}/reset`, {}),
+  // The paper as Word bytes for the in-app viewer -- allowed before approval.
+  getManuscriptPreview: (id) => getBinary(`/api/manuscripts/${id}/download?preview=true`),
+  // fmt ("docx" | "latex") only matters when no template was uploaded: it
+  // picks which standard layout to build.
+  downloadManuscript: async (id, fmt) => {
+    const res = await fetch(`${BASE}/api/manuscripts/${id}/download${fmt ? `?fmt=${fmt}` : ""}`, { headers: await authHeaders() });
+    if (!res.ok) {
+      let detail = `Download failed (${res.status})`;
+      try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const m = /filename="?([^"]+)"?/.exec(res.headers.get("Content-Disposition") || "");
+    const fallback = blob.type.includes("zip") ? "manuscript.zip" : "manuscript.docx";
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = m ? m[1] : fallback;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
   downloadExperimentsExport: async (runId, fmt) => {
     const res = await fetch(`${BASE}/api/runs/${runId}/experiments/export/${fmt}`, {
       headers: await authHeaders(),
@@ -562,6 +654,15 @@ export const api = {
   // Per-day token + cost trend for the signed-in user (grouped in local time)
   getUsageTrend: (days = 30) =>
     getJSON("/api/usage/trend?days=" + days + "&tz_offset=" + new Date().getTimezoneOffset()),
+
+  // Usage grouped by run + by project; days=0 → all time
+  getUsageBreakdown: (days = 0, projectId = "", model = "") =>
+    getJSON(
+      "/api/usage/breakdown?days=" + days +
+      "&project_id=" + encodeURIComponent(projectId || "") +
+      "&model=" + encodeURIComponent(model || "") +
+      "&tz_offset=" + new Date().getTimezoneOffset()
+    ),
 
   // ── Projects: folder a line of research (runs + saved papers + notes) ──
   listProjects: async () =>
