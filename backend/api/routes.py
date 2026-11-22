@@ -2668,19 +2668,25 @@ def admin_user_action(target_id: str, body: AdminActionBody, user_id: str = Depe
     sub = billing._get_or_create(target_id)
 
     if act in ("grant_pro", "grant_max"):
-        billing._set(target_id, plan="pro" if act == "grant_pro" else "max", status="active")
+        # period end cleared: a manual grant has no Stripe period, and a stale
+        # one from a past subscription would make the lapse check revoke it.
+        billing._set(target_id, plan="pro" if act == "grant_pro" else "max", status="active",
+                     current_period_end=None)
     elif act == "set_free":
         billing._set(target_id, plan="free", status="none")
     elif act == "extend_trial":
         d = body.days or 0
         if not 1 <= d <= 365:
             raise HTTPException(400, "days must be 1-365.")
-        started = datetime.fromisoformat(sub["trial_started_at"]) + timedelta(days=d)
+        # An account refused a trial (repeat/disposable email) has a start date
+        # far in the past; extend from today so the admin override actually works.
+        base = datetime.now(timezone.utc) if sub.get("trial_blocked") else datetime.fromisoformat(sub["trial_started_at"])
+        started = base + timedelta(days=d)
         # Moving the start later extends the deadline AND restarts the credit
         # window (credits are counted from trial_started_at).
-        billing._set(target_id, trial_started_at=started.isoformat())
+        billing._set(target_id, trial_started_at=started.isoformat(), trial_blocked=0)
     elif act == "reset_trial":
-        billing._set(target_id, trial_started_at=datetime.now(timezone.utc).isoformat())
+        billing._set(target_id, trial_started_at=datetime.now(timezone.utc).isoformat(), trial_blocked=0)
     elif act == "delete_data":
         if target_id == user_id:
             raise HTTPException(400, "Use 'Delete all my data' for your own account.")
