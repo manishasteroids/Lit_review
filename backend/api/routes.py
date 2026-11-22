@@ -5,10 +5,11 @@ frontend's pipeline rail can light up node by node as each call returns.
 import asyncio
 import base64
 import json
+import logging
 import re
 from datetime import datetime, timezone
  
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
  
@@ -22,6 +23,16 @@ from core.usage import get_usage
 from pipeline.orchestrator import RUNS, RunState, SiftPipeline
  
 router = APIRouter(prefix="/api")
+
+from core.billing import clamp_chat_mode, clamp_mode  # noqa: E402
+
+
+def _plan_mode(user_id: str, mode):
+    """The search mode this user's plan allows (no-op unless billing is
+    enforced). Used on later pipeline steps so a run started before a trial
+    ended can't keep using a mode the plan no longer includes."""
+    return clamp_mode(user_id, mode)[0]
+log = logging.getLogger("sift.routes")
  
  
 def get_run(run_id: str, user_id: str):
@@ -69,6 +80,19 @@ class CreateRunBody(BaseModel):
     model: str | None = None
     mode: str | None = None      # lite | medium | deep (drives papers + models + depth)
     project_id: str | None = None  # optionally file this run under a project
+
+
+class QuickAskBody(BaseModel):
+    question: str
+    api_key: str | None = None
+    # "general" -- plain quick answer, cheap Gemini model, no user data touched.
+    # "projects" -- also searches the user's own projects/notes/runs and does
+    # a brief live web-search lookup, then answers on the open-weight model
+    # (see settings.quick_ask_model) instead of Gemini.
+    scope: str = "general"
+    # Earlier turns of the same Home-page conversation, oldest first:
+    # [{"question": ..., "answer": ...}] -- lets a follow-up ("and for robotics?") be understood.
+    history: list[dict] | None = None
 
 
 class FilterBody(BaseModel):
@@ -143,14 +167,15 @@ async def create_run_stream(body: CreateRunBody, user_id: str = Depends(require_
     """
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_event_loop()
- 
+    use_mode, plan_notice = await asyncio.to_thread(clamp_mode, user_id, body.mode)
+
     def on_progress(event: dict):
         """Called from a worker thread — pushes into the async queue."""
         loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", **event})
  
     async def run_pipeline():
         try:
-            pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=body.mode)
+            pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=use_mode)
             run = await asyncio.to_thread(
                 pipeline.reformulate_and_search, body.topic, on_progress
             )
@@ -181,6 +206,7 @@ async def create_run_stream(body: CreateRunBody, user_id: str = Depends(require_
                 "reform": run.reform,
                 "papers": run.papers,
                 "stage": run.stage,
+                "plan_notice": plan_notice,
             })
         except Exception as e:  # noqa: BLE001
             await queue.put({"type": "error", "message": str(e)})
@@ -205,7 +231,8 @@ async def create_run_stream(body: CreateRunBody, user_id: str = Depends(require_
  
 @router.post("/runs")
 def create_run(body: CreateRunBody, user_id: str = Depends(require_user)):
-    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=body.mode)
+    use_mode, plan_notice = clamp_mode(user_id, body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=use_mode)
     try:
         run = pipeline.reformulate_and_search(body.topic)
     except Exception as e:
@@ -224,7 +251,8 @@ def create_run(body: CreateRunBody, user_id: str = Depends(require_user)):
     if body.project_id:
         from core.projects import assign_session
         assign_session(run.run_id, user_id, body.project_id)
-    return {"run_id": run.run_id, "reform": run.reform, "papers": run.papers, "stage": run.stage}
+    return {"run_id": run.run_id, "reform": run.reform, "papers": run.papers, "stage": run.stage,
+            "plan_notice": plan_notice}
 
 
 class BlankRunBody(BaseModel):
@@ -284,6 +312,17 @@ def _persist_done(run, user_id, notes=None, side=None):
     if side is None:
         side = pipeline.side_modules(run)
     approved_map = {p["idx"]: True for p in run.approved_papers}
+    # A run started without a question ("Analyze documents" / adding a paper
+    # by link) is saved as "Untitled documents". Once it holds papers, name it
+    # after them so it can be told apart in History and in its project.
+    titles = [str(p.get("title") or "").strip() for p in run.approved_papers if p.get("title")]
+    cur = (run.topic or "").strip()
+    # "auto-named" = still the placeholder, or a name this code gave it earlier
+    # (it starts with one of the run's own paper titles) -- never a question the user typed.
+    auto = cur.lower() in ("", "untitled documents") or any(t and cur.startswith(t[:60]) for t in titles)
+    if auto and titles:
+        first = titles[0] if len(titles[0]) <= 90 else titles[0][:87].rstrip() + "…"
+        run.topic = first if len(titles) == 1 else f"{first} + {len(titles) - 1} more"
     save_session(
         session_id=run.run_id,
         topic=run.topic,
@@ -340,7 +379,7 @@ def _persist_experiments(run, user_id) -> None:
 @router.post("/runs/{run_id}/synthesize")
 def synthesize(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
-    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=_plan_mode(user_id, run.mode or body.mode))
     try:
         pipeline.extract_and_synthesize(run)
     except Exception as e:
@@ -364,7 +403,7 @@ async def synthesize_stream(run_id: str, body: SynthesizeBody, user_id: str = De
     async def work():
         try:
             pipeline = SiftPipeline(api_key=body.api_key, model=body.model,
-                                       mode=run.mode or body.mode)
+                                       mode=_plan_mode(user_id, run.mode or body.mode))
             await asyncio.to_thread(pipeline.extract_and_synthesize, run, on_progress)
             side = _persist_done(run, user_id, notes=body.notes)
             await queue.put({
@@ -394,7 +433,7 @@ async def synthesize_stream(run_id: str, body: SynthesizeBody, user_id: str = De
 @router.post("/runs/{run_id}/write")
 def write(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
-    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=_plan_mode(user_id, run.mode or body.mode))
     try:
         pipeline.write(run)
     except Exception as e:
@@ -868,7 +907,7 @@ def add_paper(run_id: str, body: AddPaperBody, user_id: str = Depends(require_us
     if _is_duplicate(run, body.paper):
         raise HTTPException(409, "This paper is already in your sources.")
     pipeline = SiftPipeline(api_key=body.api_key, model=body.model,
-                               mode=run.mode or getattr(body, "mode", None))
+                               mode=_plan_mode(user_id, run.mode or getattr(body, "mode", None)))
     try:
         res = pipeline.add_paper(run, body.paper)
     except Exception as e:
@@ -885,7 +924,7 @@ def reanalyze(run_id: str, body: ReanalyzeBody, user_id: str = Depends(require_u
     if len(body.included_indices) < 1:
         raise HTTPException(400, "Include at least one source before updating the analysis.")
     pipeline = SiftPipeline(api_key=body.api_key, model=body.model,
-                               mode=run.mode or getattr(body, "mode", None))
+                               mode=_plan_mode(user_id, run.mode or getattr(body, "mode", None)))
     try:
         pipeline.reanalyze(run, body.included_indices)
     except Exception as e:
@@ -899,7 +938,7 @@ def reanalyze(run_id: str, body: ReanalyzeBody, user_id: str = Depends(require_u
 @router.post("/runs/{run_id}/evaluate")
 def evaluate(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
-    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=_plan_mode(user_id, run.mode or body.mode))
     try:
         result = pipeline.evaluate(run)
     except Exception as e:
@@ -909,7 +948,7 @@ def evaluate(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_u
 @router.post("/runs/{run_id}/experiments")
 def design_experiments(run_id: str, body: SynthesizeBody, user_id: str = Depends(require_user)):
     run = get_run(run_id, user_id)
-    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=_plan_mode(user_id, run.mode or body.mode))
     try:
         result = pipeline.design_experiments(run)
     except Exception as e:
@@ -924,7 +963,7 @@ def refine_experiments(run_id: str, body: SynthesizeBody, user_id: str = Depends
     and revise any hypothesis that scores below the bar, up to a couple of
     rounds. Designs a plan first if this run doesn't have one yet."""
     run = get_run(run_id, user_id)
-    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=_plan_mode(user_id, run.mode or body.mode))
     try:
         result = pipeline.refine_experiments(run)
     except Exception as e:
@@ -962,7 +1001,7 @@ def dispute_hypothesis(run_id: str, index: int, body: DisputeBody, user_id: str 
     argument = (body.argument or "").strip()
     if not argument:
         raise HTTPException(400, "Provide your objection in `argument`.")
-    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=run.mode or body.mode)
+    pipeline = SiftPipeline(api_key=body.api_key, model=body.model, mode=_plan_mode(user_id, run.mode or body.mode))
     try:
         result = pipeline.dispute_hypothesis(run, index, argument)
     except ValueError as e:
@@ -1094,6 +1133,129 @@ CHAT_FORMAT = (
 )
 
 
+def _quick_ask_web_leg(question: str) -> str:
+    """Brief live web lookup for the "projects" scope of quick-ask, using
+    Claude's server-side web_search tool (Anthropic runs the search itself
+    and returns the finished text -- no client-side tool loop needed here).
+    Best-effort: any failure (no key, tool unavailable, etc.) just means no
+    web context gets added, not a broken answer. run_id=None like the rest
+    of quick-ask, so this call's cost isn't in the per-session usage ledger."""
+    if not settings.anthropic_api_key:
+        return ""
+    try:
+        web_llm = LLMClient(model="claude-haiku-4-5-20251001", run_id=None, stage="quick_ask_web")
+        return web_llm.call(
+            user_text=(
+                "Briefly research this and summarize the most relevant, up-to-date "
+                f"findings in 3-5 sentences: {question}"
+            ),
+            system="You are doing a quick web lookup for someone else's answer. Be concise and factual.",
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+            max_tokens=500,
+        ).strip()
+    except Exception as e:
+        log.warning("quick-ask web-search leg failed (continuing without it): %s", e)
+        return ""
+
+
+@router.post("/quick-ask")
+def quick_ask(body: QuickAskBody, user_id: str = Depends(require_user)):
+    """The Home page's 'Discuss with Sift AI' box.
+
+    scope="general": a single cheap LLM call (Gemini), grounded only in a
+    static description of this product (core/product_info.py) so it doesn't
+    hallucinate that "Sift"/"Hypothesis Agent" don't exist.
+
+    scope="projects": also searches the signed-in user's own projects/notes/
+    runs (core/project_search.py) and does a brief live web-search lookup,
+    then answers on settings.quick_ask_model -- an open-weight model via
+    OpenRouter today, swappable to a self-hosted endpoint later by changing
+    only openrouter_base_url + this model id (see core/llm_client.py).
+
+    Neither scope is the Literature Review pipeline (reformulate -> search ->
+    extract -> synthesize) -- no run/session is created and nothing is filed
+    under a project; for that, the user runs a real Literature Review."""
+    from core.product_info import PRODUCT_SYSTEM_PROMPT
+
+    q = (body.question or "").strip()
+    if not q:
+        raise HTTPException(400, "Question is required.")
+
+    context_blocks = []
+    sources = []
+
+    # A follow-up is only meaningful with what came before it. Keep the last
+    # few turns (trimmed) and search with the previous question alongside the
+    # new one, so "what about the second one?" still finds the right project.
+    turns = []
+    for t in (body.history or [])[-4:]:
+        if isinstance(t, dict) and str(t.get("question") or "").strip():
+            turns.append((str(t["question"]).strip()[:400], str(t.get("answer") or "").strip()[:1200]))
+    search_q = f"{turns[-1][0]} {q}" if turns else q
+
+    if body.scope == "projects":
+        from core.project_search import search_user_projects
+        hits = search_user_projects(user_id, search_q, limit=6)
+        if hits:
+            lines = [f"- [{h['project_name']}] {h['title']}: {h['snippet']}" for h in hits if h.get("snippet") or h["type"] == "project"]
+            if lines:
+                context_blocks.append("Matches from the user's own projects:\n" + "\n".join(lines))
+            sources = [
+                {"type": h["type"], "project_id": h["project_id"], "project_name": h["project_name"], "title": h["title"]}
+                for h in hits
+            ]
+
+        if sources:
+            context_blocks.append(
+                "The project matches above are already shown to the user as clickable "
+                "links under your answer -- just confirm what you found by name (e.g. "
+                "the project's title) so they know which link to click. Do not tell them "
+                "to search their own file system, Git, or cloud storage for it -- you "
+                "already found it in their account."
+            )
+
+        web_text = _quick_ask_web_leg(search_q)
+        if web_text:
+            context_blocks.append("Web search findings:\n" + web_text)
+
+    model = settings.quick_ask_model if body.scope == "projects" else (settings.gemini_model or "gemini-2.5-flash")
+    llm = LLMClient(api_key=body.api_key, model=model, run_id=None, stage="quick_ask")
+    system = PRODUCT_SYSTEM_PROMPT
+    if context_blocks:
+        system += "\n\n" + "\n\n".join(context_blocks)
+
+    user_text = q
+    if turns:
+        earlier = "\n\n".join(f"User: {a}\nYou: {b}" for a, b in turns)
+        user_text = (f"Earlier in this conversation:\n{earlier}\n\n"
+                     f"The user's follow-up (answer this, using the conversation above for context):\n{q}")
+    try:
+        answer = llm.call(user_text=user_text, system=system, max_tokens=700)
+    except Exception as e:
+        raise HTTPException(502, f"Couldn't get an answer: {e}")
+
+    from core.quick_ask_history import record_quick_ask
+    record_quick_ask(user_id, body.scope, q, answer, sources)
+
+    return {"answer": answer, "model": model, "sources": sources}
+
+
+@router.get("/quick-ask/history")
+def quick_ask_history(user_id: str = Depends(require_user)):
+    """Last few days of this user's Home-page quick-ask searches, newest
+    first, so they can reopen one instead of retyping it. Auto-expires after
+    a few days (core/quick_ask_history.py) -- not a permanent chat log."""
+    from core.quick_ask_history import list_recent
+    return {"items": list_recent(user_id)}
+
+
+@router.delete("/quick-ask/history/{entry_id}")
+def quick_ask_history_delete(entry_id: str, user_id: str = Depends(require_user)):
+    from core.quick_ask_history import delete_entry
+    delete_entry(user_id, entry_id)
+    return {"ok": True}
+
+
 @router.post("/runs/{run_id}/chat")
 def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require_user)):
     """Answer questions about a single paper, grounded in what we know about it
@@ -1135,6 +1297,7 @@ def chat_about_paper(run_id: str, body: ChatBody, user_id: str = Depends(require
  
     # Chat mode picks the model: Quick = Gemini (cheap), Deep = Sonnet (stronger
     # reasoning). Grounding source (text/excerpts/PDF) is chosen below by cost.
+    body.chat_mode = clamp_chat_mode(user_id, body.chat_mode)
     chat_models = {"quick": settings.gemini_model or "gemini-2.5-flash", "deep": "claude-sonnet-4-6"}
     chat_model = chat_models.get(body.chat_mode) if body.chat_mode else body.model
     llm = LLMClient(api_key=body.api_key, model=chat_model, run_id=run_id, stage="chat")
@@ -1324,6 +1487,7 @@ def studio_chat(run_id: str, body: StudioChatBody, user_id: str = Depends(requir
         convo += f"{role}: {m.get('content','')}\n"
     convo += f"User: {body.question}\nAssistant:"
 
+    body.chat_mode = clamp_chat_mode(user_id, body.chat_mode)
     chat_models = {"quick": settings.gemini_model or "gemini-2.5-flash",
                    "deep": "claude-sonnet-4-6"}
     model = chat_models.get(body.chat_mode) if body.chat_mode else (body.model or settings.mid_model)
@@ -1727,6 +1891,15 @@ def export_experiments(run_id: str, fmt: str, user_id: str = Depends(require_use
     )
 
 
+@router.get("/frontier")
+def frontier_feed(refresh: bool = False, user_id: str = Depends(require_user)):
+    """New papers in the areas this user works on, for the bottom of Home.
+    No model calls: areas come from their own recent runs, papers from public
+    scholarly search (core/frontier.py), cached per user for a day."""
+    from core.frontier import get_frontier
+    return get_frontier(user_id, refresh=refresh)
+
+
 @router.get("/news")
 def news_feed():
     """Fresh AI-in-science headlines for the public landing page.
@@ -1965,7 +2138,7 @@ def list_project_share_links(project_id: str, user_id: str = Depends(require_use
     from core.project_sharing import list_share_links, is_project_owner
     if not is_project_owner(project_id, user_id):
         raise HTTPException(404, "Project not found.")
-    return {"share_links": list_share_links(project_id)}
+    return {"links": list_share_links(project_id)}
 
 
 @router.post("/projects/{project_id}/share-links")
@@ -2065,6 +2238,320 @@ def share_get_run(token: str, run_id: str, email: str):
     }
 
 
+def _share_verified_session(token: str, run_id: str, email: str) -> dict:
+    """Shared by every /share/{token}/runs/{run_id}/... sub-resource below:
+    re-verify the link+email pair and that this run actually belongs to that
+    link's project, then return the raw session row (which carries the
+    review OWNER's user_id) so callers can look up owner-scoped data
+    (Hypothesis Agent runs, Studio chat) under that identity. A share-link
+    viewer has no user_id of their own — they were never asked to have a
+    Sift account — so every lookup here deliberately runs AS the owner,
+    exactly as it would if the owner were looking at their own project,
+    rather than trying to invent a "shared" identity that doesn't exist in
+    those tables."""
+    from core.project_sharing import verify_share_access
+    from core.db import _conn, _PH
+    link = verify_share_access(token, email)
+    if not link:
+        raise HTTPException(403, "This link doesn't grant access to that email.")
+    with _conn() as conn:
+        row = conn.execute(f"SELECT * FROM sessions WHERE id = {_PH}", (run_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Run not found.")
+    session = dict(row)
+    if session.get("project_id") != link["project_id"]:
+        raise HTTPException(404, "Run not found.")
+    return session
+
+
+@router.get("/share/{token}/runs/{run_id}/hypothesis")
+def share_get_hypothesis(token: str, run_id: str, email: str):
+    """Read-only Hypothesis Agent output for a shared run, if one was ever
+    generated — same run-level artifact a signed-in collaborator would see
+    on the Hypothesis tab, just without needing an account."""
+    from core.hypothesis_db import list_hypothesis_runs, get_hypothesis_run
+    session = _share_verified_session(token, run_id, email)
+    owner_id = session.get("user_id")
+    runs = list_hypothesis_runs(owner_id, run_id)
+    if not runs:
+        return {"hypothesis": None}
+    full = get_hypothesis_run(runs[0]["id"], owner_id)
+    return {"hypothesis": full}
+
+
+@router.get("/share/{token}/runs/{run_id}/studio")
+def share_get_studio(token: str, run_id: str, email: str):
+    """Read-only Studio (multi-paper chat) transcript for a shared run.
+    Studio history is stored per-user, not per-run, so this deliberately
+    shows the review OWNER's conversation — the one attached to the run a
+    visitor is actually looking at — not some notion of a "project-wide"
+    thread that doesn't exist in the schema."""
+    from core.studio_history import get_studio_chat
+    session = _share_verified_session(token, run_id, email)
+    owner_id = session.get("user_id")
+    return {"messages": get_studio_chat(owner_id, run_id)}
+
+
+class ContactBody(BaseModel):
+    name: str
+    email: str
+    affiliation: str = ""
+    message: str
+    # Honeypot field: real visitors never see or fill this (hidden via CSS on
+    # the frontend), so a non-empty value here means a bot filled every
+    # field it could find. Silently accepted-but-dropped rather than a 4xx,
+    # so the bot doesn't learn its submission was recognized as spam.
+    website: str = ""
+
+
+@router.post("/contact")
+async def submit_contact_form(body: ContactBody):
+    """Public 'Contact us' form on the About page. No auth — anyone can
+    reach this, so keep it narrow: fixed recipient (settings.contact_to_email,
+    never client-supplied), a honeypot field, and basic length/format checks.
+    Actual delivery goes through Resend's HTTP API rather than raw SMTP,
+    since Cloud Run doesn't allow outbound SMTP ports on some networks and
+    Resend's API works over plain HTTPS."""
+    if body.website.strip():
+        return {"ok": True}
+
+    name = body.name.strip()
+    email = body.email.strip()
+    message = body.message.strip()
+    affiliation = body.affiliation.strip()
+
+    if not name or not email or not message:
+        raise HTTPException(400, "Name, email, and message are required.")
+    if "@" not in email or len(email) > 320:
+        raise HTTPException(400, "That doesn't look like a valid email address.")
+    if len(name) > 200 or len(affiliation) > 300:
+        raise HTTPException(400, "Name or affiliation is too long.")
+    if len(message) > 5000:
+        raise HTTPException(400, "Message is too long (5000 character limit).")
+
+    if not settings.resend_api_key:
+        logging.error("Contact form submitted but RESEND_API_KEY is not configured — dropping.")
+        raise HTTPException(503, "Contact form isn't set up yet. Please email us directly.")
+
+    import httpx
+    html_body = (
+        f"<p><b>Name:</b> {_esc(name)}</p>"
+        f"<p><b>Email:</b> {_esc(email)}</p>"
+        + (f"<p><b>Affiliation:</b> {_esc(affiliation)}</p>" if affiliation else "")
+        + f"<p><b>Message:</b></p><p>{_esc(message).replace(chr(10), '<br>')}</p>"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {settings.resend_api_key}"},
+                json={
+                    "from": f"Orcus Intelligence Lab site <{settings.contact_from_email}>",
+                    "to": [settings.contact_to_email],
+                    "reply_to": email,
+                    "subject": f"Contact form: {name}",
+                    "html": html_body,
+                },
+            )
+        if resp.status_code >= 300:
+            logging.error("Resend send failed (%s): %s", resp.status_code, resp.text)
+            raise HTTPException(502, "Couldn't send your message right now. Please try again shortly.")
+    except httpx.HTTPError as e:
+        logging.error("Resend request error: %s", e)
+        raise HTTPException(502, "Couldn't send your message right now. Please try again shortly.")
+
+    return {"ok": True}
+
+
+def _esc(s: str) -> str:
+    """Minimal HTML-escape for interpolating user text into the contact
+    email's HTML body — this is an internal notification email, not
+    rendered in a browser the sender controls, but escaping costs nothing
+    and avoids any chance of the HTML body being malformed."""
+    return (
+        s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    )
+
+
+_RESUME_EXTS = (".pdf", ".doc", ".docx")
+_MAX_ATTACHMENT_BYTES = 8_000_000  # 8MB/file — generous for a CV/cover letter, keeps the
+                                    # total well under Resend's per-email attachment ceiling
+
+
+async def _read_application_file(f: UploadFile, label: str) -> dict:
+    """Validate + base64-encode one uploaded file for Resend's attachments
+    array. Raises HTTPException on anything that isn't a small PDF/Word doc —
+    this is a public, unauthenticated endpoint, so it's deliberately narrow
+    about what it will forward as an email attachment."""
+    name = (f.filename or "").strip()
+    if not name.lower().endswith(_RESUME_EXTS):
+        raise HTTPException(400, f"{label} must be a PDF or Word document (.pdf, .doc, .docx).")
+    data = await f.read()
+    if not data:
+        raise HTTPException(400, f"{label} appears to be empty.")
+    if len(data) > _MAX_ATTACHMENT_BYTES:
+        raise HTTPException(400, f"{label} is too large (8MB limit).")
+    return {"filename": name, "content": base64.b64encode(data).decode("ascii")}
+
+
+@router.post("/careers/apply")
+async def submit_job_application(
+    role_title: str = Form(...),
+    first_name: str = Form(...),
+    last_name: str = Form(...),
+    email: str = Form(...),
+    phone: str = Form(""),
+    address: str = Form(""),
+    linkedin: str = Form(""),
+    scholar: str = Form(""),
+    github: str = Form(""),
+    personal_website: str = Form(""),
+    # Screening questions — same spirit as a standard job-board application
+    # (current location, availability, work authorization) but trimmed down
+    # for a small remote-first team: no office-attendance question (these
+    # roles are remote) and no formal arbitration/EEO legal boilerplate,
+    # since that's US-employment-law machinery this company isn't set up
+    # for. "certified" stands in for that as a single honesty checkbox.
+    location: str = Form(...),
+    start_date: str = Form(...),
+    work_authorized: str = Form(...),  # "yes" | "no"
+    needs_sponsorship: str = Form(...),  # "yes" | "no"
+    additional_info: str = Form(""),
+    certified: str = Form(...),  # must be "yes"
+    website: str = Form(""),  # honeypot — see submit_contact_form for the same pattern
+    resume: UploadFile = File(...),
+    cover_letter: UploadFile = File(...),
+    additional_document: UploadFile | None = File(None),
+):
+    """Careers page 'Apply' form. Public, unauthenticated, so validation here
+    is deliberately strict: fixed recipient (settings.hr_email, never
+    client-supplied), a honeypot, tight file-type/size limits, and the same
+    Resend delivery path as the Contact form — just with attachments and a
+    reply_to set to the applicant's own email so HR can reply directly."""
+    if website.strip():
+        return {"ok": True}
+
+    first_name, last_name, email = first_name.strip(), last_name.strip(), email.strip()
+    phone, address = phone.strip(), address.strip()
+    linkedin, scholar, role_title = linkedin.strip(), scholar.strip(), role_title.strip()
+    github, personal_website = github.strip(), personal_website.strip()
+    location, start_date = location.strip(), start_date.strip()
+    additional_info = additional_info.strip()
+
+    if not first_name or not last_name or not email:
+        raise HTTPException(400, "First name, last name, and email are required.")
+    if "@" not in email or len(email) > 320:
+        raise HTTPException(400, "That doesn't look like a valid email address.")
+    if not location or not start_date:
+        raise HTTPException(400, "Current location and earliest start date are required.")
+    if work_authorized not in ("yes", "no") or needs_sponsorship not in ("yes", "no"):
+        raise HTTPException(400, "Please answer the work authorization and sponsorship questions.")
+    if certified != "yes":
+        raise HTTPException(400, "Please confirm the information in your application is accurate.")
+    for field, val, limit in (("First name", first_name, 100), ("Last name", last_name, 100),
+                              ("Phone", phone, 40), ("Address", address, 300),
+                              ("LinkedIn URL", linkedin, 300), ("Google Scholar URL", scholar, 300),
+                              ("GitHub URL", github, 300), ("Personal website URL", personal_website, 300),
+                              ("Location", location, 200), ("Additional information", additional_info, 3000)):
+        if len(val) > limit:
+            raise HTTPException(400, f"{field} is too long.")
+
+    if not settings.resend_api_key:
+        logging.error("Job application submitted but RESEND_API_KEY is not configured — dropping.")
+        raise HTTPException(503, "Applications aren't set up yet. Please email us directly.")
+
+    import httpx
+    resume_att = await _read_application_file(resume, "Resume")
+    cover_letter_att = await _read_application_file(cover_letter, "Cover letter")
+    attachments = [resume_att, cover_letter_att]
+    # Optional — a portfolio, writing sample, or research summary the
+    # applicant wants to add beyond the required resume/cover letter.
+    if additional_document is not None and (additional_document.filename or "").strip():
+        attachments.append(await _read_application_file(additional_document, "Additional document"))
+
+    rows = [("Name", f"{first_name} {last_name}"), ("Email", email)]
+    if phone: rows.append(("Phone", phone))
+    if address: rows.append(("Address", address))
+    if linkedin: rows.append(("LinkedIn", linkedin))
+    if scholar: rows.append(("Google Scholar", scholar))
+    if github: rows.append(("GitHub", github))
+    if personal_website: rows.append(("Personal website", personal_website))
+    rows.append(("Current location", location))
+    rows.append(("Earliest start date", start_date))
+    rows.append(("Authorized to work in their country of residence", "Yes" if work_authorized == "yes" else "No"))
+    rows.append(("Will need visa sponsorship", "Yes" if needs_sponsorship == "yes" else "No"))
+    if additional_info: rows.append(("Additional information", additional_info))
+    html_body = f"<p><b>Role:</b> {_esc(role_title or 'Unspecified')}</p>" + "".join(
+        f"<p><b>{_esc(k)}:</b> {_esc(v)}</p>" for k, v in rows
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {settings.resend_api_key}"},
+                json={
+                    "from": f"Orcus Intelligence Lab site <{settings.contact_from_email}>",
+                    "to": [settings.hr_email],
+                    "reply_to": email,
+                    "subject": f"Application: {role_title or 'Unspecified role'} — {first_name} {last_name}",
+                    "html": html_body,
+                    "attachments": attachments,
+                },
+            )
+        if resp.status_code >= 300:
+            logging.error("Resend send failed (%s): %s", resp.status_code, resp.text)
+            raise HTTPException(502, "Couldn't submit your application right now. Please try again shortly.")
+
+        # Confirmation email back to the applicant — same attachments, so they
+        # have a receipt of exactly what was submitted (and a backup copy of
+        # their own resume/cover letter, in case they don't keep one handy).
+        # Best-effort: HR already has the application at this point, so a
+        # failure here shouldn't turn into a user-facing error — just log it.
+        try:
+            confirm_html = (
+                f"<p>Hi {_esc(first_name)},</p>"
+                f"<p>Thanks for applying to <b>{_esc(role_title or 'Orcus Intelligence Lab')}</b> — "
+                f"we've received your application and will be in touch.</p>"
+                f"<p>For your records, here's a copy of what you submitted:</p>" + html_body
+            )
+            confirm_resp = await client_post_resend(
+                settings.resend_api_key,
+                {
+                    "from": f"Orcus Intelligence Lab <{settings.contact_from_email}>",
+                    "to": [email],
+                    "reply_to": settings.hr_email,
+                    "subject": f"We received your application — {role_title or 'Orcus Intelligence Lab'}",
+                    "html": confirm_html,
+                    "attachments": attachments,
+                },
+            )
+            if confirm_resp.status_code >= 300:
+                logging.error("Applicant confirmation email failed (%s): %s",
+                              confirm_resp.status_code, confirm_resp.text)
+        except httpx.HTTPError as e:
+            logging.error("Applicant confirmation email request error: %s", e)
+    except httpx.HTTPError as e:
+        logging.error("Resend request error: %s", e)
+        raise HTTPException(502, "Couldn't submit your application right now. Please try again shortly.")
+
+    return {"ok": True}
+
+
+async def client_post_resend(api_key: str, payload: dict):
+    """POST one email to Resend's send API — factored out so the
+    applicant-confirmation send in submit_job_application (a second,
+    best-effort email alongside the HR notification) doesn't duplicate the
+    request boilerplate inline."""
+    import httpx
+    async with httpx.AsyncClient(timeout=30) as client:
+        return await client.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json=payload,
+        )
+
+
 @router.get("/usage/trend")
 def usage_trend(days: int = 30, tz_offset: int = 0, user_id: str = Depends(require_user)):
     """Per-day token + cost totals for the signed-in user, plus an all-time
@@ -2072,6 +2559,191 @@ def usage_trend(days: int = 30, tz_offset: int = 0, user_id: str = Depends(requi
     getTimezoneOffset() so days are grouped in the user's local time. DB read."""
     from core.usage import get_usage_trend
     return get_usage_trend(user_id, days, tz_offset)
+
+
+@router.get("/usage/breakdown")
+def usage_breakdown(days: int = 0, project_id: str = "", model: str = "", tz_offset: int = 0,
+                    user_id: str = Depends(require_user)):
+    """Usage grouped by run, project and day for the signed-in user.
+    `days` = 0 means all time. Optional filters: `project_id` ("none" =
+    Unassigned) and `model`. `tz_offset` is the browser's getTimezoneOffset()
+    so days are bucketed in local time."""
+    from core.usage import get_usage_breakdown
+    return get_usage_breakdown(user_id, days if days > 0 else None,
+                               project_id or None, model or None, tz_offset)
+
+
+# ── Admin (owner-only) ────────────────────────────────────────────────────
+
+def _require_admin(user_id: str) -> None:
+    """403 unless the signed-in user's email is in ADMIN_EMAILS."""
+    from core.db import _conn, _PH
+    admins = {e.strip().lower() for e in settings.admin_emails.split(",") if e.strip()}
+    email = None
+    if admins:
+        with _conn() as conn:
+            row = conn.execute(f"SELECT email FROM known_users WHERE user_id = {_PH}", (user_id,)).fetchone()
+        email = dict(row)["email"].lower() if row else None
+    if not email or email not in admins:
+        raise HTTPException(403, "Admins only.")
+
+
+@router.get("/admin/me")
+def admin_me(user_id: str = Depends(require_user)):
+    """Whether to show the admin nav. Never errors for normal users."""
+    try:
+        _require_admin(user_id)
+        return {"is_admin": True}
+    except HTTPException:
+        return {"is_admin": False}
+
+
+@router.get("/admin/users")
+def admin_users(user_id: str = Depends(require_user)):
+    """Everyone who has signed in, with plan/trial status, run count and cost."""
+    _require_admin(user_id)
+    from datetime import timedelta
+    from core.db import _conn
+    from core.billing import PAID_STATUSES
+    with _conn() as conn:
+        users = [dict(r) for r in conn.execute("SELECT user_id, email, last_seen FROM known_users").fetchall()]
+        subs = {dict(r)["user_id"]: dict(r) for r in conn.execute(
+            "SELECT user_id, plan, status, trial_started_at FROM subscriptions").fetchall()}
+        runs = {dict(r)["user_id"]: dict(r)["c"] for r in conn.execute(
+            "SELECT user_id, COUNT(*) AS c FROM sessions GROUP BY user_id").fetchall()}
+        cost = {dict(r)["user_id"]: float(dict(r)["t"] or 0) for r in conn.execute(
+            "SELECT s.user_id AS user_id, SUM(c.cost_usd) AS t FROM llm_calls c "
+            "JOIN sessions s ON c.session_id = s.id GROUP BY s.user_id").fetchall()}
+    now = datetime.now(timezone.utc)
+    out = []
+    for u in users:
+        sub = subs.get(u["user_id"])
+        if not sub:
+            plan = "not started"
+        elif sub["status"] in PAID_STATUSES and sub["plan"] in ("pro", "max"):
+            plan = sub["plan"]
+        else:
+            started = datetime.fromisoformat(sub["trial_started_at"])
+            active = started + timedelta(days=settings.trial_days) > now
+            plan = "trial" if active else "free"
+        out.append({"email": u["email"], "user_id": u["user_id"], "last_seen": u["last_seen"],
+                    "plan": plan, "trial_started_at": sub["trial_started_at"] if sub else None,
+                    "runs": runs.get(u["user_id"], 0), "cost_usd": round(cost.get(u["user_id"], 0.0), 4)})
+    out.sort(key=lambda r: r["last_seen"] or "", reverse=True)
+    return {"count": len(out), "users": out}
+
+
+class AdminActionBody(BaseModel):
+    action: str            # grant_pro | grant_max | set_free | extend_trial | reset_trial | delete_data
+    days: int | None = None  # for extend_trial
+
+
+def _admin_audit(admin_id: str, action: str, target: str, detail: str = "") -> None:
+    from core.db import _conn, _PH
+    with _conn() as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS admin_audit (id TEXT PRIMARY KEY, admin_id TEXT, action TEXT, "
+            "target TEXT, detail TEXT, at TEXT)")
+        import uuid
+        conn.execute(
+            f"INSERT INTO admin_audit (id, admin_id, action, target, detail, at) VALUES ({_PH},{_PH},{_PH},{_PH},{_PH},{_PH})",
+            (uuid.uuid4().hex, admin_id, action, target, detail, datetime.now(timezone.utc).isoformat()))
+
+
+@router.post("/admin/users/{target_id}/action")
+def admin_user_action(target_id: str, body: AdminActionBody, user_id: str = Depends(require_user)):
+    """Owner-only account actions. Every call is written to admin_audit.
+    Subscribers can't reach this: _require_admin 403s anyone not in ADMIN_EMAILS."""
+    _require_admin(user_id)
+    from datetime import timedelta
+    from core.db import _conn, _PH
+    from core import billing
+
+    with _conn() as conn:
+        row = conn.execute(f"SELECT email FROM known_users WHERE user_id = {_PH}", (target_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Unknown user.")
+    email = dict(row)["email"]
+    act = body.action
+    sub = billing._get_or_create(target_id)
+
+    if act in ("grant_pro", "grant_max"):
+        billing._set(target_id, plan="pro" if act == "grant_pro" else "max", status="active")
+    elif act == "set_free":
+        billing._set(target_id, plan="free", status="none")
+    elif act == "extend_trial":
+        d = body.days or 0
+        if not 1 <= d <= 365:
+            raise HTTPException(400, "days must be 1-365.")
+        started = datetime.fromisoformat(sub["trial_started_at"]) + timedelta(days=d)
+        # Moving the start later extends the deadline AND restarts the credit
+        # window (credits are counted from trial_started_at).
+        billing._set(target_id, trial_started_at=started.isoformat())
+    elif act == "reset_trial":
+        billing._set(target_id, trial_started_at=datetime.now(timezone.utc).isoformat())
+    elif act == "delete_data":
+        if target_id == user_id:
+            raise HTTPException(400, "Use 'Delete all my data' for your own account.")
+        delete_all_for_user(target_id)
+        with _conn() as conn:
+            conn.execute(f"DELETE FROM subscriptions WHERE user_id = {_PH}", (target_id,))
+            conn.execute(f"DELETE FROM known_users WHERE user_id = {_PH}", (target_id,))
+    else:
+        raise HTTPException(400, "Unknown action.")
+
+    _admin_audit(user_id, act, target_id, f"{email} days={body.days}")
+    return {"ok": True}
+
+
+# ── Plans, free trial & Stripe ────────────────────────────────────────────
+
+@router.get("/billing/status")
+def billing_status(user_id: str = Depends(require_user)):
+    """Plan, trial progress and which upgrade links are configured."""
+    from core.billing import get_entitlement
+    return get_entitlement(user_id)
+
+
+@router.get("/billing/checkout")
+def billing_checkout(plan: str, user_id: str = Depends(require_user)):
+    """The Stripe Payment Link for `plan`, tagged with this user's id so the
+    webhook knows who paid."""
+    from core.billing import checkout_url
+    if plan not in ("pro", "max"):
+        raise HTTPException(400, "Unknown plan.")
+    email = None
+    try:
+        from core.db import _conn, _PH
+        with _conn() as conn:
+            row = conn.execute(f"SELECT email FROM known_users WHERE user_id = {_PH}", (user_id,)).fetchone()
+        email = dict(row)["email"] if row else None
+    except Exception:  # noqa: BLE001
+        pass
+    url = checkout_url(user_id, email, plan)
+    if not url:
+        raise HTTPException(503, "Checkout isn't set up yet.")
+    return {"url": url}
+
+
+@router.post("/billing/webhook")
+async def billing_webhook(request: Request):
+    """Stripe -> us. No user auth; authenticity comes from the signature."""
+    from core.billing import handle_stripe_event, verify_stripe_signature
+    if not settings.stripe_webhook_secret:
+        raise HTTPException(503, "Webhook not configured.")
+    payload = await request.body()
+    if not verify_stripe_signature(payload, request.headers.get("stripe-signature", ""),
+                                   settings.stripe_webhook_secret):
+        raise HTTPException(400, "Bad signature.")
+    try:
+        event = json.loads(payload)
+    except ValueError:
+        raise HTTPException(400, "Bad payload.")
+    outcome = await asyncio.to_thread(handle_stripe_event, event)
+    logging.getLogger("sift.billing").info("stripe %s -> %s", event.get("type"), outcome)
+    if outcome == "unmapped":
+        raise HTTPException(409, "Customer not linked yet; retry.")
+    return {"ok": True, "outcome": outcome}
 
 
 @router.get("/modes")

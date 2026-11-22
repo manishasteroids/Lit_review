@@ -26,8 +26,10 @@ from agents.hypothesis_results_check import HypothesisResultsCheckAgent
 from api.routes import get_run
 from core.auth import require_user
 from core.config import settings
+from core.db import get_session
 from core.hypothesis_db import (create_hypothesis_run, get_hypothesis_run,
-                                 list_hypothesis_runs, update_hypothesis_run_data)
+                                 get_staleness, list_hypothesis_runs,
+                                 update_hypothesis_run_data)
 from core.llm_client import LLMClient
 from hypothesis_agent.pipeline import run_hypothesis_pipeline
 
@@ -52,6 +54,10 @@ class CreateHypothesisRunBody(BaseModel):
 @router.post("/runs/stream")
 async def create_run_stream(body: CreateHypothesisRunBody, user_id: str = Depends(require_user)):
     source = get_run(body.source_run_id, user_id)  # fast, no LLM — validates ownership first
+    # Snapshot the source session's project (if any) so this run can be found
+    # by project later, and so get_staleness() can watch the whole project
+    # instead of just this one session — see core/hypothesis_db.py.
+    project_id = (get_session(body.source_run_id, user_id) or {}).get("project_id")
 
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_event_loop()
@@ -79,6 +85,7 @@ async def create_run_stream(body: CreateHypothesisRunBody, user_id: str = Depend
                 source_topic=source.topic,
                 status="done",
                 data=result,
+                project_id=project_id,
             )
             await queue.put({"type": "done", "run": saved})
         except ValueError as e:
@@ -107,6 +114,7 @@ def create_run(body: CreateHypothesisRunBody, user_id: str = Depends(require_use
     Sift session. Reads that session's topic/extractions/synthesis once;
     never touches the Sift session again."""
     source = get_run(body.source_run_id, user_id)
+    project_id = (get_session(body.source_run_id, user_id) or {}).get("project_id")
 
     try:
         result = run_hypothesis_pipeline(
@@ -128,6 +136,7 @@ def create_run(body: CreateHypothesisRunBody, user_id: str = Depends(require_use
         source_topic=source.topic,
         status="done",
         data=result,
+        project_id=project_id,
     )
     return saved
 
@@ -137,12 +146,29 @@ def get_run_detail(hyp_run_id: str, user_id: str = Depends(require_user)):
     run = get_hypothesis_run(hyp_run_id, user_id)
     if not run:
         raise HTTPException(404, "Hypothesis run not found.")
+    # Cross-pipeline staleness (architecture doc: "flag downstream as stale,
+    # don't auto-regenerate or ignore") -- same "stale" language/pattern the
+    # in-pipeline dispute flows already use (see hypothesis_agent_architecture.md
+    # §6-8), extended to the Lit Review -> Hypothesis handoff.
+    run["staleness"] = get_staleness(run)
     return run
 
 
 @router.get("/runs")
-def list_runs(source_run_id: str | None = None, user_id: str = Depends(require_user)):
-    return {"runs": list_hypothesis_runs(user_id, source_run_id)}
+def list_runs(
+    source_run_id: str | None = None,
+    project_id: str | None = None,
+    user_id: str = Depends(require_user),
+):
+    """project_id backs the sidebar's Hypothesis Generation entry point
+    (Flow B, architecture doc): every hypothesis run ever generated from a
+    Lit Review session filed under that project, newest first, each flagged
+    stale or not -- so the picker can show "already have hypotheses for
+    this project (stale)" instead of starting from zero."""
+    runs = list_hypothesis_runs(user_id, source_run_id, project_id)
+    for r in runs:
+        r["staleness"] = get_staleness(r)
+    return {"runs": runs}
 
 
 # ── User-supplied results: the human-in-the-loop path ──────────────────────
@@ -489,3 +515,48 @@ def apply_dispute(hyp_run_id: str, body: ApplyDisputeBody, user_id: str = Depend
     if not updated:
         raise HTTPException(404, "Hypothesis run not found.")
     return updated
+
+
+@router.get("/runs/{hyp_run_id}/export/{fmt}")
+def export_hypothesis_run(hyp_run_id: str, fmt: str, user_id: str = Depends(require_user)):
+    """Download a Hypothesis Agent run's hypotheses + experiment plans as
+    .docx or .pdf. Reuses the exporters the (retired) Methods tab used --
+    same document, built locally with no LLM cost -- fed from this run's own
+    plan and critique, with the SOURCE Sift run read only for the papers and
+    extractions behind the evidence-trail table."""
+    from fastapi.responses import Response
+    from api.routes import _ordered_for_export, _safe_filename
+    from core import exporters
+
+    run = get_hypothesis_run(hyp_run_id, user_id)
+    if not run:
+        raise HTTPException(404, "Hypothesis run not found.")
+    d = run["data"] or {}
+    plan = d.get("plan") or {}
+    if not plan.get("hypotheses"):
+        raise HTTPException(400, "This run has no hypotheses to export.")
+    source = get_run(run["source_run_id"], user_id)
+    papers = _ordered_for_export(source)
+    topic = d.get("topic") or source.topic or "hypotheses"
+    stem = _safe_filename(topic) + "_hypotheses"
+
+    try:
+        if fmt == "docx":
+            content = exporters.build_experiments_docx(topic, plan, papers, source.extractions, d.get("critique"))
+            media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        elif fmt == "pdf":
+            content = exporters.build_experiments_pdf(topic, plan, papers, source.extractions, d.get("critique"))
+            media = "application/pdf"
+        else:
+            raise HTTPException(400, "Unsupported format. Use docx or pdf.")
+    except ImportError as e:
+        raise HTTPException(500, f"Export dependency missing: {e}. Run: pip install -r requirements.txt")
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"Export failed: {e}")
+
+    return Response(
+        content=content, media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{stem}.{fmt}"'},
+    )

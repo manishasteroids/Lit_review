@@ -251,7 +251,7 @@ class AcademicSearchAgent(Agent):
         doi = doi.strip().lower()
         with httpx.Client(timeout=25, headers=UA, follow_redirects=True) as client:
             r = client.get(f"{OPENALEX_API}/doi:{doi}",
-                           params={"mailto": _mailto()})
+                           params=_oa())
             if r.status_code != 200:
                 return []
             w = r.json()
@@ -301,7 +301,7 @@ class AcademicSearchAgent(Agent):
         out = []
         with httpx.Client(timeout=25, headers=UA, follow_redirects=True) as client:
             r = client.get(OPENALEX_API, params={
-                "search": title, "per_page": 6, "mailto": _mailto()})
+                "search": title, "per_page": 6, **_oa()})
             if r.status_code != 200:
                 return []
             for w in (r.json().get("results") or []):
@@ -315,7 +315,7 @@ class AcademicSearchAgent(Agent):
         with httpx.Client(timeout=25, headers=UA, follow_redirects=True) as client:
             for q in terms[:3]:
                 try:
-                    r = client.get(OPENALEX_API, params={"search": q, "per_page": 30, "mailto": _mailto()})
+                    r = client.get(OPENALEX_API, params={"search": q, "per_page": 30, **_oa()})
                     r.raise_for_status()
                     results = r.json().get("results") or []
                 except Exception:
@@ -595,6 +595,14 @@ def _classify_identifier(q: str) -> tuple[str, str]:
  
 def _mailto() -> str:
     return getattr(settings, "unpaywall_email", "") or "research@example.com"
+
+
+def _oa() -> dict:
+    """OpenAlex params: contact email plus the API key OpenAlex now requires."""
+    p = {"mailto": _mailto()}
+    if getattr(settings, "openalex_api_key", ""):
+        p["api_key"] = settings.openalex_api_key
+    return p
  
  
 def _pubmed_base() -> dict:

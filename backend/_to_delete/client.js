@@ -1,0 +1,981 @@
+import { getAccessToken, refreshAccessToken } from "../supabase.js";
+
+const BASE = import.meta.env.VITE_API_BASE || "http://localhost:8015";
+
+// Attach the signed-in user's token so the backend scopes data to them.
+async function authHeaders(extra = {}) {
+  const token = await getAccessToken();
+  return token ? { ...extra, Authorization: `Bearer ${token}` } : extra;
+}
+
+// Requests that call an LLM can legitimately take a while (large corpora,
+// Deep mode), but must never hang forever — a stalled call should surface an
+// error the UI can show, not spin indefinitely. 75s covers a slow single-call
+// answer over many sources with headroom.
+const REQUEST_TIMEOUT_MS = 75_000;
+
+// The Writer agent isn't one call — it writes title/abstract/intro/synthesis/
+// gaps/future as 6 sequential LLM calls in one request so each section stays
+// focused. Even at a normal ~10-15s per call that's over a minute end-to-end,
+// so it needs real headroom instead of the single-call timeout tripping on
+// ordinary latency. A large source count (40-50 papers) means a bigger corpus
+// block on every one of those 6 calls, and if the account is anywhere near an
+// Anthropic rate limit the SDK's own internal retry/backoff can silently add
+// tens of seconds PER call — so this needs real headroom even outside Deep
+// mode. Deep mode writes meaningfully longer sections on top of that (up to
+// 3000 output tokens each, on Opus), so it gets the largest allowance.
+const WRITE_TIMEOUT_MS = 360_000;
+const WRITE_TIMEOUT_MS_DEEP = 600_000;
+
+// Same problem as the Writer, one flight up: refine_experiments() chains
+// design (1 call) -> critique (1 call) -> refine EACH weak hypothesis (up to
+// 2 calls) -> critique again -> refine again, up to 2 rounds — worst case 7
+// sequential Claude calls in one request. The default 75s timeout trips on
+// that well before anything is actually wrong (see "Hypothesis Refinement
+// failed: Timed out" — that was this, not a real backend hang).
+const REFINE_TIMEOUT_MS = 300_000;
+
+// Paper chat is a single LLM call, but not always a cheap one: "Report" and
+// "Diagram" chips (and any figure/table question) attach the FULL PDF and,
+// in Deep mode, run it through Sonnet — that alone can take well past 75s on
+// a long paper, especially with any provider-side latency. The generic 75s
+// budget was tripping on ordinary Deep-mode latency and showing a misleading
+// "may be rate-limited" message for what was really just a slow-but-healthy
+// call. Quick mode (Gemini, abstract/text only) rarely needs this long, but
+// giving both modes the same headroom is simplest and costs nothing when the
+// call finishes early anyway.
+const CHAT_TIMEOUT_MS = 180_000;
+
+// Authenticated GET with the same 401-refresh-retry + real error surfacing as
+// request() below — several GET endpoints (usage trend, etc.) used to bypass
+// this with a raw fetch(...).then(r => r.json()), so an expired token (or any
+// non-2xx) just resolved with a wrong-shaped body or silently rejected,
+// leaving the caller's .catch(() => {}) with nothing to show the user and a
+// whole UI section (e.g. the usage trend charts) quietly vanishing.
+async function getJSON(path) {
+  const send = async () => fetch(BASE + path, { headers: await authHeaders() });
+  let res = await send();
+  if (res.status === 401 && (await refreshAccessToken())) {
+    res = await send();
+  }
+  if (!res.ok) {
+    let detail = "Request failed (" + res.status + ")";
+    try {
+      const j = await res.json();
+      if (j.detail) detail = j.detail;
+    } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// Same 401-refresh-retry pattern as getJSON, but for a binary body (the
+// paper PDF viewer needs raw bytes, not JSON) — used by api.getPaperPdf().
+async function getBinary(path) {
+  const send = async () => fetch(BASE + path, { headers: await authHeaders() });
+  let res = await send();
+  if (res.status === 401 && (await refreshAccessToken())) {
+    res = await send();
+  }
+  if (!res.ok) {
+    let detail = res.status === 404
+      ? "No open-access PDF found for this paper."
+      : "Request failed (" + res.status + ")";
+    try {
+      const j = await res.json();
+      if (j.detail) detail = j.detail;
+    } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.arrayBuffer();
+}
+
+// Same 401-refresh-retry pattern as getJSON, but DELETE with no body.
+async function del(path) {
+  const send = async () => fetch(BASE + path, { method: "DELETE", headers: await authHeaders() });
+  let res = await send();
+  if (res.status === 401 && (await refreshAccessToken())) {
+    res = await send();
+  }
+  if (!res.ok) {
+    let detail = "Request failed (" + res.status + ")";
+    try {
+      const j = await res.json();
+      if (j.detail) detail = j.detail;
+    } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+async function patch(path, body) {
+  const send = async () => fetch(BASE + path, {
+    method: "PATCH",
+    headers: await authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body || {}),
+  });
+  let res = await send();
+  if (res.status === 401 && (await refreshAccessToken())) {
+    res = await send();
+  }
+  if (!res.ok) {
+    let detail = "Request failed (" + res.status + ")";
+    try {
+      const j = await res.json();
+      if (j.detail) detail = j.detail;
+    } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+async function request(path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const send = async () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      return await fetch(BASE + path, {
+        method: "POST",
+        headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(body || {}),
+        signal: ctrl.signal,
+      });
+    } catch (e) {
+      if (e.name === "AbortError") {
+        throw new Error("Timed out waiting for a response. The model may be rate-limited — try again in a moment.");
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  let res = await send();
+  // A 401 usually means the access token expired mid-session — refresh once and
+  // retry before surfacing an error to the user.
+  if (res.status === 401 && (await refreshAccessToken())) {
+    res = await send();
+  }
+  if (!res.ok) {
+    let detail = "Request failed (" + res.status + ")";
+    try {
+      const j = await res.json();
+      if (j.detail) detail = j.detail;
+    } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// Multipart POST for file uploads (Sources > "Upload a file") — same
+// 401-refresh-retry + error surfacing as request(), but the body is
+// FormData so the browser sets its own Content-Type (multipart boundary).
+async function postForm(path, formData, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const send = async () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      return await fetch(BASE + path, {
+        method: "POST",
+        headers: await authHeaders(),
+        body: formData,
+        signal: ctrl.signal,
+      });
+    } catch (e) {
+      if (e.name === "AbortError") {
+        throw new Error("Timed out waiting for a response. Try again in a moment.");
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  let res = await send();
+  if (res.status === 401 && (await refreshAccessToken())) {
+    res = await send();
+  }
+  if (!res.ok) {
+    let detail = "Request failed (" + res.status + ")";
+    try {
+      const j = await res.json();
+      if (j.detail) detail = j.detail;
+    } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// Generic SSE POST: calls onEvent for each streamed event, resolves with the
+// final "done" event, throws on "error". Used by search + synthesize streams.
+async function streamPost(path, body, onEvent) {
+  const send = async () =>
+    fetch(BASE + path, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body || {}),
+    });
+  let res = await send();
+  // Refresh an expired token once and retry, so a long-open tab doesn't fail
+  // the whole run with "please sign in again".
+  if (res.status === 401 && (await refreshAccessToken())) {
+    res = await send();
+  }
+  if (!res.ok) {
+    let detail = "Request failed (" + res.status + ")";
+    try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
+    throw new Error(detail);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop(); // keep incomplete last line
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      const event = JSON.parse(line.slice(6));
+      onEvent(event);
+      if (event.type === "error") throw new Error(event.message);
+      if (event.type === "done") return event;
+    }
+  }
+}
+
+/**
+ * Stream progress events from the search stage via SSE.
+ */
+function streamRun(topic, apiKey, model, mode, onEvent, projectId) {
+  return streamPost("/api/runs/stream",
+    { topic, api_key: apiKey || undefined, model, mode, project_id: projectId || undefined }, onEvent);
+}
+
+/* One function per pipeline stage — mirrors backend/api/routes.py 1:1 */
+export const api = {
+  createRunStream: streamRun,
+
+  // Home page's "Discuss with Sift AI" box -- one cheap LLM call, not the
+  // Literature Review pipeline (see api/quick-ask on the backend). No run
+  // is created and nothing is filed under a project. scope="projects" also
+  // searches the user's own projects/notes/runs and does a brief live web
+  // lookup, then answers on the open-weight model instead of Gemini.
+  // `history` = earlier turns of the same conversation ([{question, answer}]),
+  // so a follow-up question is understood in context.
+  quickAsk: (question, { apiKey, scope, history } = {}) =>
+    request("/api/quick-ask", { question, api_key: apiKey || undefined, scope: scope || "general",
+      history: history && history.length ? history : undefined }),
+
+  // Last few days of this user's Home-page quick-ask searches (auto-expires
+  // on the backend -- see core/quick_ask_history.py), so they can reopen one
+  // instead of retyping it.
+  quickAskHistory: () => getJSON("/api/quick-ask/history"),
+  // New papers in the user's own research areas (cached a day server-side).
+  getFrontier: (refresh) => getJSON(`/api/frontier${refresh ? "?refresh=true" : ""}`),
+  // Scholars / laboratories the user follows and their new papers (core/watch.py).
+  getWatchlist: (refresh) => getJSON(`/api/watch${refresh ? "?refresh=true" : ""}`),
+  watchSearch: (kind, q, institution) => getJSON(`/api/watch/search?kind=${encodeURIComponent(kind)}&q=${encodeURIComponent(q)}${institution ? `&institution=${encodeURIComponent(institution)}` : ""}`),
+  suggestLabMembers: (institution, topic) => getJSON(`/api/watch/suggest-members?institution=${encodeURIComponent(institution)}&topic=${encodeURIComponent(topic)}`),
+  createLab: (body) => request("/api/watch/group", body),
+  labFromUrl: (url) => getJSON(`/api/watch/from-url?url=${encodeURIComponent(url)}`),
+  updateLab: (id, body) => request(`/api/watch/group/${id}`, body),
+  follow: (body) => request("/api/watch", body),
+  unfollow: (id) => del(`/api/watch/${id}`),
+  watchSeen: (id) => request(`/api/watch/seen${id ? `?fid=${encodeURIComponent(id)}` : ""}`, {}),
+  deleteQuickAskHistory: (id) => del(`/api/quick-ask/history/${id}`),
+
+  // Studio-only entry: a run with no search — just a place to upload your
+  // own PDFs/DOCX/PPTX and use Studio (chat/report/deck) directly, without
+  // the reformulate -> search -> filter -> write pipeline.
+  createBlankRun: (topic, projectId) =>
+    request("/api/runs/blank", { topic: topic || undefined, project_id: projectId || undefined }),
+
+  filterPapers: (runId, approvedIndices) =>
+    request(`/api/runs/${runId}/filter`, { approved_indices: approvedIndices }),
+
+  synthesize: (runId, apiKey, model, notes) =>
+    request(`/api/runs/${runId}/synthesize`, { api_key: apiKey, model, notes }),
+
+  // Streamed extract + synthesize — rows tick in as each batch is read.
+  synthesizeStream: (runId, apiKey, model, notes, onEvent) =>
+    streamPost(`/api/runs/${runId}/synthesize/stream`,
+      { api_key: apiKey, model, notes }, onEvent),
+
+  write: (runId, apiKey, model, notes, mode) =>
+    request(`/api/runs/${runId}/write`, { api_key: apiKey, model, notes },
+      mode === "deep" ? WRITE_TIMEOUT_MS_DEEP : WRITE_TIMEOUT_MS),
+
+  evaluate: (runId, apiKey, model) =>
+    request(`/api/runs/${runId}/evaluate`, { api_key: apiKey, model }),
+
+  // Raw PDF bytes for the in-app read-only viewer (Phase 1 of paper
+  // annotation). Throws with a friendly message on 404 (no open-access copy).
+  getPaperPdf: (runId, idx) =>
+    getBinary(`/api/runs/${runId}/papers/${idx}/pdf`),
+
+  // Phase 2 — highlights/underlines/comments made while reading a paper.
+  listAnnotations: (runId, idx) =>
+    getJSON(`/api/runs/${runId}/papers/${idx}/annotations`),
+
+  addAnnotation: (runId, idx, { kind, page, rects, color, snippet, comment }) =>
+    request(`/api/runs/${runId}/papers/${idx}/annotations`,
+      { kind, page, rects, color, snippet, comment }),
+
+  deleteAnnotation: (runId, idx, annotationId) =>
+    del(`/api/runs/${runId}/papers/${idx}/annotations/${annotationId}`),
+
+  // Reposition an existing annotation (currently used for dragging text
+  // notes to a new spot on the page) — only `rects` moves, everything else
+  // about the mark stays the same.
+  moveAnnotation: (runId, idx, annotationId, rects) =>
+    patch(`/api/runs/${runId}/papers/${idx}/annotations/${annotationId}`, { rects }),
+
+  designExperiments: (runId, apiKey, model) =>
+    request(`/api/runs/${runId}/experiments`, { api_key: apiKey, model }),
+
+  refineExperiments: (runId, apiKey, model) =>
+    request(`/api/runs/${runId}/experiments/refine`, { api_key: apiKey, model },
+      REFINE_TIMEOUT_MS),
+
+  // Direct human edit to one hypothesis — instant, no LLM call.
+  updateHypothesis: async (runId, index, edits) =>
+    fetch(BASE + `/api/runs/${runId}/experiments/${index}`, {
+      method: "PATCH",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ edits }),
+    }).then((r) => r.json()),
+
+  // Argue with a hypothesis — the designer either revises it or defends it
+  // with a specific counter-reason. One LLM call, but give it real headroom
+  // for the same reason as Refine (rate-limit retries can add tens of
+  // seconds on top of ordinary latency).
+  disputeHypothesis: (runId, index, argument, apiKey, model) =>
+    request(`/api/runs/${runId}/experiments/${index}/dispute`,
+      { argument, api_key: apiKey, model }, 120_000),
+
+  // Download the hypothesis + experiment plan as .docx or .pdf — same
+  // generated-from-existing-content, no-LLM-cost approach as downloadExport.
+  // Same download as downloadExperimentsExport below, for an Infinity
+  // (Hypothesis Agent) run instead of a Sift run's Methods plan.
+  downloadHypothesisExport: async (hypRunId, fmt) => {
+    const res = await fetch(`${BASE}/api/hypothesis/runs/${hypRunId}/export/${fmt}`, {
+      headers: await authHeaders(),
+    });
+    if (!res.ok) {
+      let detail = `Export failed (${res.status})`;
+      try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="?([^"]+)"?/.exec(cd);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = m ? m[1] : `hypotheses.${fmt}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
+  // ── Publish step (backend/api/manuscript_routes.py). Every call returns
+  // the whole manuscript, so the panel just swaps its state for the result.
+  openManuscript: (sourceRunId, hypRunId) =>
+    request("/api/manuscripts/open", { source_run_id: sourceRunId, hyp_run_id: hypRunId }),
+  patchManuscript: (id, body) => patch(`/api/manuscripts/${id}`, body),
+  uploadManuscriptTemplate: (id, file, apiKey, model) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (apiKey) fd.append("api_key", apiKey);
+    if (model) fd.append("model", model);
+    return postForm(`/api/manuscripts/${id}/template`, fd, WRITE_TIMEOUT_MS);
+  },
+  setManuscriptGuidelines: (id, url, apiKey, model) =>
+    request(`/api/manuscripts/${id}/guidelines`, { url, api_key: apiKey, model }, WRITE_TIMEOUT_MS),
+  uploadManuscriptGuidelinesFile: (id, file, apiKey, model) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (apiKey) fd.append("api_key", apiKey);
+    if (model) fd.append("model", model);
+    return postForm(`/api/manuscripts/${id}/guidelines/file`, fd, WRITE_TIMEOUT_MS);
+  },
+  removeManuscriptGuidelinesFile: (id) => del(`/api/manuscripts/${id}/guidelines/file`),
+  rebuildManuscriptSpec: (id, apiKey, model) =>
+    request(`/api/manuscripts/${id}/spec/rebuild`, { api_key: apiKey, model }, WRITE_TIMEOUT_MS),
+  uploadManuscriptFile: (id, file, description) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("description", description || "");
+    return postForm(`/api/manuscripts/${id}/files`, fd, WRITE_TIMEOUT_MS);
+  },
+  // An object URL for a drawn diagram or uploaded figure (needs the auth
+  // header, so it can't be a plain <img src>). Caller revokes it.
+  getManuscriptImageUrl: async (id, fileId) =>
+    URL.createObjectURL(new Blob([await getBinary(`/api/manuscripts/${id}/files/${fileId}/image`)], { type: "image/png" })),
+  patchManuscriptFile: (id, fileId, body) => patch(`/api/manuscripts/${id}/files/${fileId}`, body),
+  deleteManuscriptFile: (id, fileId) => del(`/api/manuscripts/${id}/files/${fileId}`),
+  // One request writes every section (in parallel server-side), so it gets
+  // the long Writer timeout rather than the single-call one.
+  generateManuscript: (id, apiKey, model) =>
+    request(`/api/manuscripts/${id}/generate`, { api_key: apiKey, model }, WRITE_TIMEOUT_MS_DEEP),
+  resetManuscript: (id) => request(`/api/manuscripts/${id}/reset`, {}),
+  // The paper as Word bytes for the in-app viewer -- allowed before approval.
+  getManuscriptPreview: (id) => getBinary(`/api/manuscripts/${id}/download?preview=true`),
+  // fmt ("docx" | "latex") only matters when no template was uploaded: it
+  // picks which standard layout to build.
+  downloadManuscript: async (id, fmt) => {
+    const res = await fetch(`${BASE}/api/manuscripts/${id}/download${fmt ? `?fmt=${fmt}` : ""}`, { headers: await authHeaders() });
+    if (!res.ok) {
+      let detail = `Download failed (${res.status})`;
+      try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const m = /filename="?([^"]+)"?/.exec(res.headers.get("Content-Disposition") || "");
+    const fallback = blob.type.includes("zip") ? "manuscript.zip" : "manuscript.docx";
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = m ? m[1] : fallback;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
+  downloadExperimentsExport: async (runId, fmt) => {
+    const res = await fetch(`${BASE}/api/runs/${runId}/experiments/export/${fmt}`, {
+      headers: await authHeaders(),
+    });
+    if (!res.ok) {
+      let detail = `Export failed (${res.status})`;
+      try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="?([^"]+)"?/.exec(cd);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = m ? m[1] : `experiments.${fmt}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  },
+
+  // Sources-page editing
+  resolvePaper: (runId, identifier) =>
+    request(`/api/runs/${runId}/resolve`, { identifier }),
+
+  addPaper: (runId, paper, apiKey, model, notes) =>
+    request(`/api/runs/${runId}/add_paper`, { paper, api_key: apiKey, model, notes }),
+
+  // Add a source from a local PDF/DOCX file — extraction runs server-side in
+  // the same call, so this returns {paper, extraction} just like addPaper.
+  uploadPaper: (runId, file, apiKey, model, notes, titleOverride) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (apiKey) fd.append("api_key", apiKey);
+    if (model) fd.append("model", model);
+    if (notes) fd.append("notes", JSON.stringify(notes));
+    // Title is guessed from the extracted text when omitted — a heuristic
+    // that has no real notion of "title" vs. "author line" and can merge or
+    // truncate wrong. Letting the user type the real one skips the guess
+    // entirely instead of asking them to fix a wrong title after the fact.
+    if (titleOverride && titleOverride.trim()) fd.append("title", titleOverride.trim());
+    return postForm(`/api/runs/${runId}/upload_paper`, fd, WRITE_TIMEOUT_MS);
+  },
+
+  // Authoritative snapshot of a run's current state — used to reconcile the
+  // UI after an upload that reports "Failed to fetch": that's a raw network
+  // failure (the connection dropped), not an application error, and the
+  // request can easily have finished server-side anyway (the paper added and
+  // persisted) even though the response never made it back. Without this,
+  // the source is invisible in the UI until a hard refresh, and a retry just
+  // reports "already in your sources" against a paper you can't see or undo.
+  getRunState: (runId) => getJSON(`/api/runs/${runId}`),
+
+  reanalyze: (runId, includedIndices, apiKey, model, notes) =>
+    request(`/api/runs/${runId}/reanalyze`, {
+      included_indices: includedIndices, api_key: apiKey, model, notes,
+    }),
+
+  chatAboutPaper: (runId, paper, question, history, apiKey, model, images, chatMode) =>
+    request(`/api/runs/${runId}/chat`, {
+      paper_idx: paper?.idx,
+      paper,
+      question,
+      history: history || [],
+      images: images || [],
+      api_key: apiKey,
+      model,
+      chat_mode: chatMode,
+    }, CHAT_TIMEOUT_MS),
+
+  assessPaper: (runId, paper, scope, apiKey, model) =>
+    request(`/api/runs/${runId}/assess`, {
+      paper_idx: paper?.idx,
+      paper,
+      scope,
+      api_key: apiKey,
+      model,
+    }),
+
+  // ── Studio: multi-paper chat + artifacts ────────────────────────────────
+  studioChat: (runId, question, paperIdxs, history, chatMode, apiKey) =>
+    request(`/api/runs/${runId}/studio/chat`, {
+      question, paper_idxs: paperIdxs || [], history: history || [],
+      chat_mode: chatMode, api_key: apiKey,
+    }),
+
+  studioArtifact: (runId, artifact, paperIdxs, chatMode, apiKey) =>
+    request(`/api/runs/${runId}/studio/${artifact}`, {
+      question: "", paper_idxs: paperIdxs || [], chat_mode: chatMode, api_key: apiKey,
+    }),
+
+  // Studio chat history (per run, scoped to the user) — no LLM calls
+  getStudioHistory: async (runId) =>
+    fetch(BASE + `/api/runs/${runId}/studio/history`, { headers: await authHeaders() })
+      .then((r) => (r.ok ? r.json() : { messages: [] })).catch(() => ({ messages: [] })),
+  saveStudioHistory: async (runId, messages) =>
+    fetch(BASE + `/api/runs/${runId}/studio/history`, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ messages: messages || [] }),
+    }).then((r) => (r.ok ? r.json() : { ok: false })).catch(() => ({ ok: false })),
+
+  // Download a generated Studio artifact — no extra model cost
+  studioExport: async (runId, fmt, content, title, paperIdxs) => {
+    const res = await fetch(`${BASE}/api/runs/${runId}/studio/export/${fmt}`, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ content, title, paper_idxs: paperIdxs || [] }),
+    });
+    if (!res.ok) {
+      let detail = `Export failed (${res.status})`;
+      try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="?([^"]+)"?/.exec(cd);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = m ? m[1] : `studio.${fmt}`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  },
+
+  // Download the written review as pptx / pdf / docx (template: ieee | arxiv).
+  // Generated server-side from existing content — no LLM cost, UNLESS
+  // `illustrate` is set (pptx only): that's an explicit opt-in that generates
+  // one AI image per section and costs real money — see ExportBar.jsx's cost
+  // disclosure before this is ever called with illustrate=true. Images are
+  // cached server-side per run, so re-downloading doesn't recharge.
+  downloadExport: async (runId, fmt, template, illustrate) => {
+    const params = new URLSearchParams();
+    if (template) params.set("template", template);
+    if (illustrate) params.set("illustrate", "true");
+    const qs = params.toString() ? `?${params.toString()}` : "";
+    const res = await fetch(`${BASE}/api/runs/${runId}/export/${fmt}${qs}`, {
+      headers: await authHeaders(),
+    });
+    if (!res.ok) {
+      let detail = `Export failed (${res.status})`;
+      try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="?([^"]+)"?/.exec(cd);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = m ? m[1] : `review.${fmt}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  },
+
+  // Download the papers TABLE (not the written review) as CSV/XLSX — works
+  // at the Filter stage (extraction columns just come back blank) or the
+  // Sources stage. `included` (idx -> bool) is optional; pass the Filter
+  // page's live checkbox state so the export reflects what's on screen even
+  // before "Review N papers" has been submitted to the backend.
+  downloadPaperList: async (runId, fmt, included) => {
+    const res = await fetch(`${BASE}/api/runs/${runId}/papers/export`, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ fmt, included: included || null }),
+    });
+    if (!res.ok) {
+      let detail = `Export failed (${res.status})`;
+      try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="?([^"]+)"?/.exec(cd);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = m ? m[1] : `papers.${fmt}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  },
+
+  // Public science/AI news for the landing page — no auth, no LLM, cached server-side
+  getNews: () =>
+    fetch(BASE + "/api/news").then((r) => (r.ok ? r.json() : { items: [] }))
+      .catch(() => ({ items: [] })),
+
+  // Researcher profile (display name, ORCID, Google Scholar) — no LLM calls
+  getProfile: async () =>
+    fetch(BASE + "/api/profile", { headers: await authHeaders() })
+      .then((r) => (r.ok ? r.json() : {})).catch(() => ({})),
+  saveProfile: (data) => request("/api/profile", data),
+
+  // Per-paper chat history (keyed by paper URL, scoped to the user) — no LLM calls
+  getChatHistory: async (paperKey) =>
+    fetch(BASE + "/api/chat/history?paper_key=" + encodeURIComponent(paperKey || ""),
+      { headers: await authHeaders() }).then((r) => (r.ok ? r.json() : { messages: [] })),
+  saveChatHistory: async (paperKey, messages) =>
+    fetch(BASE + "/api/chat/history", {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ paper_key: paperKey, messages: messages || [] }),
+    }).then((r) => (r.ok ? r.json() : { ok: false })).catch(() => ({ ok: false })),
+
+  // Search modes for the selector — no LLM calls
+  getModes: () => fetch(BASE + "/api/modes").then((r) => r.json()),
+
+  // Which model each pipeline stage runs on, given a mode — no LLM calls
+  pipelineModels: (model, mode) =>
+    fetch(BASE + "/api/pipeline/models?model=" + encodeURIComponent(model || "") +
+      "&mode=" + encodeURIComponent(mode || "")).then((r) => r.json()),
+
+  // Token usage & cost for a session — no LLM calls
+  getUsage: (runId) => getJSON("/api/sessions/" + runId + "/usage"),
+
+  // Per-day token + cost trend for the signed-in user (grouped in local time)
+  getUsageTrend: (days = 30) =>
+    getJSON("/api/usage/trend?days=" + days + "&tz_offset=" + new Date().getTimezoneOffset()),
+
+  // Plan, free-trial progress, and which Stripe upgrade links are configured
+  getBillingStatus: () => getJSON("/api/billing/status"),
+  // Stripe Payment Link for "pro" | "max", tagged with this user's id
+  getCheckoutUrl: (plan) => getJSON("/api/billing/checkout?plan=" + encodeURIComponent(plan)),
+
+  // Usage grouped by run + by project; days=0 → all time
+  getUsageBreakdown: (days = 0, projectId = "", model = "") =>
+    getJSON(
+      "/api/usage/breakdown?days=" + days +
+      "&project_id=" + encodeURIComponent(projectId || "") +
+      "&model=" + encodeURIComponent(model || "") +
+      "&tz_offset=" + new Date().getTimezoneOffset()
+    ),
+
+  // ── Projects: folder a line of research (runs + saved papers + notes) ──
+  listProjects: async () =>
+    fetch(BASE + "/api/projects", { headers: await authHeaders() }).then((r) => r.json()),
+  createProject: (name, description) =>
+    request("/api/projects", { name, description }),
+  getProject: async (id) =>
+    fetch(BASE + "/api/projects/" + id, { headers: await authHeaders() }).then((r) => r.json()),
+  updateProject: async (id, patch) =>
+    fetch(BASE + "/api/projects/" + id, {
+      method: "PATCH",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(patch || {}),
+    }).then((r) => r.json()),
+  deleteProject: async (id, keepRuns = true) =>
+    fetch(BASE + "/api/projects/" + id + "?keep_runs=" + keepRuns, {
+      method: "DELETE",
+      headers: await authHeaders(),
+    }).then((r) => r.json()),
+  assignRunProject: (runId, projectId) =>
+    request(`/api/runs/${runId}/project`, { project_id: projectId }),
+  addProjectPaper: (projectId, paper, source) =>
+    request(`/api/projects/${projectId}/papers`, { paper, source: source || "manual" }),
+  removeProjectPaper: async (projectId, paperId) =>
+    fetch(BASE + `/api/projects/${projectId}/papers/${paperId}`, {
+      method: "DELETE", headers: await authHeaders(),
+    }).then((r) => r.json()),
+  addProjectNote: (projectId, title, body) =>
+    request(`/api/projects/${projectId}/notes`, { title, body }),
+  updateProjectNote: async (projectId, noteId, patch) =>
+    fetch(BASE + `/api/projects/${projectId}/notes/${noteId}`, {
+      method: "PATCH",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(patch || {}),
+    }).then((r) => r.json()),
+  removeProjectNote: async (projectId, noteId) =>
+    fetch(BASE + `/api/projects/${projectId}/notes/${noteId}`, {
+      method: "DELETE", headers: await authHeaders(),
+    }).then((r) => r.json()),
+  zoteroImport: (projectId, apiKey, libraryId, libraryType) =>
+    request(`/api/projects/${projectId}/zotero/import`, {
+      api_key: apiKey, library_id: libraryId, library_type: libraryType || "user",
+    }),
+
+  // ── Project sharing: collaborators (full access) + read-only email links ──
+  listCollaborators: async (projectId) =>
+    fetch(BASE + `/api/projects/${projectId}/collaborators`, { headers: await authHeaders() }).then((r) => r.json()),
+  addCollaborator: async (projectId, email) => {
+    const res = await fetch(BASE + `/api/projects/${projectId}/collaborators`, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ email }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Could not add collaborator.");
+    return data;
+  },
+  removeCollaborator: async (projectId, userId) =>
+    fetch(BASE + `/api/projects/${projectId}/collaborators/${userId}`, {
+      method: "DELETE", headers: await authHeaders(),
+    }).then((r) => r.json()),
+  listShareLinks: async (projectId) =>
+    fetch(BASE + `/api/projects/${projectId}/share-links`, { headers: await authHeaders() }).then((r) => r.json()),
+  createShareLink: async (projectId, emails) => {
+    const res = await fetch(BASE + `/api/projects/${projectId}/share-links`, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ emails }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Could not create share link.");
+    return data;
+  },
+  revokeShareLink: async (projectId, linkId) =>
+    fetch(BASE + `/api/projects/${projectId}/share-links/${linkId}`, {
+      method: "DELETE", headers: await authHeaders(),
+    }).then((r) => r.json()),
+
+  // Public share viewer — no auth headers, token + email in the request itself
+  shareVerify: async (token, email) => {
+    const res = await fetch(BASE + `/api/share/${token}/verify`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Access denied.");
+    return data;
+  },
+  shareGetProject: async (token, email) => {
+    const res = await fetch(BASE + `/api/share/${token}/project?email=` + encodeURIComponent(email));
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Access denied.");
+    return data;
+  },
+  shareGetRun: async (token, runId, email) => {
+    const res = await fetch(BASE + `/api/share/${token}/runs/${runId}?email=` + encodeURIComponent(email));
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Access denied.");
+    return data;
+  },
+  // Public "Contact us" form on the About page — no auth header, since a
+  // visitor filling this out isn't necessarily signed in to Sift at all.
+  submitContactForm: async ({ name, email, affiliation, message, website }) => {
+    const res = await fetch(BASE + "/api/contact", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, email, affiliation, message, website }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Couldn't send your message.");
+    return data;
+  },
+  // Careers page "Apply" form. Uses FormData (not JSON) because it carries
+  // the resume + cover letter files — leave Content-Type unset so the
+  // browser fills in the multipart boundary itself.
+  submitJobApplication: async (fields) => {
+    const fd = new FormData();
+    Object.entries(fields).forEach(([k, v]) => { if (v != null) fd.append(k, v); });
+    const res = await fetch(BASE + "/api/careers/apply", { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Couldn't submit your application.");
+    return data;
+  },
+  shareGetHypothesis: async (token, runId, email) => {
+    const res = await fetch(
+      BASE + `/api/share/${token}/runs/${runId}/hypothesis?email=` + encodeURIComponent(email)
+    );
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Access denied.");
+    return data;
+  },
+  shareGetStudio: async (token, runId, email) => {
+    const res = await fetch(
+      BASE + `/api/share/${token}/runs/${runId}/studio?email=` + encodeURIComponent(email)
+    );
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Access denied.");
+    return data;
+  },
+
+  // ── Hypothesis Agent: its own tool, its own table (core/hypothesis_db.py),
+  // reads a completed Sift run once via source_run_id and never writes back
+  // to it — see backend/api/hypothesis_routes.py. Phase 1 scope: Generation
+  // + Critique only (no ranking/meta-review yet).
+  createHypothesisRun: (sourceRunId, apiKey, model) =>
+    request("/api/hypothesis/runs", { source_run_id: sourceRunId, api_key: apiKey, model },
+      REFINE_TIMEOUT_MS),
+
+  // SSE variant — streams {type:"progress", stage, status} events as the
+  // pipeline moves through fetch -> designer -> critic, then a final
+  // {type:"done", run} event, so the UI can show live stage-by-stage
+  // progress (see HypothesisPipelineRail) instead of one opaque spinner.
+  createHypothesisRunStream: (sourceRunId, apiKey, model, onEvent) =>
+    streamPost("/api/hypothesis/runs/stream",
+      { source_run_id: sourceRunId, api_key: apiKey, model }, onEvent),
+
+  getHypothesisRun: (hypRunId) =>
+    getJSON(`/api/hypothesis/runs/${hypRunId}`),
+
+  // `project_id` is the sidebar/project-picker filter (Flow B in the
+  // dashboard-upgrade architecture doc): every hypothesis run ever
+  // generated from ANY Lit Review session filed under that project, each
+  // one flagged with `staleness` by the backend. `sourceRunId` narrows to
+  // one exact Sift session instead, when the caller already knows which.
+  // Pass at most one of the two.
+  listHypothesisRuns: (sourceRunId, projectId) =>
+    getJSON("/api/hypothesis/runs" + (
+      projectId ? "?project_id=" + encodeURIComponent(projectId)
+      : sourceRunId ? "?source_run_id=" + encodeURIComponent(sourceRunId)
+      : ""
+    )),
+
+  // User-supplied results: the human-in-the-loop counterpart to the
+  // automatic literature-only plausibility check — paste in what actually
+  // happened when you ran (a version of) the experiment, get a verdict
+  // specific to the hypothesis's own claim, and (unless it was fully
+  // supported) a revised hypothesis. Returns the updated hypothesis run
+  // (its data.user_validations now includes this check) — never mutates
+  // the hypothesis text itself; see applyHypothesisRefinement for that.
+  // REFINE_TIMEOUT_MS since this is one substantial LLM call, same
+  // headroom class as the other single-but-heavy hypothesis calls.
+  checkHypothesisResults: (hypRunId, hypothesisIndex, resultsText, apiKey, model) =>
+    request(`/api/hypothesis/runs/${hypRunId}/check-results`,
+      { hypothesis_index: hypothesisIndex, results_text: resultsText, api_key: apiKey, model },
+      REFINE_TIMEOUT_MS),
+
+  // Explicit, human-triggered only: swaps a hypothesis's text for one
+  // validation's refined_hypothesis. Returns the updated run.
+  applyHypothesisRefinement: (hypRunId, validationId) =>
+    request(`/api/hypothesis/runs/${hypRunId}/apply-refinement`, { validation_id: validationId }),
+
+  // Closing the loop (hypothesis_agent_architecture.md §7): once a
+  // refinement is applied, this gives it a real shot at the champion slot
+  // instead of just sitting at its old bracket position — a fresh Critic
+  // score plus up to two head-to-head matches (vs champion, then vs
+  // runner-up only if it lost the first). Returns the updated run; its
+  // data.reverifications gets one more entry, and champion_index/
+  // runner_up_index may change. REFINE_TIMEOUT_MS since this can be up to
+  // three LLM calls back to back.
+  reverifyHypothesisRefinement: (hypRunId, validationId, apiKey, model) =>
+    request(`/api/hypothesis/runs/${hypRunId}/reverify-refinement`,
+      { validation_id: validationId, api_key: apiKey, model }, REFINE_TIMEOUT_MS),
+
+  // Argument/dispute flow (hypothesis_agent_architecture.md §6, v1 scope:
+  // Meta-Review only) — argue with the closing recommendation itself, not a
+  // new result. Returns the updated run; a "revised" dispute needs a
+  // separate applyHypothesisDispute call to actually change anything.
+  disputeMetaReview: (hypRunId, objection, apiKey, model) =>
+    request(`/api/hypothesis/runs/${hypRunId}/dispute-meta-review`,
+      { objection, api_key: apiKey, model }, REFINE_TIMEOUT_MS),
+
+  applyHypothesisDispute: (hypRunId, disputeId) =>
+    request(`/api/hypothesis/runs/${hypRunId}/apply-dispute`, { dispute_id: disputeId }),
+
+  // Session history — no LLM calls
+  listSessions: async () =>
+    fetch(BASE + "/api/sessions", { headers: await authHeaders() }).then((r) => r.json()),
+  getSession: async (id) =>
+    fetch(BASE + "/api/sessions/" + id, { headers: await authHeaders() }).then((r) => r.json()),
+  deleteSession: async (id) =>
+    fetch(BASE + "/api/sessions/" + id, { method: "DELETE", headers: await authHeaders() }).then((r) => r.json()),
+  deleteAllSessions: async () =>
+    fetch(BASE + "/api/sessions", { method: "DELETE", headers: await authHeaders() }).then((r) => r.json()),
+  // ── Data Analysis Agent (Phase 1a — manual plotting, no LLM calls) ──────
+  // See data_analysis_agent_architecture.md: upload a CSV/XLSX, get a
+  // profile back, pick columns + chart type by hand, render. Standalone by
+  // default — project_id is optional, same as Sift/Hypothesis Agent runs.
+  uploadDataset: (file, projectId) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    return postForm(`/api/data-analysis/upload${qs}`, fd);
+  },
+
+  listDataAnalysisRuns: (projectId) =>
+    getJSON(`/api/data-analysis/runs${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`),
+
+  getDataAnalysisRun: (runId) => getJSON(`/api/data-analysis/runs/${runId}`),
+
+  // spec: {chart_type, x, y, group, agg, title} — see core/plot_models.py's
+  // PlotSpec. Renders through the deterministic matplotlib renderer, never
+  // executed as code.
+  renderPlot: (runId, spec) => request(`/api/data-analysis/runs/${runId}/render`, spec),
+
+  deleteDataAnalysisRun: (runId) => del(`/api/data-analysis/runs/${runId}`),
+
+  // Remove one rendered figure from a run (keeps the run and its other
+  // figures) -- filename is either the PNG or SVG name from that figure's
+  // png_url/svg_url, both resolve to the same stored figure server-side.
+  deleteFigure: (runId, filename) => del(`/api/data-analysis/runs/${runId}/figures/${filename}`),
+
+  // Standalone pandas+matplotlib .py script that reproduces one figure --
+  // the "use real matplotlib" escape hatch for fonts/axes/anything the
+  // render form doesn't expose (core/script_export.py).
+  getFigureScript: async (runId, filename) => {
+    const res = await fetch(`${BASE}/api/data-analysis/runs/${runId}/figures/${filename}/script`, {
+      headers: await authHeaders(),
+    });
+    if (!res.ok) throw new Error(`Failed to get script (${res.status})`);
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  },
+
+  // Raw column data for the interactive on-screen chart (GET, not a
+  // render) -- y is one or more columns to overlay in one chart.
+  getDataAnalysisSeries: async (runId, xCol, yCols) => {
+    const params = new URLSearchParams();
+    if (xCol) params.set("x", xCol);
+    (yCols || []).forEach((c) => params.append("y", c));
+    return getJSON(`/api/data-analysis/runs/${runId}/series?${params.toString()}`);
+  },
+
+  // Descriptive statistics (mean/median/std/quartiles/skew, or top values
+  // for categorical columns) for the Statistics panel -- columns=[] (the
+  // default) means every column in the dataset.
+  getDataAnalysisStats: async (runId, columns) => {
+    const params = new URLSearchParams();
+    (columns || []).forEach((c) => params.append("columns", c));
+    const qs = params.toString();
+    return getJSON(`/api/data-analysis/runs/${runId}/stats${qs ? `?${qs}` : ""}`);
+  },
+
+  // Link (or unlink, with projectId=null) an already-uploaded run to a
+  // project after the fact -- lets a researcher start standalone and
+  // decide later, mirroring assignRunProject for Sift/Hypothesis runs.
+  assignDataAnalysisRunProject: (runId, projectId) =>
+    request(`/api/data-analysis/runs/${runId}/project`, { project_id: projectId || null }),
+
+  // The figures route requires auth, so a plain <img src> can't reach it —
+  // same fetch-blob-then-createObjectURL pattern as downloadExperimentsExport
+  // above, just returning the URL to display inline instead of saving it.
+  getFigureUrl: async (runId, filename) => {
+    const res = await fetch(`${BASE}/api/data-analysis/runs/${runId}/figures/${filename}`, {
+      headers: await authHeaders(),
+    });
+    if (!res.ok) throw new Error(`Failed to load figure (${res.status})`);
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  },
+
+};

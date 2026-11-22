@@ -166,6 +166,18 @@ def init_db() -> None:
     init_sharing_tables()
     from core.hypothesis_db import init_hypothesis_table
     init_hypothesis_table()
+    from core.data_analysis_db import init_data_analysis_table
+    init_data_analysis_table()
+    from core.quick_ask_history import init_quick_ask_history_table
+    init_quick_ask_history_table()
+    from core.frontier import init_frontier_table
+    init_frontier_table()
+    from core.watch import init_watch_table
+    init_watch_table()
+    from core.manuscript_db import init_manuscript_tables
+    init_manuscript_tables()
+    from core.billing import init_billing_table
+    init_billing_table()
 
 
 # ── Write ───────────────────────────────────────────────────────────────────

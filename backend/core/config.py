@@ -33,6 +33,14 @@ class Settings:
     # later without touching any code — same OpenAI-compatible shape either way.
     openrouter_base_url: str = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
+    # The Home page's "Discuss with Sift AI" lite agent (api/routes.py's
+    # /api/quick-ask, "projects" scope) — an open-weight model via OpenRouter
+    # by design, so moving it to a self-hosted GPU later is just changing
+    # openrouter_base_url above plus this one model id, nothing else.
+    # Verify the exact current slug on openrouter.ai/models before relying on
+    # it — model ids there get renamed/retired over time.
+    quick_ask_model: str = os.environ.get("QUICK_ASK_MODEL", "deepseek/deepseek-chat")
+
     # ── Pipeline routing & limits ────────────────────────────────────────
     # Defaults live in the version-controlled core/model_policy.py (so they
     # survive .env resets); .env vars below override them per-environment.
@@ -91,6 +99,51 @@ class Settings:
     # "Upload a file") are stored on disk, keyed by run id. Overridable via
     # UPLOADS_DIR for deployments with a mounted/persistent volume.
     uploads_dir: str = os.environ.get("UPLOADS_DIR", str(Path(__file__).parent.parent / "data" / "uploads"))
+
+    # Public "Contact us" form (About page). Cloudflare Email Routing only
+    # forwards mail that actually arrives at contact_to_email over SMTP — it
+    # can't see HTTP form submissions — so the backend sends a real outbound
+    # email TO that address via Resend's API, and Cloudflare's already-
+    # configured routing rule takes it from there (forwarding to whatever
+    # inbox it's set to point at today, with no code change needed if that
+    # inbox changes later).
+    resend_api_key: str = os.environ.get("RESEND_API_KEY", "")
+    # Must be a sender address on a domain verified in Resend (e.g.
+    # noreply@orcusintelligencelab.com) — defaults to Resend's shared test
+    # sender, which only delivers to the Resend account's own verified email,
+    # so the real domain must be verified for production use.
+    contact_from_email: str = os.environ.get("CONTACT_FROM_EMAIL", "onboarding@resend.dev")
+    contact_to_email: str = os.environ.get("CONTACT_TO_EMAIL", "contact@orcusintelligencelab.com")
+
+    # OpenAlex requires a free API key since 2026-02-13 (openalex.org/settings/api).
+    # Without it, requests run out of a tiny daily allowance and then fail.
+    openalex_api_key: str = os.environ.get("OPENALEX_API_KEY", "")
+
+    # Careers page "Apply" form — same Resend delivery path as the contact
+    # form above, just a different recipient and a multipart body (resume +
+    # cover letter attachments) instead of a plain text message.
+    hr_email: str = os.environ.get("HR_EMAIL", "hr@orcusintelligencelab.com")
+
+    # ── Plans, free trial & Stripe (core/billing.py) ─────────────────────
+    # Master switch. Off = the trial/plan status is computed and shown in the
+    # UI, but no limit is applied to anyone.
+    billing_enforce: bool = os.environ.get("BILLING_ENFORCE", "0") in ("1", "true", "True")
+    trial_days: int = int(os.environ.get("TRIAL_DAYS", "7"))
+    trial_credit_usd: float = float(os.environ.get("TRIAL_CREDIT_USD", "3.0"))
+    # Comma-separated emails allowed to open the admin Users page (/api/admin/*).
+    admin_emails: str = os.environ.get("ADMIN_EMAILS", "")
+    # Comma-separated emails that always get full access, never metered.
+    billing_bypass_emails: str = os.environ.get("BILLING_BYPASS_EMAILS", "")
+    # Stripe Payment Links (Dashboard > Payment Links), one per paid plan.
+    stripe_link_pro: str = os.environ.get("STRIPE_LINK_PRO", "")
+    stripe_link_max: str = os.environ.get("STRIPE_LINK_MAX", "")
+    # Webhook signing secret (whsec_...) for /api/billing/webhook.
+    stripe_webhook_secret: str = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+    # Optional: Stripe Price ids, so plan changes made in the customer portal
+    # map back to Pro/Max; and the customer-portal link for "Manage".
+    stripe_price_pro: str = os.environ.get("STRIPE_PRICE_PRO", "")
+    stripe_price_max: str = os.environ.get("STRIPE_PRICE_MAX", "")
+    stripe_portal_url: str = os.environ.get("STRIPE_PORTAL_URL", "")
 
 
 settings = Settings()

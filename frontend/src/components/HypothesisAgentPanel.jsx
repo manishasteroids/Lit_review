@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { CiteLink, CitedText, KgBridgePanel, ScoreLegend, ScoreBars } from "./MethodsPanel.jsx";
+import { api } from "../api/client.js";
 
 // One accent color per hypothesis slot (by index, wraps past 6) — a plain
 // left-edge stripe so a wide grid of cards reads as distinct entrants at a
@@ -57,6 +58,26 @@ export default function HypothesisAgentPanel({
   const reverifications = data?.reverifications || [];
   const metaReviewStale = !!data?.meta_review_stale;
   const [showAbout, setShowAbout] = useState(false);
+  // Hypothesis card layout: "grid" (side-by-side, good for comparing at a
+  // glance) or "sequential" (one at a time with Prev/Next, easier to read
+  // a single hypothesis's full detail without the eye jumping columns).
+  // Grid stays the default; this is a display-only toggle, no data changes.
+  const [hypLayout, setHypLayout] = useState("grid");
+  const [hypCursor, setHypCursor] = useState(0);
+  // Export this run as .docx / .pdf (carried over from the retired Methods tab).
+  const [exporting, setExporting] = useState(null);
+  const [exportErr, setExportErr] = useState("");
+  async function exportRun(fmt) {
+    if (!result?.id) return;
+    setExporting(fmt); setExportErr("");
+    try { await api.downloadHypothesisExport(result.id, fmt); }
+    catch (e) { setExportErr(e.message || "Export failed."); }
+    finally { setExporting(null); }
+  }
+  // What the Refine stage did: which hypotheses were rewritten, and their
+  // score before and after. Absent on runs saved before that stage existed.
+  const refined = data?.refinement?.revised || [];
+
   const critiqueByIndex = Object.fromEntries(
     (critique?.critiques || []).map((c) => [c.index, c])
   );
@@ -86,6 +107,16 @@ export default function HypothesisAgentPanel({
         >
           <span aria-hidden="true">ⓘ</span> {showAbout ? "Hide" : "About"} this tool
         </button>
+        {plan?.hypotheses?.length > 0 && result?.id && (
+          <span style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
+            <button type="button" onClick={() => exportRun("docx")} disabled={!!exporting}>
+              {exporting === "docx" ? "Exporting…" : "Export .docx"}
+            </button>
+            <button type="button" onClick={() => exportRun("pdf")} disabled={!!exporting}>
+              {exporting === "pdf" ? "Exporting…" : "Export .pdf"}
+            </button>
+          </span>
+        )}
         {plan?.domain && (
           <span style={{
             fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 999,
@@ -94,15 +125,37 @@ export default function HypothesisAgentPanel({
             {plan.domain}
           </span>
         )}
-        {data?.model && <span style={{ ...muted, fontSize: 12, marginLeft: "auto" }}>model: {data.model}</span>}
       </div>
+
+      {exportErr && <div style={{ color: "#c0392b", fontSize: 13, margin: "0 0 12px" }}>{exportErr}</div>}
+      {data?.refinement && (
+        <div style={{
+          fontSize: 13, lineHeight: 1.55, margin: "0 0 14px", padding: "10px 14px", borderRadius: 10,
+          background: "var(--indigo-soft,#eeecfd)", color: "var(--txt)",
+        }}>
+          <b>Refine:</b>{" "}
+          {refined.length === 0
+            ? `every hypothesis scored ${data.refinement.threshold} or above, so none needed rewriting.`
+            : <>
+                {refined.length} {refined.length === 1 ? "hypothesis" : "hypotheses"} scored below{" "}
+                {data.refinement.threshold} and {refined.length === 1 ? "was" : "were"} rewritten before ranking:{" "}
+                {refined.map((r, n) => (
+                  <span key={r.index}>
+                    {n > 0 && "; "}
+                    H{r.index + 1} {r.before_overall ?? "?"} → {r.after_overall ?? "?"}
+                    {r.kept ? "" : " (rewrite scored lower, original kept)"}
+                  </span>
+                ))}.
+              </>}
+        </div>
+      )}
 
       {showAbout && (
         <div style={{ ...muted, fontSize: 13, margin: "0 0 16px", lineHeight: 1.5, maxWidth: READING_WIDTH }}>
           Reads this literature review's extractions and synthesis, generates up to 6
           genuinely distinct hypotheses, critiques each one, then runs them through a
-          head-to-head ranking bracket and writes a final recommendation. Its own
-          separate pipeline and saved run, so you can compare against Methods.
+          head-to-head ranking bracket and writes a final recommendation. Hypotheses
+          the critic scores low are rewritten and re-scored once before ranking.
           Read-only for now: no editing or challenging a hypothesis here yet.
         </div>
       )}
@@ -212,6 +265,31 @@ export default function HypothesisAgentPanel({
       {(plan?.hypotheses || []).some((_, i) => critiqueByIndex[i]) && <ScoreLegend />}
 
       {(plan?.hypotheses || []).length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "4px 0 12px" }}>
+          <div style={{
+            display: "inline-flex", border: "1px solid var(--border,#e5e7eb)",
+            borderRadius: 8, overflow: "hidden",
+          }}>
+            {[["grid", "Side by side"], ["sequential", "One at a time"]].map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setHypLayout(id)}
+                style={{
+                  border: "none", cursor: "pointer", padding: "6px 12px", fontSize: 12.5,
+                  fontWeight: 600, fontFamily: "inherit",
+                  background: hypLayout === id ? "var(--accent,#6c5ce7)" : "transparent",
+                  color: hypLayout === id ? "#fff" : "var(--muted,#667)",
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(plan?.hypotheses || []).length > 0 && hypLayout === "grid" && (
         <div style={{
           display: "grid", gap: 16, marginTop: 4,
           gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))",
@@ -233,6 +311,87 @@ export default function HypothesisAgentPanel({
           ))}
         </div>
       )}
+
+      {(plan?.hypotheses || []).length > 0 && hypLayout === "sequential" && (() => {
+        const total = plan.hypotheses.length;
+        const cursor = Math.min(hypCursor, total - 1);
+        const h = plan.hypotheses[cursor];
+        return (
+          <div style={{ marginTop: 4 }}>
+            <div style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              marginBottom: 10, width: "100%",
+            }}>
+              <button
+                type="button"
+                onClick={() => setHypCursor((c) => Math.max(0, Math.min(c, total - 1) - 1))}
+                disabled={cursor === 0}
+                style={{
+                  border: "1px solid var(--border,#e5e7eb)", borderRadius: 7, background: "none",
+                  padding: "6px 12px", fontSize: 13, fontWeight: 600, fontFamily: "inherit",
+                  cursor: cursor === 0 ? "default" : "pointer", opacity: cursor === 0 ? 0.4 : 1,
+                }}
+              >
+                ← Prev
+              </button>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ ...muted, fontSize: 12.5 }}>
+                  Hypothesis {cursor + 1} of {total}
+                </span>
+                <div style={{ display: "flex", gap: 5 }}>
+                  {plan.hypotheses.map((_, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => setHypCursor(i)}
+                      aria-label={`Go to hypothesis ${i + 1}`}
+                      title={`H${i + 1}${i === championIndex ? " (champion)" : ""}`}
+                      style={{
+                        width: 8, height: 8, borderRadius: "50%", border: "none", padding: 0,
+                        cursor: "pointer",
+                        background: i === cursor ? ACCENTS[i % ACCENTS.length] : "var(--border,#d8dbe6)",
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setHypCursor((c) => Math.min(total - 1, Math.min(c, total - 1) + 1))}
+                disabled={cursor === total - 1}
+                style={{
+                  border: "1px solid var(--border,#e5e7eb)", borderRadius: 7, background: "none",
+                  padding: "6px 12px", fontSize: 13, fontWeight: 600, fontFamily: "inherit",
+                  cursor: cursor === total - 1 ? "default" : "pointer",
+                  opacity: cursor === total - 1 ? 0.4 : 1,
+                }}
+              >
+                Next →
+              </button>
+            </div>
+            {/* Sequential mode's whole point is legibility with the extra
+                room a single card gets vs. the grid -- no artificial width
+                cap here (unlike READING_WIDTH-capped prose elsewhere in
+                this file); this fills whatever the workspace column
+                actually gives it. */}
+            <div style={{ width: "100%" }}>
+              <ReadOnlyHypothesisCard
+                key={cursor}
+                h={h}
+                i={cursor}
+                papers={papers}
+                extractions={extractions}
+                critique={critiqueByIndex[cursor]}
+                noveltyCheck={noveltyChecks[cursor]}
+                isChampion={cursor === championIndex}
+                isRunnerUp={cursor === runnerUpIndex}
+                accent={ACCENTS[cursor % ACCENTS.length]}
+                citeNum={citeNum}
+              />
+            </div>
+          </div>
+        );
+      })()}
 
       {plan && (plan.hypotheses || []).length === 0 && (
         <div style={muted}>No hypotheses generated for this run.</div>
@@ -844,18 +1003,39 @@ function DisputeEntry({ d, onApply, busy, papers, citeNum }) {
 // by default now that it has a picture to anchor it rather than being a
 // wall of "H3 vs H6 -> winner H3" lines on its own.
 function BracketSection({ bracket, hypotheses, accents }) {
+  // Collapsible: the bracket is "how it decided", not the answer. Collapsed it
+  // still says who won; the choice is remembered for next time.
+  const [open, setOpen] = useState(() => {
+    try { return localStorage.getItem("sift-bracket-open") !== "0"; } catch { return true; }
+  });
+  const toggle = () => setOpen((v) => {
+    try { localStorage.setItem("sift-bracket-open", v ? "0" : "1"); } catch { /* ignore */ }
+    return !v;
+  });
+  const n = (bracket.matches || []).filter((m) => !m.bye).length;
+  const champ = bracket.champion || [...(bracket.matches || [])].sort((x, y) => (y.round || 0) - (x.round || 0))[0]?.winner;
   return (
     <div style={{
       marginTop: 4, padding: "16px 18px", borderRadius: 12,
       border: "1px solid var(--border,#e5e7eb)", background: "var(--chip,#f1f0fb)",
     }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, marginBottom: 12 }}>
+      <button type="button" onClick={toggle} aria-expanded={open}
+        style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, width: "100%",
+          background: "none", border: "none", padding: 0, cursor: "pointer", color: "inherit", textAlign: "left",
+          marginBottom: open ? 12 : 0, fontFamily: "inherit" }}>
+        <span aria-hidden="true" style={{ display: "inline-block", width: 12, transition: "transform .15s",
+          transform: open ? "rotate(90deg)" : "none", color: "var(--muted,#6b7280)" }}>▸</span>
         <span aria-hidden="true">🥊</span>
-        Ranking bracket — {(bracket.matches || []).filter((m) => !m.bye).length} head-to-head match
-        {(bracket.matches || []).filter((m) => !m.bye).length === 1 ? "" : "es"}, single elimination
-      </div>
-      <BracketDiagram bracket={bracket} hypotheses={hypotheses} accents={accents} />
-      <MatchReasoning bracket={bracket} />
+        Ranking bracket — {n} head-to-head match{n === 1 ? "" : "es"}, single elimination
+        {!open && champ && <span style={{ fontWeight: 500, color: "var(--muted,#6b7280)", marginLeft: 6 }}>· winner {champ}</span>}
+        <span style={{ marginLeft: "auto", fontSize: 12, fontWeight: 500, color: "var(--indigo,#6d5df6)" }}>{open ? "Hide" : "Show"}</span>
+      </button>
+      {open && (
+        <>
+          <BracketDiagram bracket={bracket} hypotheses={hypotheses} accents={accents} />
+          <MatchReasoning bracket={bracket} />
+        </>
+      )}
     </div>
   );
 }

@@ -38,11 +38,17 @@ function Ic({ name, size = 16, color, className, style }) {
     case "chevron-down": return <svg {...c}><polyline points="6 9 12 15 18 9" /></svg>;
     case "folder": return <svg {...c}><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>;
     case "download": return <svg {...c}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>;
+    case "zoom-in": return <svg {...c}><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16" y2="16" /><line x1="11" y1="8" x2="11" y2="14" /><line x1="8" y1="11" x2="14" y2="11" /></svg>;
+    case "zoom-out": return <svg {...c}><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16" y2="16" /><line x1="8" y1="11" x2="14" y2="11" /></svg>;
+    case "pointer": return <svg {...c}><path d="M4 3l7 17 2.5-7.5L21 10z" /></svg>;
     case "eraser": return <svg {...c}><path d="M20 20H8.5L3 14.5a2 2 0 0 1 0-2.8l8-8a2 2 0 0 1 2.8 0l6.5 6.5a2 2 0 0 1 0 2.8L14 19" /><path d="M9 13.5 15.5 20" /></svg>;
     case "type": return <svg {...c}><polyline points="4 7 4 4 20 4 20 7" /><line x1="12" y1="4" x2="12" y2="20" /><line x1="9" y1="20" x2="15" y2="20" /></svg>;
     case "square": return <svg {...c}><rect x="4" y="4" width="16" height="16" rx="2" /></svg>;
     case "circle-shape": return <svg {...c}><circle cx="12" cy="12" r="8.5" /></svg>;
     case "lightbulb": return <svg {...c}><path d="M9 18h6" /><path d="M10 22h4" /><path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.3 1 2.1V17h6v-.2c0-.8.4-1.6 1-2.1A7 7 0 0 0 12 2z" /></svg>;
+    case "maximize": return <svg {...c}><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3" /></svg>;
+    case "external-link": return <svg {...c}><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>;
+    case "sigma": return <svg {...c}><path d="M18 6V4H6l6 8-6 8h12v-2" /></svg>;
     default: return <svg {...c}><circle cx="12" cy="12" r="9" /></svg>;
   }
 }
@@ -79,7 +85,13 @@ export const ChevronDown = (p) => <Ic name="chevron-down" {...p} />;
 export const Folder = (p) => <Ic name="folder" {...p} />;
 export const Download = (p) => <Ic name="download" {...p} />;
 export const Eraser = (p) => <Ic name="eraser" {...p} />;
+export const ZoomIn = (p) => <Ic name="zoom-in" {...p} />;
+export const ZoomOut = (p) => <Ic name="zoom-out" {...p} />;
+export const MousePointer = (p) => <Ic name="pointer" {...p} />;
 export const TypeIcon = (p) => <Ic name="type" {...p} />;
 export const Square = (p) => <Ic name="square" {...p} />;
 export const CircleShape = (p) => <Ic name="circle-shape" {...p} />;
 export const Lightbulb = (p) => <Ic name="lightbulb" {...p} />;
+export const Maximize = (p) => <Ic name="maximize" {...p} />;
+export const ExternalLink = (p) => <Ic name="external-link" {...p} />;
+export const Sigma = (p) => <Ic name="sigma" {...p} />;

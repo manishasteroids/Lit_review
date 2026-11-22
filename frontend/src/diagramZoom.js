@@ -16,8 +16,9 @@ let panX = 0;
 let panY = 0;
 let dragging = false;
 let dragStart = null;
+let fitScale = 1;      // the zoom at which the whole diagram fits the window
 
-const MIN_SCALE = 0.4;
+const MIN_SCALE = 0.1;
 const MAX_SCALE = 4;
 
 function ensureOverlay() {
@@ -50,7 +51,7 @@ function ensureOverlay() {
     const act = e.target.closest(".dz-btn")?.dataset.act;
     if (act === "in") setScale(scale + 0.25);
     else if (act === "out") setScale(scale - 0.25);
-    else if (act === "reset") { panX = 0; panY = 0; setScale(1); }
+    else if (act === "reset") { panX = 0; panY = 0; setScale(fitScale); }
     else if (act === "svg") downloadSvg();
     else if (act === "png") downloadPng();
   });
@@ -60,8 +61,8 @@ function ensureOverlay() {
     setScale(scale + (e.deltaY < 0 ? 0.15 : -0.15));
   }, { passive: false });
 
+  // Drag to pan whenever you like -- a tall diagram can be bigger than the window even when zoomed out.
   viewport.addEventListener("mousedown", (e) => {
-    if (scale <= 1) return;
     dragging = true;
     dragStart = { x: e.clientX - panX, y: e.clientY - panY };
     viewport.classList.add("dragging");
@@ -89,16 +90,24 @@ function ensureOverlay() {
 
 function setScale(next) {
   scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, next));
-  if (scale <= 1) { panX = 0; panY = 0; }
+  if (scale <= fitScale) { panX = 0; panY = 0; }
   overlay._applyTransform();
 }
 
 function open(svgHtml) {
   const el = ensureOverlay();
-  el.querySelector(".dz-box").innerHTML = svgHtml;
-  scale = 1; panX = 0; panY = 0;
-  el._applyTransform();
+  const box = el.querySelector(".dz-box");
+  box.innerHTML = svgHtml;
+  panX = 0; panY = 0;
   el.classList.add("on");
+  // Open at "fit": the whole diagram visible, never enlarged past 100%.
+  // Measured at scale 1 (transforms don't change layout size).
+  box.style.transform = "none";
+  const vp = el.querySelector(".dz-viewport");
+  const bw = box.offsetWidth || 1, bh = box.offsetHeight || 1;
+  fitScale = Math.max(MIN_SCALE, Math.min(1, (vp.clientWidth - 16) / bw, (vp.clientHeight - 16) / bh));
+  scale = fitScale;
+  el._applyTransform();
   document.addEventListener("keydown", onKey);
 }
 

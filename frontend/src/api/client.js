@@ -255,6 +255,35 @@ function streamRun(topic, apiKey, model, mode, onEvent, projectId) {
 export const api = {
   createRunStream: streamRun,
 
+  // Home page's "Discuss with Sift AI" box -- one cheap LLM call, not the
+  // Literature Review pipeline (see api/quick-ask on the backend). No run
+  // is created and nothing is filed under a project. scope="projects" also
+  // searches the user's own projects/notes/runs and does a brief live web
+  // lookup, then answers on the open-weight model instead of Gemini.
+  // `history` = earlier turns of the same conversation ([{question, answer}]),
+  // so a follow-up question is understood in context.
+  quickAsk: (question, { apiKey, scope, history } = {}) =>
+    request("/api/quick-ask", { question, api_key: apiKey || undefined, scope: scope || "general",
+      history: history && history.length ? history : undefined }),
+
+  // Last few days of this user's Home-page quick-ask searches (auto-expires
+  // on the backend -- see core/quick_ask_history.py), so they can reopen one
+  // instead of retyping it.
+  quickAskHistory: () => getJSON("/api/quick-ask/history"),
+  // New papers in the user's own research areas (cached a day server-side).
+  getFrontier: (refresh) => getJSON(`/api/frontier${refresh ? "?refresh=true" : ""}`),
+  // Scholars / laboratories the user follows and their new papers (core/watch.py).
+  getWatchlist: (refresh) => getJSON(`/api/watch${refresh ? "?refresh=true" : ""}`),
+  watchSearch: (kind, q, institution) => getJSON(`/api/watch/search?kind=${encodeURIComponent(kind)}&q=${encodeURIComponent(q)}${institution ? `&institution=${encodeURIComponent(institution)}` : ""}`),
+  suggestLabMembers: (institution, topic) => getJSON(`/api/watch/suggest-members?institution=${encodeURIComponent(institution)}&topic=${encodeURIComponent(topic)}`),
+  createLab: (body) => request("/api/watch/group", body),
+  labFromUrl: (url) => getJSON(`/api/watch/from-url?url=${encodeURIComponent(url)}`),
+  updateLab: (id, body) => request(`/api/watch/group/${id}`, body),
+  follow: (body) => request("/api/watch", body),
+  unfollow: (id) => del(`/api/watch/${id}`),
+  watchSeen: (id) => request(`/api/watch/seen${id ? `?fid=${encodeURIComponent(id)}` : ""}`, {}),
+  deleteQuickAskHistory: (id) => del(`/api/quick-ask/history/${id}`),
+
   // Studio-only entry: a run with no search — just a place to upload your
   // own PDFs/DOCX/PPTX and use Studio (chat/report/deck) directly, without
   // the reformulate -> search -> filter -> write pipeline.
@@ -326,6 +355,93 @@ export const api = {
 
   // Download the hypothesis + experiment plan as .docx or .pdf — same
   // generated-from-existing-content, no-LLM-cost approach as downloadExport.
+  // Same download as downloadExperimentsExport below, for an Infinity
+  // (Hypothesis Agent) run instead of a Sift run's Methods plan.
+  downloadHypothesisExport: async (hypRunId, fmt) => {
+    const res = await fetch(`${BASE}/api/hypothesis/runs/${hypRunId}/export/${fmt}`, {
+      headers: await authHeaders(),
+    });
+    if (!res.ok) {
+      let detail = `Export failed (${res.status})`;
+      try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="?([^"]+)"?/.exec(cd);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = m ? m[1] : `hypotheses.${fmt}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
+  // ── Publish step (backend/api/manuscript_routes.py). Every call returns
+  // the whole manuscript, so the panel just swaps its state for the result.
+  openManuscript: (sourceRunId, hypRunId) =>
+    request("/api/manuscripts/open", { source_run_id: sourceRunId, hyp_run_id: hypRunId }),
+  patchManuscript: (id, body) => patch(`/api/manuscripts/${id}`, body),
+  uploadManuscriptTemplate: (id, file, apiKey, model) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (apiKey) fd.append("api_key", apiKey);
+    if (model) fd.append("model", model);
+    return postForm(`/api/manuscripts/${id}/template`, fd, WRITE_TIMEOUT_MS);
+  },
+  setManuscriptGuidelines: (id, url, apiKey, model) =>
+    request(`/api/manuscripts/${id}/guidelines`, { url, api_key: apiKey, model }, WRITE_TIMEOUT_MS),
+  uploadManuscriptGuidelinesFile: (id, file, apiKey, model) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (apiKey) fd.append("api_key", apiKey);
+    if (model) fd.append("model", model);
+    return postForm(`/api/manuscripts/${id}/guidelines/file`, fd, WRITE_TIMEOUT_MS);
+  },
+  removeManuscriptGuidelinesFile: (id) => del(`/api/manuscripts/${id}/guidelines/file`),
+  rebuildManuscriptSpec: (id, apiKey, model) =>
+    request(`/api/manuscripts/${id}/spec/rebuild`, { api_key: apiKey, model }, WRITE_TIMEOUT_MS),
+  uploadManuscriptFile: (id, file, description) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("description", description || "");
+    return postForm(`/api/manuscripts/${id}/files`, fd, WRITE_TIMEOUT_MS);
+  },
+  // An object URL for a drawn diagram or uploaded figure (needs the auth
+  // header, so it can't be a plain <img src>). Caller revokes it.
+  getManuscriptImageUrl: async (id, fileId) =>
+    URL.createObjectURL(new Blob([await getBinary(`/api/manuscripts/${id}/files/${fileId}/image`)], { type: "image/png" })),
+  patchManuscriptFile: (id, fileId, body) => patch(`/api/manuscripts/${id}/files/${fileId}`, body),
+  deleteManuscriptFile: (id, fileId) => del(`/api/manuscripts/${id}/files/${fileId}`),
+  // One request writes every section (in parallel server-side), so it gets
+  // the long Writer timeout rather than the single-call one.
+  generateManuscript: (id, apiKey, model) =>
+    request(`/api/manuscripts/${id}/generate`, { api_key: apiKey, model }, WRITE_TIMEOUT_MS_DEEP),
+  resetManuscript: (id) => request(`/api/manuscripts/${id}/reset`, {}),
+  // The paper as Word bytes for the in-app viewer -- allowed before approval.
+  getManuscriptPreview: (id) => getBinary(`/api/manuscripts/${id}/download?preview=true`),
+  // fmt ("docx" | "latex") only matters when no template was uploaded: it
+  // picks which standard layout to build.
+  downloadManuscript: async (id, fmt) => {
+    const res = await fetch(`${BASE}/api/manuscripts/${id}/download${fmt ? `?fmt=${fmt}` : ""}`, { headers: await authHeaders() });
+    if (!res.ok) {
+      let detail = `Download failed (${res.status})`;
+      try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const m = /filename="?([^"]+)"?/.exec(res.headers.get("Content-Disposition") || "");
+    const fallback = blob.type.includes("zip") ? "manuscript.zip" : "manuscript.docx";
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = m ? m[1] : fallback;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
   downloadExperimentsExport: async (runId, fmt) => {
     const res = await fetch(`${BASE}/api/runs/${runId}/experiments/export/${fmt}`, {
       headers: await authHeaders(),
@@ -549,6 +665,26 @@ export const api = {
   getUsageTrend: (days = 30) =>
     getJSON("/api/usage/trend?days=" + days + "&tz_offset=" + new Date().getTimezoneOffset()),
 
+  // Owner-only: is this user an admin, and the full user list
+  adminMe: () => getJSON("/api/admin/me"),
+  adminUsers: () => getJSON("/api/admin/users"),
+  adminUserAction: (userId, action, days) =>
+    request(`/api/admin/users/${encodeURIComponent(userId)}/action`, { action, days: days || undefined }),
+
+  // Plan, free-trial progress, and which Stripe upgrade links are configured
+  getBillingStatus: () => getJSON("/api/billing/status"),
+  // Stripe Payment Link for "pro" | "max", tagged with this user's id
+  getCheckoutUrl: (plan) => getJSON("/api/billing/checkout?plan=" + encodeURIComponent(plan)),
+
+  // Usage grouped by run + by project; days=0 → all time
+  getUsageBreakdown: (days = 0, projectId = "", model = "") =>
+    getJSON(
+      "/api/usage/breakdown?days=" + days +
+      "&project_id=" + encodeURIComponent(projectId || "") +
+      "&model=" + encodeURIComponent(model || "") +
+      "&tz_offset=" + new Date().getTimezoneOffset()
+    ),
+
   // ── Projects: folder a line of research (runs + saved papers + notes) ──
   listProjects: async () =>
     fetch(BASE + "/api/projects", { headers: await authHeaders() }).then((r) => r.json()),
@@ -648,6 +784,45 @@ export const api = {
     if (!res.ok) throw new Error(data.detail || "Access denied.");
     return data;
   },
+  // Public "Contact us" form on the About page — no auth header, since a
+  // visitor filling this out isn't necessarily signed in to Sift at all.
+  submitContactForm: async ({ name, email, affiliation, message, website }) => {
+    const res = await fetch(BASE + "/api/contact", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, email, affiliation, message, website }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Couldn't send your message.");
+    return data;
+  },
+  // Careers page "Apply" form. Uses FormData (not JSON) because it carries
+  // the resume + cover letter files — leave Content-Type unset so the
+  // browser fills in the multipart boundary itself.
+  submitJobApplication: async (fields) => {
+    const fd = new FormData();
+    Object.entries(fields).forEach(([k, v]) => { if (v != null) fd.append(k, v); });
+    const res = await fetch(BASE + "/api/careers/apply", { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Couldn't submit your application.");
+    return data;
+  },
+  shareGetHypothesis: async (token, runId, email) => {
+    const res = await fetch(
+      BASE + `/api/share/${token}/runs/${runId}/hypothesis?email=` + encodeURIComponent(email)
+    );
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Access denied.");
+    return data;
+  },
+  shareGetStudio: async (token, runId, email) => {
+    const res = await fetch(
+      BASE + `/api/share/${token}/runs/${runId}/studio?email=` + encodeURIComponent(email)
+    );
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Access denied.");
+    return data;
+  },
 
   // ── Hypothesis Agent: its own tool, its own table (core/hypothesis_db.py),
   // reads a completed Sift run once via source_run_id and never writes back
@@ -668,8 +843,18 @@ export const api = {
   getHypothesisRun: (hypRunId) =>
     getJSON(`/api/hypothesis/runs/${hypRunId}`),
 
-  listHypothesisRuns: (sourceRunId) =>
-    getJSON("/api/hypothesis/runs" + (sourceRunId ? "?source_run_id=" + encodeURIComponent(sourceRunId) : "")),
+  // `project_id` is the sidebar/project-picker filter (Flow B in the
+  // dashboard-upgrade architecture doc): every hypothesis run ever
+  // generated from ANY Lit Review session filed under that project, each
+  // one flagged with `staleness` by the backend. `sourceRunId` narrows to
+  // one exact Sift session instead, when the caller already knows which.
+  // Pass at most one of the two.
+  listHypothesisRuns: (sourceRunId, projectId) =>
+    getJSON("/api/hypothesis/runs" + (
+      projectId ? "?project_id=" + encodeURIComponent(projectId)
+      : sourceRunId ? "?source_run_id=" + encodeURIComponent(sourceRunId)
+      : ""
+    )),
 
   // User-supplied results: the human-in-the-loop counterpart to the
   // automatic literature-only plausibility check — paste in what actually
@@ -722,4 +907,81 @@ export const api = {
     fetch(BASE + "/api/sessions/" + id, { method: "DELETE", headers: await authHeaders() }).then((r) => r.json()),
   deleteAllSessions: async () =>
     fetch(BASE + "/api/sessions", { method: "DELETE", headers: await authHeaders() }).then((r) => r.json()),
+  // ── Data Analysis Agent (Phase 1a — manual plotting, no LLM calls) ──────
+  // See data_analysis_agent_architecture.md: upload a CSV/XLSX, get a
+  // profile back, pick columns + chart type by hand, render. Standalone by
+  // default — project_id is optional, same as Sift/Hypothesis Agent runs.
+  uploadDataset: (file, projectId) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    return postForm(`/api/data-analysis/upload${qs}`, fd);
+  },
+
+  listDataAnalysisRuns: (projectId) =>
+    getJSON(`/api/data-analysis/runs${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`),
+
+  getDataAnalysisRun: (runId) => getJSON(`/api/data-analysis/runs/${runId}`),
+
+  // spec: {chart_type, x, y, group, agg, title} — see core/plot_models.py's
+  // PlotSpec. Renders through the deterministic matplotlib renderer, never
+  // executed as code.
+  renderPlot: (runId, spec) => request(`/api/data-analysis/runs/${runId}/render`, spec),
+
+  deleteDataAnalysisRun: (runId) => del(`/api/data-analysis/runs/${runId}`),
+
+  // Remove one rendered figure from a run (keeps the run and its other
+  // figures) -- filename is either the PNG or SVG name from that figure's
+  // png_url/svg_url, both resolve to the same stored figure server-side.
+  deleteFigure: (runId, filename) => del(`/api/data-analysis/runs/${runId}/figures/${filename}`),
+
+  // Standalone pandas+matplotlib .py script that reproduces one figure --
+  // the "use real matplotlib" escape hatch for fonts/axes/anything the
+  // render form doesn't expose (core/script_export.py).
+  getFigureScript: async (runId, filename) => {
+    const res = await fetch(`${BASE}/api/data-analysis/runs/${runId}/figures/${filename}/script`, {
+      headers: await authHeaders(),
+    });
+    if (!res.ok) throw new Error(`Failed to get script (${res.status})`);
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  },
+
+  // Raw column data for the interactive on-screen chart (GET, not a
+  // render) -- y is one or more columns to overlay in one chart.
+  getDataAnalysisSeries: async (runId, xCol, yCols) => {
+    const params = new URLSearchParams();
+    if (xCol) params.set("x", xCol);
+    (yCols || []).forEach((c) => params.append("y", c));
+    return getJSON(`/api/data-analysis/runs/${runId}/series?${params.toString()}`);
+  },
+
+  // Descriptive statistics (mean/median/std/quartiles/skew, or top values
+  // for categorical columns) for the Statistics panel -- columns=[] (the
+  // default) means every column in the dataset.
+  getDataAnalysisStats: async (runId, columns) => {
+    const params = new URLSearchParams();
+    (columns || []).forEach((c) => params.append("columns", c));
+    const qs = params.toString();
+    return getJSON(`/api/data-analysis/runs/${runId}/stats${qs ? `?${qs}` : ""}`);
+  },
+
+  // Link (or unlink, with projectId=null) an already-uploaded run to a
+  // project after the fact -- lets a researcher start standalone and
+  // decide later, mirroring assignRunProject for Sift/Hypothesis runs.
+  assignDataAnalysisRunProject: (runId, projectId) =>
+    request(`/api/data-analysis/runs/${runId}/project`, { project_id: projectId || null }),
+
+  // The figures route requires auth, so a plain <img src> can't reach it —
+  // same fetch-blob-then-createObjectURL pattern as downloadExperimentsExport
+  // above, just returning the URL to display inline instead of saving it.
+  getFigureUrl: async (runId, filename) => {
+    const res = await fetch(`${BASE}/api/data-analysis/runs/${runId}/figures/${filename}`, {
+      headers: await authHeaders(),
+    });
+    if (!res.ok) throw new Error(`Failed to load figure (${res.status})`);
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  },
+
 };
