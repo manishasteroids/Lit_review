@@ -51,7 +51,9 @@ export default function PlanPanel({ compact = false }) {
     sub = `${t.days_left} day${t.days_left === 1 ? "" : "s"} left · ${fmtUSD(t.credits_left)} of ${fmtUSD(t.credits_total)} credits left`;
   } else {
     title = "Free plan";
-    sub = t.state === "credits_used"
+    sub = t.blocked
+      ? "A free trial was already used with this email address — Lite mode only."
+      : t.state === "credits_used"
       ? "Your trial credits are used up — Lite mode only."
       : t.state === "expired" ? "Your 7-day trial has ended — Lite mode only." : "Lite mode only.";
   }

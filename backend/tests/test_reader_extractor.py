@@ -10,9 +10,13 @@ HOW THIS STAGE WORKS
 
 For each approved paper it asks the model to pull structured fields out of the
 title + abstract. To stay within one call's output budget (and to run fast) it
-splits the papers into BATCHES of `BATCH_SIZE` (default 10) and processes the
-batches CONCURRENTLY, then merges the results. Each extraction carries the
-paper's `idx`, so order across batches doesn't matter.
+splits the papers into BATCHES of `BATCH_SIZE` and processes the batches
+CONCURRENTLY, then merges the results. Each extraction carries the paper's
+`idx`, so order across batches doesn't matter. Papers the model drops (a bad
+or truncated batch) are retried once, then stubbed so none disappear.
+
+Tests derive their expectations from `ReaderExtractorAgent.BATCH_SIZE` instead
+of hard-coding it, so changing the batch size doesn't break them.
 
 These tests mock the model, so they're fast, free, and deterministic.
 
@@ -21,6 +25,7 @@ Run:
     pytest tests/test_reader_extractor.py -v
 """
 import json
+import math
 import threading
 
 from agents.reader_extractor import ReaderExtractorAgent
@@ -65,12 +70,13 @@ def test_extracts_one_row_per_paper():
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 2. Batching: 50 papers are split into ceil(50/10)=5 calls, none dropped
+# 2. Batching: 50 papers are split into ceil(50/BATCH_SIZE) calls, none dropped
 # ──────────────────────────────────────────────────────────────────────────
 def test_batches_large_shortlist():
     fake = FakeLLM()
     out = ReaderExtractorAgent(fake).run(_papers(50))
-    assert fake.calls == 5, f"expected 5 batched calls, got {fake.calls}"
+    expected = math.ceil(50 / ReaderExtractorAgent.BATCH_SIZE)
+    assert fake.calls == expected, f"expected {expected} batched calls, got {fake.calls}"
     assert len(out) == 50
     assert sorted(e["idx"] for e in out) == list(range(50))
 
@@ -85,16 +91,27 @@ def test_custom_batch_size():
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 4. Robustness: one truncated/broken batch doesn't kill the others
+# 4. Robustness: one truncated/broken batch doesn't kill the others, and the
+#    papers it dropped are retried once so none are lost
 #    (this is the failure mode that used to crash the whole stage)
 # ──────────────────────────────────────────────────────────────────────────
-def test_one_bad_batch_does_not_fail_the_rest():
-    fake = FakeLLM(fail_on={2})       # 2nd batch returns invalid JSON
-    out = ReaderExtractorAgent(fake).run(_papers(30))   # 3 batches
-    assert fake.calls == 3
-    # the two good batches (20 papers) still come through; no exception raised
-    assert 15 <= len(out) <= 20
-    assert out, "should still return the papers from the healthy batches"
+def test_one_bad_batch_is_retried_and_recovered():
+    n = ReaderExtractorAgent.BATCH_SIZE + 10          # 2 batches: BATCH_SIZE and 10
+    fake = FakeLLM(fail_on={2})                       # one batch returns invalid JSON
+    out = ReaderExtractorAgent(fake).run(_papers(n))  # no exception raised
+    assert fake.calls == 3, "2 batch calls + 1 retry of the dropped papers"
+    assert sorted(e["idx"] for e in out) == list(range(n))
+    assert all("method" in e for e in out), "the retry should recover real extractions"
+
+
+def test_papers_still_missing_after_retry_are_kept_as_stubs():
+    n = ReaderExtractorAgent.BATCH_SIZE + 10
+    fake = FakeLLM(fail_on={2, 3})    # the bad batch fails again on its retry
+    out = ReaderExtractorAgent(fake).run(_papers(n))
+    # every approved paper keeps a row downstream, even if it has no fields
+    assert sorted(e["idx"] for e in out) == list(range(n))
+    stubs = [e for e in out if "method" not in e]
+    assert stubs, "papers that failed twice should be present as bare {idx} stubs"
 
 
 # ──────────────────────────────────────────────────────────────────────────
