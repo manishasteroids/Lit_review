@@ -1,6 +1,13 @@
 fastapi>=0.111
 uvicorn[standard]>=0.30
-anthropic>=0.40
+anthropic>=0.100   # bumped from >=0.40 solely to bust Cloud Build's cached dependency-install
+                    # layer (keyed on this file's content hash) — the deployed container was
+                    # silently stuck on a much older anthropic version resolved at the very
+                    # first deploy, which didn't fully support the `temperature` kwarg on
+                    # Messages.create(), causing "Messages.create() got an unexpected keyword
+                    # argument 'temperature'" in every hypothesis-pipeline stage that passes
+                    # temperature=0.0 for repeatable scoring (critic, ranker, meta-review,
+                    # plausibility, results-check). Local .venv already had 0.117.0.
 pydantic>=2.7
 python-dotenv>=1.0
 pypdf>=4.0

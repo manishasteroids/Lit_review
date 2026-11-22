@@ -1,6 +1,15 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, lazy, Suspense } from "react";
 import { ensureAuth } from "../Auth.jsx";
 import { api } from "../api/client.js";
+
+// The 3D figures pull in three.js, so they load as their own chunk after the
+// page itself is on screen.
+const figure = (name) => lazy(() => import("./LandingFigures.jsx").then((m) => ({ default: m[name] })));
+const CitationFigure = figure("CitationFigure");
+const PipelineFigure = figure("PipelineFigure");
+const HypothesisFigure = figure("HypothesisFigure");
+const LoopFigure = figure("LoopFigure");
+const FigureFallback = () => <figure className="lp3-fig"><div className="lp3-stage" /></figure>;
 
 /**
  * Public marketing site — shown to signed-out visitors, before the tools app.
@@ -9,7 +18,16 @@ import { api } from "../api/client.js";
  * Pages: "home" (hero + features), "pricing", "careers", "about".
  */
 export default function LandingPage() {
-  const [page, setPage] = useState("home");
+  // A role's "Apply →" link (see applyHref() near RoleCard below) opens a
+  // brand-new tab pointing at this same site with ?apply=<roleId> in the
+  // URL. Checking for it here, once, on first render, is what turns that
+  // new tab into the full-page application form instead of the normal
+  // marketing site — no router needed for a link that only ever matters on
+  // initial page load.
+  const [page, setPage] = useState(() => {
+    const applyId = new URLSearchParams(window.location.search).get("apply");
+    return applyId ? `apply:${applyId}` : "home";
+  });
   // Every call site below is an acquisition CTA ("Try for free", "Sign up",
   // pricing buttons, etc.) except the one explicit "Sign in" link, so this
   // defaults to opening the modal on the signup tab rather than making
@@ -18,10 +36,23 @@ export default function LandingPage() {
 
   useEffect(() => { window.scrollTo(0, 0); }, [page]);
 
+  const applyRoleId = typeof page === "string" && page.startsWith("apply:") ? page.slice(6) : null;
+  const applyRole = applyRoleId ? OPEN_ROLES.find((r) => r.id === applyRoleId) : null;
+
+  if (applyRole) {
+    return (
+      <div className="lp-root">
+        <LandingStyles />
+        <ApplyPage role={applyRole} onBack={() => setPage("careers")} />
+      </div>
+    );
+  }
+
   const PAGES = {
     pricing: <Pricing login={login} />,
     careers: <CareersPage />,
-    about: <AboutPage />,
+    about: <AboutPage setPage={setPage} />,
+    blog: <BlogPage />,
   };
 
   return (
@@ -128,8 +159,21 @@ function TopBar({ page, setPage, login }) {
     ["News", "What's moving across AI-driven research", "news"],
     ["FAQ", "Answers to the questions researchers ask most", "faq"],
     ["Publications", "Papers & white papers coming out of this project", "pub"],
+    ["Blog", "Notes on building Sift and what we're learning", "blog"],
   ];
-  const resourceActions = [() => jump("lp-news"), () => jump("lp-faq"), () => jump("lp-papers")];
+  // Product menu -> the section of the home page that shows that feature.
+  const productActions = [
+    () => jump("lp-features"),   // Literature Review        -> Sift
+    () => jump("feat-4"),        // Research Paper Analysis  -> Chat with any paper
+    () => jump("lp-infinity"),   // Research Methods Generation -> Infinity
+    () => jump("sift-extract"),  // Data Analysis            -> Sift's Extract step (comparison table)
+  ];
+  const resourceActions = [
+    () => jump("lp-news"),
+    () => jump("lp-faq"),
+    () => jump("lp-papers"),
+    () => setPage("blog"),
+  ];
 
   return (
     <header className="lp-bar">
@@ -140,7 +184,8 @@ function TopBar({ page, setPage, login }) {
         </div>
 
         <nav className="lp-nav">
-          <NavDropdown label="Product" items={FEATURE_ITEMS} closeSignal={page} onSelect={() => login()} />
+          <NavDropdown label="Product" items={FEATURE_ITEMS} closeSignal={page}
+            onSelect={(i) => productActions[i]()} />
           <NavDropdown label="Resources" items={RESOURCE_ITEMS} closeSignal={page}
             onSelect={(i) => resourceActions[i]()} />
           <button className="lp-link" onClick={() => setPage("careers")}>Careers</button>
@@ -254,6 +299,7 @@ const ICON_PATHS = {
   news: "M4 4h13a2 2 0 0 1 2 2v13a1 1 0 0 1-1 1H6a2 2 0 0 1-2-2V4z M20 8v9a2 2 0 0 1-2 2 M8 8h7 M8 12h7 M8 16h4",
   faq: "M12 17.5h.01 M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.9.4-1.5 1-1.5 2.2 M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z",
   pub: "M6 3h12v18l-6-3.5L6 21z",
+  blog: "M4 19V6a2 2 0 0 1 2-2h9l5 5v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z M15 4v5h5 M8 12h8 M8 16h5",
   ask: "M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z M12 8.3a1.8 1.8 0 1 1 2.3 1.7c-.7.3-1.3.8-1.3 1.6 M12.3 14.2h.01",
   filter: "M3 4h18l-7 8v6l-4 2v-8z",
   extract: "M12 2v4 M12 18v4 M2 12h4 M18 12h4 M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z",
@@ -277,73 +323,26 @@ function FeatureIcon({ i, name }) {
 function Home({ login, setPage }) {
   return (
     <>
-      <section className="lp-hero">
-        <h1 className="lp-h1">Interactive Scientific AI Research Assistant</h1>
-        <p className="lp-sub">Accelerates innovation, and boosts scientific discovery.</p>
-        <div className="lp-cta-row">
-          <button className="lp-cta" onClick={() => login("signup")}>Try for free</button>
-          <button className="lp-cta-2"
-            onClick={() => document.getElementById("lp-features")?.scrollIntoView({ behavior: "smooth" })}>
-            See how it works
-          </button>
+      <section className="lp3-hero">
+        <div className="lp3-hero-copy">
+          <div className="lp3-eyebrow">Sift · literature review agent</div>
+          <h1 className="lp-h1">Interactive Scientific AI Research Assistant</h1>
+          <p className="lp-sub">Accelerates innovation, and boosts scientific discovery.</p>
+          <div className="lp-cta-row">
+            <button className="lp-cta" onClick={() => login("signup")}>Try for free</button>
+            <button className="lp-cta-2"
+              onClick={() => document.getElementById("lp-features")?.scrollIntoView({ behavior: "smooth" })}>
+              See how it works
+            </button>
+          </div>
+          <div className="lp-note">Sign in with Google, GitHub, or email — no credit card required.</div>
+          <button className="lp-pricing-link" onClick={() => setPage("pricing")}>See pricing →</button>
         </div>
-        <div className="lp-note">Sign in with Google, GitHub, or email — no credit card required.</div>
-        <button className="lp-pricing-link" onClick={() => setPage("pricing")}>See pricing →</button>
-        <HeroVisual />
+        <Suspense fallback={<FigureFallback />}><CitationFigure /></Suspense>
       </section>
 
       <div id="lp-features" className="lp-section">
-        <div className="lp-ads-label">What it does</div>
-        <h2 className="lp-cat">Literature Review</h2>
-        <p className="lp-cat-sub">From a research question to a cited review — automatically.</p>
-
-        {/* Pipeline steps overview — clickable, scrolls to the matching
-            detail section below so the strip feels like a live map of the
-            pipeline rather than a flat row of labels. */}
-        <div className="lp-steps">
-          {STEPS.map((s, i) => (
-            <React.Fragment key={s.k}>
-              <a href={`#feat-${STEP_FEATURE_MAP[i]}`} className="lp-step">
-                <div className="lp-step-ic">
-                  <span className="lp-step-ic-ring" />
-                  <FeatureIcon name={STEP_ICONS[i]} />
-                </div>
-                <div className="lp-step-n">{i + 1}</div>
-                <div className="lp-step-t">{s.k}</div>
-                <div className="lp-step-d">{s.d}</div>
-              </a>
-              {i < STEPS.length - 1 && (
-                <div className="lp-step-arrow" aria-hidden="true">
-                  <svg viewBox="0 0 28 16" className="lp-step-arrow-svg">
-                    <path d="M1 8h22M17 2l6 6-6 6" />
-                    <circle r="2" className="lp-step-flow">
-                      <animateMotion dur="2.4s" repeatCount="indefinite"
-                        begin={`${i * 0.3}s`} path="M1 8h22" />
-                    </circle>
-                  </svg>
-                </div>
-              )}
-            </React.Fragment>
-          ))}
-        </div>
-
-        {/* Step-by-step feature detail */}
-        {FEATURES.map((f, i) => (
-          <Reveal key={f.title}>
-            <div className={"lp-feature" + (i % 2 ? " rev" : "")} id={`feat-${i}`}>
-              <div>
-                <div className="lp-step-tag">Step {i + 1}</div>
-                <h3 className="lp-feat-title">{f.title}</h3>
-                <p className="lp-feat-body">{f.body}</p>
-                <ul className="lp-feat-list">
-                  {f.points.map((p) => <li key={p}><span className="lp-check">✓</span>{p}</li>)}
-                </ul>
-                <button className="lp-learn" onClick={() => login("signup")}>Try it free →</button>
-              </div>
-              <div className="lp-visual">{f.visual}</div>
-            </div>
-          </Reveal>
-        ))}
+        <SiftSection login={login} />
 
         {/* ── Research Collaborations ─────────────────────────── */}
         <Reveal>
@@ -594,7 +593,9 @@ function FaqItem({ q, a }) {
 //   VITE_TWITTER_URL=https://x.com/your-handle
 //   VITE_LINKEDIN_URL=https://www.linkedin.com/company/your-page
 const TWITTER_URL = import.meta.env.VITE_TWITTER_URL || "";
-const LINKEDIN_URL = import.meta.env.VITE_LINKEDIN_URL || "";
+// Falls back to the public company page so the LinkedIn links work in every
+// environment (local dev has no VITE_LINKEDIN_URL); set the variable to override.
+const LINKEDIN_URL = import.meta.env.VITE_LINKEDIN_URL || "https://www.linkedin.com/company/143052410";
 const CONTACT_EMAIL = import.meta.env.VITE_CONTACT_EMAIL || "";
 
 function SiteFooter({ setPage }) {
@@ -611,6 +612,7 @@ function SiteFooter({ setPage }) {
             <div className="lp-foot-links">
               <button onClick={() => setPage("careers")}>Careers</button>
               <button onClick={() => setPage("about")}>About</button>
+              <button onClick={() => setPage("blog")}>Blog</button>
               <button onClick={() => setPage("pricing")}>Pricing</button>
             </div>
           )}
@@ -646,57 +648,190 @@ function SiteFooter({ setPage }) {
 
 /* ── Hypothesis Generation — auto-advancing closed-loop carousel ───────── */
 
-function HypothesisSection({ login }) {
-  const [i, setI] = useState(0);
-  const [paused, setPaused] = useState(false);
+/* ── Sift: one review followed through the six agents ───────────────────
+   The copy scrolls on the left while the 3D figure stays pinned on the right
+   and moves the same fifty papers from stage to stage. */
+function SiftSection({ login }) {
+  const stepsRef = useRef(null);
+  const [cur, setCur] = useState(0);
+  const stages = [
+    {
+      k: "Ask", title: "Your research question",
+      body: "Ask a question in plain language. Sift reformulates it into precise search queries before anything is retrieved.",
+      points: [],
+      visual: (
+        <div className="lp-card lp3-ask">
+          <span>Q</span>How do diffusion models handle protein–ligand binding?
+        </div>
+      ),
+    },
+    {
+      k: "Search", ...FEATURES[0],
+      body: "Sift searches Semantic Scholar, arXiv, OpenAlex and PubMed at once — ranking results by relevance to your topic, not just citation count.",
+    },
+    { k: "Filter", ...FEATURES[1] },
+    { k: "Extract", ...FEATURES[2] },
+    {
+      k: "Critique", title: "Themes and gaps",
+      body: "Before a word is written, the critique agent groups the corpus into themes, finds where the papers agree, and marks what nobody has studied yet.",
+      points: ["Themes, consensus and gaps detected first", "Every claim traces to a numbered source"],
+      visual: null,
+    },
+    { k: "Write", ...FEATURES[3] },
+  ];
+  const chat = FEATURES[4];
 
-  useEffect(() => {
-    if (paused) return;
-    const t = setInterval(() => setI((n) => (n + 1) % LOOP.length), 5000);
-    return () => clearInterval(t);
-  }, [paused]);
-
-  const stage = LOOP[i];
   return (
-    <div className="lp-band" onMouseEnter={() => setPaused(true)} onMouseLeave={() => setPaused(false)}>
-      <h2 className="lp-cat">Hypothesis Generation</h2>
+    <>
+      <div className="lp-ads-label lp3-left">What it does</div>
+      <h2 className="lp-cat">Sift - Literature Review</h2>
+      <p className="lp-cat-sub">
+        From a research question to a cited review — automatically. Scroll to follow one review through the six agents.
+      </p>
+
+      <div className="lp3-pipe">
+        <div className="lp3-steps" ref={stepsRef}>
+          {stages.map((f, i) => (
+            <article key={f.k} id={"sift-" + f.k.toLowerCase()} className={"lp3-step" + (i === cur ? " on" : "")}>
+              <div className="lp-step-tag">{i + 1} · {f.k}</div>
+              <h3 className="lp-feat-title">{f.title}</h3>
+              <p className="lp-feat-body">{f.body}</p>
+              {f.points.length > 0 && (
+                <ul className="lp-feat-list">
+                  {f.points.map((p) => <li key={p}><span className="lp-check">✓</span>{p}</li>)}
+                </ul>
+              )}
+              {f.visual && <div className="lp-visual lp3-step-visual">{f.visual}</div>}
+              {i > 0 && <button className="lp-learn" onClick={() => login("signup")}>Try it free →</button>}
+            </article>
+          ))}
+        </div>
+        <div className="lp3-pipe-fig">
+          <Suspense fallback={<FigureFallback />}>
+            <PipelineFigure stepsRef={stepsRef} onStage={setCur} />
+          </Suspense>
+        </div>
+      </div>
+
+      <Reveal>
+        <div className="lp-feature" id="feat-4">
+          <div>
+            <div className="lp-step-tag">Research Paper Analysis</div>
+            <h3 className="lp-feat-title">{chat.title}</h3>
+            <p className="lp-feat-body">{chat.body}</p>
+            <ul className="lp-feat-list">
+              {chat.points.map((p) => <li key={p}><span className="lp-check">✓</span>{p}</li>)}
+            </ul>
+            <button className="lp-learn" onClick={() => login("signup")}>Try it free →</button>
+          </div>
+          <div className="lp-visual">{chat.visual}</div>
+        </div>
+      </Reveal>
+    </>
+  );
+}
+
+/* ── Infinity: hypothesis generation ─────────────────────────────────────
+   Two blocks. First the hypothesis pipeline, condensed to its four key
+   moves (the app's HypothesisPipelineRail has the full seven stages) and
+   shown as a rotating 3D bracket. Then the three-stage loop out to the bench. */
+const HYPO_PIPELINE = [
+  ["Generate", "Reads Sift's findings and proposes competing hypotheses"],
+  ["Critique", "Scores each one and searches for prior art"],
+  ["Rank", "Head-to-head matches, single elimination"],
+  ["Recommend", "Final pick, checked against the reported literature"],
+];
+
+// Steps through `count` stages on its own, forever, while the block is on
+// screen — no hovering or clicking needed. Clicking a stage jumps to it, holds
+// it for twice as long, then the cycle carries on. Returns the ref to put on
+// the block and the current hold time (for the progress bar on the active item).
+function useAutoStage(count, ms) {
+  const ref = useRef(null);
+  const [i, setI] = useState(0);
+  const [hold, setHold] = useState(ms);
+  const [turn, setTurn] = useState(0);   // bumps on every change so the timer restarts
+  const [seen, setSeen] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const io = new IntersectionObserver(([e]) => setSeen(e.isIntersecting), { threshold: 0.25 });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+  useEffect(() => {
+    if (!seen) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const t = setTimeout(() => { setI((n) => (n + 1) % count); setHold(ms); setTurn((n) => n + 1); }, hold);
+    return () => clearTimeout(t);
+  }, [seen, turn, hold, count, ms]);
+  const pick = (n) => { setI(n); setHold(ms * 2); setTurn((t) => t + 1); };
+  return [i, pick, ref, { "--lp3-hold": hold + "ms" }, seen, turn];
+}
+
+function HypothesisSection({ login }) {
+  const [h, pickH, refH, holdH, seenH, turnH] = useAutoStage(HYPO_PIPELINE.length, 3130);
+  const [i, pickI, refI, holdI, seenI, turnI] = useAutoStage(LOOP.length, 7000);
+  const stage = LOOP[i];
+
+  return (
+    <div className="lp-band" id="lp-infinity">
+      <div className="lp-ads-label lp3-left">Early access</div>
+      <h2 className="lp-cat">Infinity - Hypothesis Generation</h2>
       <p className="lp-cat-sub">
         Beyond reading the literature — close the loop between AI reasoning and the bench.
       </p>
 
-      {/* loop navigator */}
-      <div className="lp-loop">
-        {LOOP.map((s, n) => (
-          <React.Fragment key={s.key}>
-            <button className={"lp-loop-node" + (n === i ? " on" : "")} onClick={() => setI(n)}>
-              <span className="lp-loop-ic">{s.ic}</span>
-              <span className="lp-loop-t">{s.key}</span>
-              <span className="lp-loop-s">{s.sub}</span>
-            </button>
-            <span className="lp-loop-arrow" aria-hidden="true">{n === LOOP.length - 1 ? "↺" : "→"}</span>
-          </React.Fragment>
-        ))}
-      </div>
-
-      {/* slide */}
-      <div className="lp-slide" key={stage.key}>
-        <div className="lp-slide-copy">
-          <div className="lp-step-tag">Stage {i + 1} of {LOOP.length}</div>
-          <h3 className="lp-feat-title">{stage.title}</h3>
-          <p className="lp-feat-body">{stage.body}</p>
-          <ul className="lp-feat-list">
-            {stage.points.map((p) => <li key={p}><span className="lp-check">✓</span>{p}</li>)}
-          </ul>
-          <button className="lp-learn" onClick={() => login("signup")}>Join the early access →</button>
+      {/* 1. the hypothesis pipeline */}
+      <div className={"lp3-loop" + (seenH ? " lp3-auto" : "")} ref={refH} style={holdH}>
+        <div className="lp3-loopfig">
+          <Suspense fallback={<FigureFallback />}><HypothesisFigure stage={h} /></Suspense>
         </div>
-        <div className="lp-visual">{stage.visual}</div>
+        <div>
+          <div className="lp-step-tag">Hypothesis pipeline</div>
+          <h3 className="lp-feat-title">From your literature to one recommended hypothesis</h3>
+          <p className="lp-feat-body">
+            Infinity reads the findings Sift extracted, proposes competing hypotheses, and makes them
+            earn their place: each is critiqued, checked for prior art and ranked head to head before one is recommended.
+          </p>
+          <ol className="lp3-rail">
+            {HYPO_PIPELINE.map(([t, d], n) => (
+              <li key={n === h ? t + turnH : t}>
+                <button className={"lp3-rail-btn" + (n === h ? " on" : "") + (n < h ? " done" : "")}
+                  aria-current={n === h ? "step" : undefined} onClick={() => pickH(n)}>
+                  <span className="lp3-rail-n">{n < h ? "✓" : n + 1}</span>
+                  <span><b>{t}</b><small>{d}</small></span>
+                </button>
+              </li>
+            ))}
+          </ol>
+        </div>
       </div>
 
-      <div className="lp-dots">
-        {LOOP.map((s, n) => (
-          <button key={s.key} aria-label={s.key}
-            className={"lp-dot" + (n === i ? " on" : "")} onClick={() => setI(n)} />
-        ))}
+      {/* 2. out to the bench and back */}
+      <div className={"lp3-loop lp3-loop-2" + (seenI ? " lp3-auto" : "")} ref={refI} style={holdI}>
+        <div className="lp3-loopfig">
+          <Suspense fallback={<FigureFallback />}><LoopFigure mode={i} /></Suspense>
+        </div>
+        <div>
+          <div className="lp3-tabs" role="tablist" aria-label="Stages of the Infinity loop">
+            {LOOP.map((s, n) => (
+              <button key={n === i ? s.key + turnI : s.key} role="tab" aria-selected={n === i}
+                className={"lp3-tab" + (n === i ? " on" : "")} onClick={() => pickI(n)}>
+                <span className="lp3-tab-n">{n + 1}/{LOOP.length}</span>
+                <span><b>{s.key}</b><small>{s.sub}</small></span>
+              </button>
+            ))}
+          </div>
+          <div className="lp3-panel" key={stage.key}>
+            <h3 className="lp-feat-title">{stage.title}</h3>
+            <p className="lp-feat-body">{stage.body}</p>
+            <ul className="lp-feat-list">
+              {stage.points.map((p) => <li key={p}><span className="lp-check">✓</span>{p}</li>)}
+            </ul>
+            <button className="lp-learn" onClick={() => login("signup")}>Join the early access →</button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -1073,8 +1208,8 @@ const FEATURES = [
   },
   {
     title: "Chat with any paper",
-    body: "Ask a specific paper anything. Quick mode answers instantly from cached extractions at no cost; Deep mode re-reads the full PDF for thorough, reasoned answers — and you can attach a figure to discuss it.",
-    points: ["Quick (free) and Deep (thorough) modes", "Grounded in the paper — no invented facts", "Chat history saved per paper"],
+    body: "Ask a specific paper anything, at any point: while you're still choosing sources, in the middle of a review, or on its own to understand a paper you already have. Quick mode answers instantly from cached extractions at no cost; Deep mode re-reads the full PDF for thorough, reasoned answers — and you can attach a figure to discuss it.",
+    points: ["Use it during a review, or on a single paper by itself", "Upload your own PDFs to read and question them", "Quick (free) and Deep (thorough) modes", "Grounded in the paper — no invented facts", "Chat history saved per paper"],
     visual: ChatVisual,
   },
 ];
@@ -1087,7 +1222,7 @@ const PLANS = [
     blurb: "Explore the full pipeline on small reviews.",
     features: ["Up to 20 papers per review", "Lite search mode", "Abstract-level extraction",
                "Paper chat (Quick mode)", "Export Markdown & BibTeX"],
-    cta: "Start free", highlight: false,
+    cta: "Start 7-day free trial", highlight: false,
   },
   {
     name: "Pro", price: "$10", per: "per month",
@@ -1130,7 +1265,7 @@ function Pricing({ login }) {
         ))}
       </div>
 
-      <p className="lp-p-foot">All plans include unlimited searches. Cancel anytime.</p>
+      <p className="lp-p-foot">Every new account gets a 7-day Pro trial with $3 in credits — no card required. When it ends you stay on Free and keep your saved work. Cancel paid plans anytime.</p>
     </section>
   );
 }
@@ -1155,7 +1290,7 @@ const OPEN_ROLES = [
     contract: "3-month initial contract",
     contractNote: "Possibility of converting to a full-time role with startup equity after the initial contract.",
     applyEmail: "hr@orcusintelligencelab.com",
-    blurb: "At Orcus Intelligence Labs, we are building next-generation multi-agent systems " +
+    blurb: "At Orcus Intelligence Lab, we are building next-generation multi-agent systems " +
       "designed to automate academic literature discovery, semantic synthesis, and hypothesis " +
       "generation. We are seeking a fast-learning, engineering-minded intern to work at the " +
       "intersection of agentic workflows and production full-stack systems. You will play a " +
@@ -1201,72 +1336,484 @@ const OPEN_ROLES = [
         ],
       },
     ],
-    notes: "Please submit your CV and cover letter in English to hr@orcusintelligencelab.com. " +
-      "If you have a GitHub profile, personal portfolio, or previous projects involving LLMs " +
-      "or agentic systems, please include those links.",
+    notes: "A CV and a cover letter (both required) should be submitted in English to " +
+      "hr@orcusintelligencelab.com — applications without a cover letter will not be " +
+      "reviewed. If you have a GitHub profile, personal portfolio, or previous projects " +
+      "involving LLMs or agentic systems, please include those links.",
+  },
+  {
+    id: "ai-systems-research-engineer-rsi",
+    title: "AI Systems Research Engineer — Recursive Self-Improvement (RSI)",
+    meta: "Internship → Full-time · Remote",
+    salary: "NPR 35,000 / month (initial contract)",
+    contract: "3-month initial contract",
+    contractNote: "Renews as a full-time role with shared equity and an increased salary, based on " +
+      "performance during the initial contract.",
+    applyEmail: "hr@orcusintelligencelab.com",
+    blurb: "This role sits on our Recursive Self-Improvement (RSI) track: building the agents, " +
+      "harnesses, and feedback loops that let our own systems accelerate the research and " +
+      "engineering work behind them. You'll work across the full loop — evaluations, agent " +
+      "harnesses, training data, and infrastructure — turning open-ended problems in agentic " +
+      "and embodied AI into rigorous, reliable systems. You'll move fluidly between research " +
+      "and implementation, with real ownership over what gets built.",
+    sections: [
+      {
+        heading: "Key responsibilities",
+        items: [
+          "Recursive self-improvement loops — design evaluations for agent judgment, " +
+            "hypothesis generation, and long-horizon task execution; turn real failures and " +
+            "workflow traces into data and evaluation flywheels that make the next iteration " +
+            "of the system better.",
+          "Agent harness design — build and maintain agent harnesses, tool-use scaffolding, " +
+            "and sandboxed runtimes that let models operate reliably on consumer devices and " +
+            "automated systems, not just in a chat window.",
+          "Embodied & robotic systems — extend agentic workflows toward physical systems: " +
+            "sensor integration, actuator/motion control interfaces, and closing the loop " +
+            "between an agent's decisions and real-world sensing and movement.",
+          "Simulation & sim-to-real validation — set up policy evaluation in simulation " +
+            "environments and help validate that behavior learned or planned in sim holds up " +
+            "on real hardware.",
+          "Infrastructure & reliability — build the pipelines, tooling, and monitoring needed " +
+            "to run these systems safely and repeatably, and think rigorously about failure " +
+            "modes before they reach hardware.",
+        ],
+      },
+      {
+        heading: "Required qualifications",
+        items: [
+          "Strong proficiency in Python and comfort with systems-level engineering (async " +
+            "programming, APIs, concurrency).",
+          "Experience with LLM/agent APIs and building agentic workflows (tool use, function " +
+            "calling, multi-step task execution).",
+          "Solid CS fundamentals — data structures, algorithms, and the judgment to design " +
+            "evaluations for problems that don't have an obvious right answer yet.",
+          "Comfortable working on ambiguous, open-ended problems without an established " +
+            "playbook.",
+        ],
+      },
+      {
+        heading: "Preferred qualifications (added benefit, not required)",
+        items: [
+          "Hands-on familiarity with robotics systems — sensor integration (LIDAR, depth " +
+            "cameras, IMUs, etc.), actuator/motor control, and basic motion planning.",
+          "Experience with NVIDIA Isaac Sim, Gazebo, or a comparable simulator for policy " +
+            "evaluation and sim-to-real validation.",
+          "Experience building agent harnesses for consumer devices or automated/robotic " +
+            "systems, rather than purely cloud/API-based agents.",
+          "Background in reinforcement learning, robot learning, or control theory.",
+        ],
+      },
+    ],
+    notes: "A CV and a cover letter (both required) should be submitted in English to " +
+      "hr@orcusintelligencelab.com — applications without a cover letter will not be " +
+      "reviewed. If you've worked on robotics, sim-to-real, or agentic systems before, " +
+      "please include links to that work (GitHub, papers, videos of hardware in action, " +
+      "etc.) — for this role, a demo is worth more than a bullet point.",
   },
 ];
 
-function RoleCard({ role }) {
-  const applyEmail = role.applyEmail || CONTACT_EMAIL;
-  const subject = encodeURIComponent(`Application: ${role.title}`);
-  const body = encodeURIComponent(
-    `Hi Orcus Intelligence Lab team,\n\nI'm interested in the ${role.title} role. My CV and cover letter are attached.\n\n`
+// Splits a notes string on any email address and renders each one as a
+// clickable mailto: link, so job-posting copy (which is written as plain
+// text in the OPEN_ROLES data above) doesn't need its own JSX just to make
+// the contact address tappable.
+const EMAIL_RE = /([\w.+-]+@[\w-]+\.[\w.-]+)/g;
+// A single non-global regex for the per-part .test() below — reusing the
+// global EMAIL_RE (or any global regex) across repeated .test() calls would
+// silently skip matches, since .test() advances lastIndex on a global regex.
+const EMAIL_RE_SINGLE = /^[\w.+-]+@[\w-]+\.[\w.-]+$/;
+function renderNotesWithMailto(text) {
+  const parts = text.split(EMAIL_RE);
+  return parts.map((part, i) =>
+    EMAIL_RE_SINGLE.test(part) ? (
+      <a key={i} href={`mailto:${part}`}>{part}</a>
+    ) : (
+      <span key={i}>{part}</span>
+    )
   );
+}
+
+// The URL a role's "Apply" link points to — same origin/path, plus an
+// ?apply=<roleId> query param that LandingPage checks on load to jump
+// straight into the full-page ApplyPage below, in a brand-new tab (so the
+// person doesn't lose their place on the Careers listing), mirroring how
+// job boards like Ashby open the application form as its own page.
+function applyHref(roleId) {
+  const url = new URL(window.location.href);
+  url.search = `?apply=${encodeURIComponent(roleId)}`;
+  url.hash = "";
+  return url.toString();
+}
+
+// One open role. The header (title, facts, Apply) and the summary are always
+// visible; the long responsibilities/qualifications lists open on demand so
+// the page stays scannable when there are several roles.
+function RoleCard({ role, defaultOpen = false }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const facts = [...(role.meta || "").split(" · "), role.salary, role.contract].filter(Boolean);
+  const [first, ...rest] = role.sections;
   return (
-    <div className="lp-role-card">
-      <div className="lp-role-head">
-        <div>
-          <div className="lp-role-title">{role.title}</div>
-          <div className="lp-role-meta">
-            {role.meta}{role.salary ? ` · ${role.salary}` : ""}{role.contract ? ` · ${role.contract}` : ""}
-          </div>
-          {role.contractNote && <div className="lp-role-meta">{role.contractNote}</div>}
-        </div>
-        {applyEmail && (
-          <a className="lp-cta" href={`mailto:${applyEmail}?subject=${subject}&body=${body}`}>
-            Apply →
-          </a>
-        )}
-      </div>
-      {role.blurb && <p className="lp-role-blurb">{role.blurb}</p>}
-      {role.sections.map((s) => (
-        <div key={s.heading} className="lp-role-section">
-          <div className="lp-role-section-h">{s.heading}</div>
-          <ul className="lp-role-list">
-            {s.items.map((it, i) => <li key={i}>{it}</li>)}
+    <article className="lpc-role" id={`role-${role.id}`}>
+      <div className="lpc-role-head">
+        <div className="lpc-role-headmain">
+          <h3 className="lpc-role-title">{role.title}</h3>
+          <ul className="lpc-facts">
+            {facts.map((f) => <li key={f}>{f}</li>)}
           </ul>
         </div>
+        <a className="lp-cta lpc-apply" href={applyHref(role.id)} target="_blank" rel="noopener noreferrer">
+          Apply →
+        </a>
+      </div>
+      {role.blurb && <p className="lpc-role-blurb">{role.blurb}</p>}
+      {role.contractNote && <p className="lpc-role-after"><b>After the contract</b>{role.contractNote}</p>}
+
+      <button className="lpc-toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        {open ? "Hide full description" : "Read full description"}
+        <svg className={"lp-caret" + (open ? " up" : "")} viewBox="0 0 12 8" width="10" height="7" aria-hidden="true">
+          <path d="M1 1.5 6 6.5 11 1.5" fill="none" stroke="currentColor" strokeWidth="1.6"
+            strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="lpc-role-body">
+          {first && (
+            <div className="lpc-sec">
+              <h4>{first.heading}</h4>
+              <ul>{first.items.map((it, i) => <li key={i}>{it}</li>)}</ul>
+            </div>
+          )}
+          {rest.length > 0 && (
+            <div className="lpc-sec-grid">
+              {rest.map((sec) => (
+                <div key={sec.heading} className="lpc-sec">
+                  <h4>{sec.heading}</h4>
+                  <ul>{sec.items.map((it, i) => <li key={i}>{it}</li>)}</ul>
+                </div>
+              ))}
+            </div>
+          )}
+          {role.notes && (
+            <div className="lpc-howto">
+              <b>How to apply</b>
+              <p>{renderNotesWithMailto(role.notes)}</p>
+              <a className="lp-cta lpc-apply" href={applyHref(role.id)} target="_blank" rel="noopener noreferrer">
+                Apply for this role →
+              </a>
+            </div>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
+
+const APPLY_FIELDS_INITIAL = {
+  first_name: "", last_name: "", email: "", phone_code: "+977", phone: "",
+  address: "", city: "", country: "", linkedin: "", scholar: "",
+  github: "", personal_website: "",
+  location: "", start_date: "", work_authorized: "", needs_sponsorship: "",
+  additional_info: "", website: "",
+};
+
+// A two-button Yes/No toggle, styled after the same pattern most job-board
+// screening questions use — simpler than a <select> for a binary answer,
+// and makes "unanswered" visually obvious (neither button highlighted)
+// instead of quietly defaulting to one side.
+function YesNoToggle({ value, onChange }) {
+  return (
+    <div className="lp-yn-toggle" role="group">
+      {["yes", "no"].map((v) => (
+        <button key={v} type="button" className={"lp-yn-btn" + (value === v ? " active" : "")}
+          onClick={() => onChange(v)}>
+          {v === "yes" ? "Yes" : "No"}
+        </button>
       ))}
-      {role.notes && <p className="lp-role-notes">{role.notes}</p>}
+    </div>
+  );
+}
+
+// A short list covering the countries most likely to actually apply (Nepal
+// first, since that's where the company and most roles posted so far are
+// based) — not every ITU code in existence, just enough that "no country
+// code at all" stops being the default.
+const COUNTRY_CODES = [
+  ["+977", "Nepal (+977)"],
+  ["+91", "India (+91)"],
+  ["+1", "US/Canada (+1)"],
+  ["+44", "UK (+44)"],
+  ["+61", "Australia (+61)"],
+  ["+971", "UAE (+971)"],
+  ["+65", "Singapore (+65)"],
+  ["+49", "Germany (+49)"],
+  ["+33", "France (+33)"],
+  ["+81", "Japan (+81)"],
+  ["+86", "China (+86)"],
+  ["+880", "Bangladesh (+880)"],
+];
+
+// Full-page application form — opened in its own tab via applyHref() above,
+// styled after the job-board pattern (org header, job details on the left,
+// Overview/Application tabs on the right) rather than an in-page modal, so
+// the person keeps the Careers listing open in their original tab.
+function ApplyPage({ role, onBack }) {
+  const [tab, setTab] = useState("application"); // "overview" | "application"
+  const [fields, setFields] = useState(APPLY_FIELDS_INITIAL);
+  const [resume, setResume] = useState(null);
+  const [coverLetter, setCoverLetter] = useState(null);
+  const [additionalDoc, setAdditionalDoc] = useState(null);
+  const [certified, setCertified] = useState(false);
+  const [status, setStatus] = useState("idle"); // idle | sending | sent | error
+  const [error, setError] = useState("");
+  const applyEmail = role.applyEmail || CONTACT_EMAIL;
+
+  const set = (field) => (e) => setFields((f) => ({ ...f, [field]: e.target.value }));
+  const setChoice = (field) => (v) => setFields((f) => ({ ...f, [field]: v }));
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!fields.first_name.trim() || !fields.last_name.trim() || !fields.email.trim()) {
+      setStatus("error");
+      setError("Please fill in your first name, last name, and email.");
+      return;
+    }
+    if (!fields.location.trim() || !fields.start_date) {
+      setStatus("error");
+      setError("Please fill in your current location and earliest start date.");
+      return;
+    }
+    if (!fields.work_authorized || !fields.needs_sponsorship) {
+      setStatus("error");
+      setError("Please answer the work authorization and sponsorship questions.");
+      return;
+    }
+    if (!resume || !coverLetter) {
+      setStatus("error");
+      setError("Both a resume and a cover letter are required (PDF or Word, up to 8MB each).");
+      return;
+    }
+    if (!certified) {
+      setStatus("error");
+      setError("Please confirm the information in your application is accurate before submitting.");
+      return;
+    }
+    setStatus("sending");
+    setError("");
+    try {
+      const { phone_code, phone, address, city, country, ...rest } = fields;
+      const fullPhone = phone.trim() ? `${phone_code} ${phone.trim()}` : "";
+      const fullAddress = [address.trim(), city.trim(), country.trim()].filter(Boolean).join(", ");
+      await api.submitJobApplication({
+        ...rest, phone: fullPhone, address: fullAddress, role_title: role.title,
+        certified: certified ? "yes" : "no",
+        resume, cover_letter: coverLetter, additional_document: additionalDoc,
+      });
+      setStatus("sent");
+    } catch (err) {
+      setStatus("error");
+      setError(err.message || "Something went wrong. Please try again.");
+    }
+  }
+
+  return (
+    <div className="lp-apply-page">
+      <header className="lp-apply-header">
+        <button type="button" className="lp-apply-back" onClick={onBack} aria-label="Back to Careers">←</button>
+        <div className="lp-apply-header-brand"><LogoMark /><span>Orcus Intelligence Lab</span></div>
+        <span className="lp-apply-back" aria-hidden="true" style={{ visibility: "hidden" }}>←</span>
+      </header>
+
+      <div className="lp-apply-body">
+        <h1 className="lp-apply-title">{role.title}</h1>
+
+        <div className="lp-apply-grid">
+          <aside className="lp-apply-side">
+            {role.meta && (
+              <div className="lp-apply-meta-block">
+                <div className="lp-apply-meta-label">Type</div>
+                <div>{role.meta}</div>
+              </div>
+            )}
+            {role.salary && (
+              <div className="lp-apply-meta-block">
+                <div className="lp-apply-meta-label">Compensation</div>
+                <div>{role.salary}</div>
+              </div>
+            )}
+            {role.contract && (
+              <div className="lp-apply-meta-block">
+                <div className="lp-apply-meta-label">Contract</div>
+                <div>{role.contract}</div>
+                {role.contractNote && <div className="lp-apply-meta-note">{role.contractNote}</div>}
+              </div>
+            )}
+            {role.blurb && <p className="lp-apply-blurb">{role.blurb}</p>}
+          </aside>
+
+          <main className="lp-apply-main">
+            <div className="lp-apply-tabs">
+              <button type="button" className={"lp-apply-tab" + (tab === "overview" ? " active" : "")}
+                onClick={() => setTab("overview")}>Overview</button>
+              <button type="button" className={"lp-apply-tab" + (tab === "application" ? " active" : "")}
+                onClick={() => setTab("application")}>Application</button>
+            </div>
+
+            {tab === "overview" ? (
+              <div className="lp-apply-overview">
+                {role.sections.map((s) => (
+                  <div key={s.heading} className="lp-role-section">
+                    <div className="lp-role-section-h">{s.heading}</div>
+                    <ul className="lp-role-list">
+                      {s.items.map((it, i) => <li key={i}>{it}</li>)}
+                    </ul>
+                  </div>
+                ))}
+                {role.notes && <p className="lp-role-notes">{renderNotesWithMailto(role.notes)}</p>}
+                <button type="button" className="lp-cta" onClick={() => setTab("application")}>
+                  Continue to application →
+                </button>
+              </div>
+            ) : status === "sent" ? (
+              <div className="lp-modal-sent">
+                <h3>Application received</h3>
+                <p>Thanks for applying to {role.title} — we'll be in touch.</p>
+              </div>
+            ) : (
+              <form className="lp-apply-form" onSubmit={submit}>
+                {/* Honeypot — see backend/api/routes.py submit_job_application */}
+                <input type="text" name="website" value={fields.website} onChange={set("website")}
+                  className="lp-contact-honeypot" tabIndex={-1} autoComplete="off" aria-hidden="true" />
+                <div className="lp-contact-form-row">
+                  <input type="text" placeholder="First name" value={fields.first_name} onChange={set("first_name")} required />
+                  <input type="text" placeholder="Last name" value={fields.last_name} onChange={set("last_name")} required />
+                </div>
+                <input type="email" placeholder="Email" value={fields.email} onChange={set("email")} required />
+                <div className="lp-phone-row">
+                  <select value={fields.phone_code} onChange={set("phone_code")} className="lp-phone-code" aria-label="Country code">
+                    {COUNTRY_CODES.map(([code, label]) => <option key={code} value={code}>{label}</option>)}
+                  </select>
+                  <input type="tel" placeholder="Phone number" value={fields.phone} onChange={set("phone")} />
+                </div>
+                <input type="text" placeholder="Street address" value={fields.address} onChange={set("address")} />
+                <div className="lp-contact-form-row">
+                  <input type="text" placeholder="City" value={fields.city} onChange={set("city")} />
+                  <input type="text" placeholder="Country" value={fields.country} onChange={set("country")} />
+                </div>
+                <input type="url" placeholder="LinkedIn profile URL (optional)" value={fields.linkedin} onChange={set("linkedin")} />
+                <input type="url" placeholder="Google Scholar URL (optional)" value={fields.scholar} onChange={set("scholar")} />
+                <input type="url" placeholder="GitHub profile URL (optional)" value={fields.github} onChange={set("github")} />
+                <input type="url" placeholder="Personal website (optional)" value={fields.personal_website} onChange={set("personal_website")} />
+
+                <label className="lp-file-field">
+                  <span>Resume (PDF/Word, required)</span>
+                  <input type="file" accept=".pdf,.doc,.docx" onChange={(e) => setResume(e.target.files?.[0] || null)} required />
+                </label>
+                <label className="lp-file-field">
+                  <span>Cover letter (PDF/Word, required)</span>
+                  <input type="file" accept=".pdf,.doc,.docx" onChange={(e) => setCoverLetter(e.target.files?.[0] || null)} required />
+                </label>
+                <label className="lp-file-field">
+                  <span>Additional document (optional — portfolio, writing sample, research summary)</span>
+                  <input type="file" accept=".pdf,.doc,.docx" onChange={(e) => setAdditionalDoc(e.target.files?.[0] || null)} />
+                </label>
+
+                <div className="lp-apply-questions">
+                  <label className="lp-apply-q">
+                    <span>Where are you currently located? (city, country)</span>
+                    <input type="text" placeholder="e.g. Kathmandu, Nepal" value={fields.location} onChange={set("location")} required />
+                  </label>
+                  <label className="lp-apply-q">
+                    <span>When can you start, if selected?</span>
+                    <input type="date" value={fields.start_date} onChange={set("start_date")} required />
+                  </label>
+                  <div className="lp-apply-q">
+                    <span>Are you legally authorized to work in your country of residence?</span>
+                    <YesNoToggle value={fields.work_authorized} onChange={setChoice("work_authorized")} />
+                  </div>
+                  <div className="lp-apply-q">
+                    <span>Will you now or in the future require visa/work-permit sponsorship for this role?</span>
+                    <YesNoToggle value={fields.needs_sponsorship} onChange={setChoice("needs_sponsorship")} />
+                  </div>
+                  <label className="lp-apply-q">
+                    <span>Anything else you'd like us to know? (motivation, context — optional)</span>
+                    <textarea rows={4} value={fields.additional_info} onChange={set("additional_info")} />
+                  </label>
+                </div>
+
+                <label className="lp-apply-certify">
+                  <input type="checkbox" checked={certified} onChange={(e) => setCertified(e.target.checked)} required />
+                  <span>I confirm the information provided in this application is accurate and complete to the best of my knowledge.</span>
+                </label>
+
+                {status === "error" && <p className="lp-contact-form-error">{error}</p>}
+                <button type="submit" className="lp-cta" disabled={status === "sending"}>
+                  {status === "sending" ? "Submitting…" : "Submit application"}
+                </button>
+                {applyEmail && (
+                  <a className="lp-apply-email-fallback" href={`mailto:${applyEmail}?subject=${encodeURIComponent(`Application: ${role.title}`)}`}>
+                    Prefer email? Email HR directly →
+                  </a>
+                )}
+              </form>
+            )}
+          </main>
+        </div>
+      </div>
     </div>
   );
 }
 
 function CareersPage() {
+  const jump = (id) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
   return (
-    <section className="lp-pricing">
-      <h1 className="lp-p-title">Careers at Orcus Intelligence Lab</h1>
-      <p className="lp-p-sub">
-        We're building the tools we wish existed when we were doing research ourselves —
-        and we're just getting started.
-      </p>
+    <section className="lpc">
+      {/* Header: the pitch on the left, what's open right now on the right */}
+      <div className="lpc-hero">
+        <div>
+          <div className="lp3-eyebrow">Careers</div>
+          <h1 className="lpc-title">Careers at Orcus Intelligence Lab</h1>
+          <p className="lpc-sub">
+            We're building the tools we wish existed when we were doing research ourselves —
+            and we're just getting started.
+          </p>
+          {OPEN_ROLES.length > 0 && (
+            <button className="lp-cta" onClick={() => jump("lpc-roles")}>
+              See open roles ({OPEN_ROLES.length})
+            </button>
+          )}
+        </div>
+        {OPEN_ROLES.length > 0 && (
+          <aside className="lpc-open" aria-label="Open roles">
+            <div className="lpc-open-h"><span className="lpc-dot" />Hiring now</div>
+            {OPEN_ROLES.map((r) => (
+              <button key={r.id} className="lpc-open-row" onClick={() => jump(`role-${r.id}`)}>
+                <span>
+                  <b>{r.title}</b>
+                  <small>{r.meta}</small>
+                </span>
+                <span aria-hidden="true">→</span>
+              </button>
+            ))}
+          </aside>
+        )}
+      </div>
 
-      <div className="lp-tri" style={{ textAlign: "left", marginBottom: 56 }}>
+      <div className="lpc-why">
         {WHY_SIFT.map((w) => (
-          <div className="lp-tile" key={w.t}>
-            <div className="lp-tile-t">{w.t}</div>
-            <div className="lp-tile-d">{w.d}</div>
+          <div key={w.t}>
+            <h3>{w.t}</h3>
+            <p>{w.d}</p>
           </div>
         ))}
       </div>
 
-      <div className="lp-openroles">
-        <h2 className="lp-cat" style={{ textAlign: "left" }}>Open roles</h2>
+      <div className="lpc-roles" id="lpc-roles">
+        <div className="lpc-roles-head">
+          <h2 className="lpc-h2">Open roles</h2>
+          {OPEN_ROLES.length > 0 && <span className="lpc-count">{OPEN_ROLES.length} open</span>}
+        </div>
         {OPEN_ROLES.length > 0 ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-            {OPEN_ROLES.map((r) => <RoleCard role={r} key={r.id} />)}
-          </div>
+          OPEN_ROLES.map((r) => <RoleCard role={r} key={r.id} defaultOpen={OPEN_ROLES.length === 1} />)
         ) : (
           <div className="lp-empty-card">
             <p>
@@ -1289,63 +1836,214 @@ function CareersPage() {
 const ABOUT_TABS = [
   { id: "about-team", label: "Team" },
   { id: "about-contact", label: "Contact us" },
-  { id: "about-blog", label: "Blog" },
 ];
 
-function AboutPage() {
+// What the message is about. The backend takes one free-text message, so
+// the chosen topic is sent as a "[Topic]" prefix on it — no API change needed.
+const CONTACT_TOPICS = ["Question", "Feedback", "Partnership", "Something else"];
+
+function ContactForm() {
+  const [form, setForm] = useState({ name: "", email: "", affiliation: "", message: "", website: "" });
+  const [topic, setTopic] = useState(CONTACT_TOPICS[0]);
+  const [status, setStatus] = useState("idle"); // idle | sending | sent | error
+  const [error, setError] = useState("");
+
+  const set = (field) => (e) => setForm((f) => ({ ...f, [field]: e.target.value }));
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!form.name.trim() || !form.email.trim() || !form.message.trim()) {
+      setStatus("error");
+      setError("Please fill in your name, email, and a message.");
+      return;
+    }
+    setStatus("sending");
+    setError("");
+    try {
+      await api.submitContactForm({ ...form, message: `[${topic}] ${form.message}` });
+      setStatus("sent");
+      setForm({ name: "", email: "", affiliation: "", message: "", website: "" });
+    } catch (err) {
+      setStatus("error");
+      setError(err.message || "Something went wrong. Please try again.");
+    }
+  }
+
+  if (status === "sent") {
+    return (
+      <div className="lpa-form lpa-sent" role="status">
+        <span className="lpa-sent-ic" aria-hidden="true">✓</span>
+        <h3>Message sent</h3>
+        <p>Thanks for reaching out — we'll get back to you soon.</p>
+        <button type="button" className="lp-cta-2" onClick={() => setStatus("idle")}>Send another message</button>
+      </div>
+    );
+  }
+
+  return (
+    <form className="lpa-form" onSubmit={submit} noValidate>
+      {/* Honeypot: hidden from real visitors via CSS, so only bots that
+          blindly fill every field will populate it (see backend/api/routes.py
+          submit_contact_form for the server-side check). */}
+      <input
+        type="text"
+        name="website"
+        value={form.website}
+        onChange={set("website")}
+        className="lp-contact-honeypot"
+        tabIndex={-1}
+        autoComplete="off"
+        aria-hidden="true"
+      />
+      <h3 className="lpa-form-title">Send us a message</h3>
+
+      <fieldset className="lpa-topics">
+        <legend>What is this about?</legend>
+        {CONTACT_TOPICS.map((t) => (
+          <button type="button" key={t} aria-pressed={t === topic}
+            className={"lpa-topic" + (t === topic ? " on" : "")} onClick={() => setTopic(t)}>
+            {t}
+          </button>
+        ))}
+      </fieldset>
+
+      <div className="lpa-row">
+        <label className="lpa-field" htmlFor="contact-name">
+          <span>Name</span>
+          <input id="contact-name" type="text" autoComplete="name" value={form.name} onChange={set("name")} required />
+        </label>
+        <label className="lpa-field" htmlFor="contact-email">
+          <span>Email</span>
+          <input id="contact-email" type="email" autoComplete="email" placeholder="you@university.edu"
+            value={form.email} onChange={set("email")} required />
+        </label>
+      </div>
+      <label className="lpa-field" htmlFor="contact-affiliation">
+        <span>Affiliation <em>optional</em></span>
+        <input id="contact-affiliation" type="text" autoComplete="organization" placeholder="University, lab or company"
+          value={form.affiliation} onChange={set("affiliation")} />
+      </label>
+      <label className="lpa-field" htmlFor="contact-message">
+        <span>Message</span>
+        <textarea id="contact-message" rows={6} placeholder="Your question or message"
+          value={form.message} onChange={set("message")} required />
+      </label>
+      {status === "error" && <p className="lpa-error" role="alert">{error}</p>}
+      <button type="submit" className="lp-cta lpa-send" disabled={status === "sending"}>
+        {status === "sending" ? "Sending…" : "Send message"}
+      </button>
+    </form>
+  );
+}
+
+const WHAT_WE_BUILD = [
+  ["Sift", "Literature review agent"],
+  ["Infinity", "Hypothesis generation agent"],
+  ["Physical AI", "Systems for Physical AI"],
+];
+
+// The About page is deliberately laid out differently from Home and Careers:
+// a centred statement up top, and Contact as one two-tone panel (dark details
+// side, light form side) rather than another pair of columns.
+function AboutPage({ setPage }) {
   const jump = (id) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  return (
+    <section className="lpa">
+      <div className="lpa-hero">
+        <BrandMark width={148} />
+        <h1 className="lpa-title">About Orcus Intelligence Lab</h1>
+        <p className="lpa-sub">
+          Orcus Intelligence Lab builds AI agents for research and systems for Physical AI.
+          We're small and independent.
+        </p>
+        <ul className="lpa-builds">
+          {WHAT_WE_BUILD.map(([name, what]) => (
+            <li key={name}><b>{name}</b><span>{what}</span></li>
+          ))}
+        </ul>
+        <div className="lpa-hero-cta">
+          <button className="lp-cta" onClick={() => jump("about-contact")}>Contact us</button>
+          <button className="lp-cta-2" onClick={() => jump("about-team")}>Meet the team</button>
+        </div>
+      </div>
+
+      <blockquote className="lpa-quote">
+        <span>Our mark</span>
+        Two ideas in balance — human judgment on one side, AI on the other. Sift
+        doesn't replace the researcher's read of the literature; it holds up its end of the
+        scale so you can do yours faster.
+      </blockquote>
+
+      <div className="lpa-team" id="about-team">
+        <h2 className="lpc-h2">Team</h2>
+        <div>
+          <p className="lpa-lede">
+            Sift is built by a small, hands-on team of researchers and engineers — everyone here
+            also uses the product to do their own literature reviews. Full team profiles are coming
+            soon; in the meantime, the fastest way to meet us is to say hello.
+          </p>
+          <button className="lp-learn" onClick={() => jump("about-contact")}>Get in touch →</button>
+        </div>
+      </div>
+
+      <div className="lpa-card" id="about-contact">
+        <div className="lpa-dark">
+          <h2>Contact us</h2>
+          <p>
+            Questions, feedback, partnership ideas, or just want to talk about the product —
+            reach out any time.
+          </p>
+
+          <dl className="lpa-channels">
+            {CONTACT_EMAIL && (
+              <div>
+                <dt>Email</dt>
+                <dd><a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a></dd>
+              </div>
+            )}
+            {LINKEDIN_URL && (
+              <div>
+                <dt>LinkedIn</dt>
+                <dd><a href={LINKEDIN_URL} target="_blank" rel="noreferrer">Orcus Intelligence Lab ↗</a></dd>
+              </div>
+            )}
+            {setPage && OPEN_ROLES.length > 0 && (
+              <div>
+                <dt>Careers</dt>
+                <dd>
+                  <button className="lpa-linkbtn" onClick={() => setPage("careers")}>
+                    See open roles ({OPEN_ROLES.length}) →
+                  </button>
+                </dd>
+              </div>
+            )}
+            <div>
+              <dt>Office</dt>
+              <dd>
+                <address className="lpa-address">
+                  Orcus Intelligence Lab<br />
+                  25600 Rolling Hills Way<br />
+                  Los Angeles, California 90505<br />
+                  United States
+                </address>
+              </dd>
+            </div>
+          </dl>
+        </div>
+        <ContactForm />
+      </div>
+    </section>
+  );
+}
+
+function BlogPage() {
   return (
     <section className="lp-pricing" style={{ paddingBottom: 0 }}>
       <BrandMark width={148} />
-      <h1 className="lp-p-title" style={{ marginTop: 18 }}>About Orcus Intelligence Labs</h1>
-      <p className="lp-p-sub">
-        Orcus Intelligence Labs builds Sift — a multi-agent research assistant for people who
-        read papers for a living. We're small, independent, and focused on one problem.
-      </p>
-      <p className="lp-mark-caption">
-        Our mark: two ideas in balance — human judgment on one side, AI on the other. Sift
-        doesn't replace the researcher's read of the literature; it holds up its end of the
-        scale so you can do yours faster.
-      </p>
-
-      <div className="lp-filters" style={{ justifyContent: "center", margin: "0 0 40px" }}>
-        {ABOUT_TABS.map((t) => (
-          <button key={t.id} className="lp-filter" onClick={() => jump(t.id)}>{t.label}</button>
-        ))}
-      </div>
-
-      <div className="lp-band" id="about-team" style={{ textAlign: "left" }}>
-        <h2 className="lp-cat">Team</h2>
-        <p className="lp-cat-sub">
-          Sift is built by a small, hands-on team of researchers and engineers — everyone here
-          also uses the product to do their own literature reviews. Full team profiles are coming
-          soon; in the meantime, the fastest way to meet us is to say hello.
-        </p>
-        <a className="lp-learn" onClick={() => jump("about-contact")}>Get in touch →</a>
-      </div>
-
-      <div className="lp-band" id="about-contact" style={{ textAlign: "left" }}>
-        <h2 className="lp-cat">Contact us</h2>
-        <p className="lp-cat-sub">
-          Questions, feedback, partnership ideas, or just want to talk about the product —
-          reach out any time.
-        </p>
-        <div className="lp-contact-row">
-          {CONTACT_EMAIL && (
-            <a className="lp-cta" href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>
-          )}
-          {LINKEDIN_URL && (
-            <a className="lp-cta-2" href={LINKEDIN_URL} target="_blank" rel="noreferrer">LinkedIn ↗</a>
-          )}
-        </div>
-      </div>
-
-      <div className="lp-band" id="about-blog" style={{ textAlign: "left" }}>
-        <h2 className="lp-cat">Blog</h2>
-        <p className="lp-cat-sub">Notes on building Sift and what we're learning from researchers who use it.</p>
-        <div className="lp-empty-card">
-          <p>No posts yet — check back soon, or follow along on LinkedIn.</p>
-        </div>
+      <h1 className="lp-p-title" style={{ marginTop: 18 }}>Blog</h1>
+      <p className="lp-p-sub">Notes on building Sift and what we're learning from researchers who use it.</p>
+      <div className="lp-empty-card" style={{ maxWidth: 620, margin: "0 auto 60px" }}>
+        <p>No posts yet — check back soon, or follow along on LinkedIn.</p>
       </div>
     </section>
   );
@@ -1762,7 +2460,116 @@ function LandingStyles() {
       .lp-empty-card { border: 1px dashed var(--lp-line); border-radius: 14px; padding: 30px 28px;
         text-align: left; background: var(--lp-bg2); }
       .lp-empty-card p { color: var(--lp-muted); font-size: 14.5px; line-height: 1.65; margin: 0 0 18px; }
+      .lp-address { font-style: normal; color: var(--lp-muted); font-size: 15px; line-height: 1.7; margin: 0 0 20px; }
+      .lp-address strong { color: var(--lp-ink); }
       .lp-contact-row { display: flex; gap: 12px; flex-wrap: wrap; }
+
+      .lp-contact-form { max-width: 560px; margin: 28px 0 0; display: flex; flex-direction: column; gap: 12px; }
+      .lp-contact-form-row { display: flex; gap: 12px; flex-wrap: wrap; }
+      .lp-contact-form-row input { flex: 1 1 200px; }
+      .lp-contact-form input, .lp-contact-form textarea {
+        border: 1px solid var(--lp-line); border-radius: 10px; padding: 11px 14px;
+        font-size: 14.5px; font-family: inherit; color: inherit; background: #fff; resize: vertical;
+      }
+      .lp-contact-form input:focus, .lp-contact-form textarea:focus {
+        outline: none; border-color: var(--lp-accent, #6c5ce7);
+      }
+      .lp-contact-form button { align-self: flex-start; border: none; cursor: pointer; }
+      .lp-contact-form button:disabled { opacity: 0.6; cursor: default; }
+      .lp-contact-form-error { color: #c0392b; font-size: 13.5px; margin: 0; }
+      .lp-contact-form-sent { max-width: 560px; margin: 28px 0 0; padding: 16px 18px;
+        border-radius: 10px; background: var(--lp-bg2); color: var(--lp-muted); font-size: 14.5px; }
+      /* Honeypot: off-screen rather than display:none — some bots skip
+         fields hidden via display:none but still fill ones merely
+         positioned off-canvas, so this stays a better spam trap. */
+      .lp-contact-honeypot {
+        position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; overflow: hidden;
+      }
+
+      .lp-modal-backdrop {
+        position: fixed; inset: 0; background: rgba(20, 22, 28, 0.55); z-index: 1000;
+        display: flex; align-items: center; justify-content: center; padding: 24px;
+      }
+      .lp-modal {
+        position: relative; background: #fff; border-radius: 16px; padding: 32px;
+        max-width: 560px; width: 100%; max-height: 88vh; overflow-y: auto;
+        box-shadow: 0 20px 60px rgba(20, 22, 28, 0.25);
+      }
+      .lp-modal-close {
+        position: absolute; top: 14px; right: 14px; border: none; background: transparent;
+        font-size: 26px; line-height: 1; color: var(--lp-muted2); cursor: pointer; padding: 4px 8px;
+      }
+      .lp-modal-close:hover { color: var(--lp-ink); }
+      .lp-modal-title { margin: 0 0 18px; font-size: 20px; padding-right: 24px; }
+      .lp-modal-sent { text-align: center; padding: 20px 0; }
+      .lp-modal-sent h3 { margin: 0 0 10px; }
+      .lp-modal-sent p { color: var(--lp-muted); margin: 0 0 20px; }
+      .lp-apply-form { display: flex; flex-direction: column; gap: 12px; }
+      .lp-apply-form input[type="text"], .lp-apply-form input[type="email"],
+      .lp-apply-form input[type="tel"], .lp-apply-form input[type="url"] {
+        border: 1px solid var(--lp-line); border-radius: 10px; padding: 11px 14px;
+        font-size: 14.5px; font-family: inherit; color: inherit; background: #fff; width: 100%;
+      }
+      .lp-apply-form input:focus { outline: none; border-color: var(--lp-accent, #6c5ce7); }
+      .lp-phone-row { display: flex; gap: 12px; }
+      .lp-phone-code {
+        flex: 0 0 150px; border: 1px solid var(--lp-line); border-radius: 10px; padding: 11px 10px;
+        font-size: 14.5px; font-family: inherit; color: inherit; background: #fff;
+      }
+      .lp-phone-row input[type="tel"] { flex: 1 1 auto; }
+      .lp-file-field { display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; color: var(--lp-muted); }
+      .lp-file-field input[type="file"] { font-size: 13.5px; }
+      .lp-apply-email-fallback { font-size: 13.5px; color: var(--lp-muted); text-align: center; margin-top: 4px; }
+
+      /* Full-page job application (its own tab — see applyHref()/ApplyPage) */
+      .lp-apply-page { min-height: 100vh; background: #fff; }
+      .lp-apply-header {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 18px 28px; border-bottom: 1px solid var(--lp-line);
+      }
+      .lp-apply-back {
+        border: none; background: transparent; font-size: 20px; cursor: pointer;
+        color: var(--lp-ink); padding: 4px 8px; line-height: 1;
+      }
+      .lp-apply-back:hover { color: var(--lp-indigo); }
+      .lp-apply-header-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 15px; }
+      .lp-apply-body { max-width: 980px; margin: 0 auto; padding: 40px 28px 100px; }
+      .lp-apply-title { font-size: 30px; margin: 0 0 32px; }
+      .lp-apply-grid { display: grid; grid-template-columns: 260px 1fr; gap: 48px; align-items: start; }
+      @media (max-width: 720px) { .lp-apply-grid { grid-template-columns: 1fr; } }
+      .lp-apply-side { display: flex; flex-direction: column; gap: 20px; }
+      .lp-apply-meta-block { border-top: 1px solid var(--lp-line); padding-top: 12px; font-size: 14.5px; }
+      .lp-apply-meta-label { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
+        color: var(--lp-muted2); margin-bottom: 4px; }
+      .lp-apply-meta-note { color: var(--lp-muted); font-size: 13px; margin-top: 4px; }
+      .lp-apply-blurb { color: var(--lp-muted); font-size: 14px; line-height: 1.65; }
+      .lp-apply-main { min-width: 0; }
+      .lp-apply-tabs { display: flex; gap: 28px; border-bottom: 1px solid var(--lp-line); margin-bottom: 28px; }
+      .lp-apply-tab {
+        border: none; background: transparent; font-size: 15px; font-weight: 600; cursor: pointer;
+        color: var(--lp-muted); padding: 0 0 12px; border-bottom: 2px solid transparent;
+      }
+      .lp-apply-tab.active { color: var(--lp-ink); border-bottom-color: var(--lp-indigo); }
+      .lp-apply-overview { display: flex; flex-direction: column; gap: 4px; }
+      .lp-apply-overview .lp-cta { align-self: flex-start; margin-top: 16px; }
+
+      .lp-apply-questions { display: flex; flex-direction: column; gap: 16px; margin-top: 6px;
+        padding-top: 16px; border-top: 1px solid var(--lp-line); }
+      .lp-apply-q { display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+      .lp-apply-q > span:first-child { font-weight: 600; color: var(--lp-ink); font-size: 14.5px; }
+      .lp-apply-q input[type="text"], .lp-apply-q input[type="date"], .lp-apply-q textarea {
+        border: 1px solid var(--lp-line); border-radius: 10px; padding: 11px 14px;
+        font-size: 14.5px; font-family: inherit; color: inherit; background: #fff; resize: vertical;
+      }
+      .lp-yn-toggle { display: flex; gap: 10px; }
+      .lp-yn-btn {
+        border: 1px solid var(--lp-line); background: #fff; border-radius: 10px;
+        padding: 9px 22px; font-size: 14px; font-weight: 600; color: var(--lp-muted); cursor: pointer;
+      }
+      .lp-yn-btn.active { border-color: var(--lp-indigo); color: var(--lp-indigo); background: var(--lp-soft); }
+      .lp-apply-certify { display: flex; align-items: flex-start; gap: 10px; font-size: 13.5px;
+        color: var(--lp-muted); margin-top: 8px; }
+      .lp-apply-certify input { margin-top: 3px; }
 
       .lp-role-card { border: 1px solid var(--lp-line); border-radius: 14px; padding: 26px 28px;
         text-align: left; background: #fff; }
@@ -1779,6 +2586,284 @@ function LandingStyles() {
       .lp-role-list li { margin-bottom: 8px; }
       .lp-role-list li:last-child { margin-bottom: 0; }
       .lp-role-notes { margin: 18px 0 0; font-size: 13px; color: var(--lp-muted2); font-style: italic; }
+
+      /* ── 3D figures and the layouts around them (see LandingFigures.jsx) ── */
+      .lp-section .lp-cat { font-size: clamp(28px, 3.4vw, 42px); letter-spacing: -.02em; line-height: 1.1; margin: 0 0 12px; }
+      .lp-section .lp-cat-sub { font-size: 17px; line-height: 1.55; max-width: 60ch; margin: 0 0 36px; }
+      .lp-ads-label.lp3-left { text-align: left; margin-bottom: 12px; }
+
+      .lp3-hero { max-width: 1140px; margin: 0 auto; padding: 64px 24px 72px; display: grid;
+        grid-template-columns: minmax(0, .86fr) minmax(0, 1.14fr); gap: 52px; align-items: center; }
+      .lp3-hero-copy { min-width: 0; }
+      .lp3-eyebrow { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; letter-spacing: .14em;
+        text-transform: uppercase; color: var(--lp-muted2); margin-bottom: 18px; }
+      .lp3-hero .lp-h1 { font-size: clamp(36px, 4.9vw, 62px); }
+      .lp3-hero .lp-sub { margin: 0 0 30px; }
+      .lp3-hero .lp-cta-row { justify-content: flex-start; }
+      .lp3-hero .lp-pricing-link { margin: 10px 0 0; }
+      .lp3-hero .lp3-stage { aspect-ratio: 1.18 / 1; }
+      @media (max-width: 860px) {
+        .lp3-hero { grid-template-columns: minmax(0, 1fr); gap: 36px; padding-top: 44px; }
+        .lp3-hero .lp3-stage { aspect-ratio: 1 / 1; }
+      }
+
+      /* phones: the bar's menus don't fit, and a page that scrolls sideways unpins the Sift figure */
+      @media (max-width: 760px) { .lp-nav { display: none; } .lp-bar-cta { margin-left: auto; } .lp-logo { font-size: 16px; } }
+
+      /* menu links land below the sticky bar, not underneath it */
+      #lp-features, #lp-infinity, #lp-papers, #lp-faq, #lp-news, #feat-4 { scroll-margin-top: 76px; }
+      .lp3-step { scroll-margin-top: 40px; }
+
+      .lp3-fig { margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+      .lp3-stage { position: relative; overflow: hidden; border: 1px solid var(--lp-line); border-radius: 14px;
+        background-color: #f3f3fa;
+        background-image: linear-gradient(#e6e6f2 1px, transparent 1px), linear-gradient(90deg, #e6e6f2 1px, transparent 1px);
+        background-size: 28px 28px; background-position: -1px -1px; }
+      .lp3-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+        touch-action: pan-y; cursor: grab; }
+      .lp3-stage canvas:active { cursor: grabbing; }
+      .lp3-stage.fixed canvas { cursor: default; }
+      .lp3-hud { position: absolute; pointer-events: none; font-family: 'JetBrains Mono', monospace;
+        font-size: 11px; line-height: 1.55; color: var(--lp-muted); letter-spacing: .02em; }
+      .lp3-hud b { color: var(--lp-ink); font-weight: 500; }
+      .lp3-hud.tl { top: 12px; left: 14px; }
+      .lp3-hud.tr { top: 12px; right: 14px; text-align: right; }
+      .lp3-hud.bl { bottom: 12px; left: 14px; right: 14px; display: flex; flex-wrap: wrap; gap: 4px 14px; }
+      .lp3-sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
+      .lp3-tag { position: absolute; top: 0; left: 0; pointer-events: none; white-space: nowrap; opacity: 0;
+        font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--lp-ink);
+        transition: opacity .4s; will-change: transform; }
+      .lp3-tag.on { opacity: 1; }
+      .lp3-tag span { display: inline-block; transform: translate(10px, -50%); background: rgba(255,255,255,.88);
+        border: 1px solid var(--lp-line); border-radius: 5px; padding: 2px 7px; max-width: 320px;
+        overflow: hidden; text-overflow: ellipsis; }
+      .lp3-tag.flip span { transform: translate(calc(-100% - 10px), -50%); }
+      .lp3-tag.axis span { background: none; border: 0; color: var(--lp-muted); transform: translate(-50%, -50%); padding: 0; }
+      .lp3-tag.strong span { color: var(--lp-indigo); font-weight: 700; }
+      .lp3-fig figcaption { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; line-height: 1.55; color: var(--lp-muted); }
+      .lp3-fig figcaption b { color: var(--lp-ink); font-weight: 500; }
+      .lp3-nogl { display: none; position: absolute; inset: 0; place-items: center; padding: 24px;
+        text-align: center; color: var(--lp-muted); font-size: 14px; }
+      .no-gl .lp3-nogl { display: grid; }
+      .lp3-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+      .lp3-chip { height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--lp-line);
+        background: #fff; color: var(--lp-muted); font-size: 13px; font-weight: 500; cursor: pointer;
+        display: inline-flex; align-items: center; gap: 7px; }
+      .lp3-chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+      .lp3-chip[aria-pressed="true"] { color: var(--lp-ink); border-color: var(--c); box-shadow: inset 0 0 0 1px var(--c); }
+
+      .lp3-pipe { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 52px; }
+      .lp3-pipe-fig { position: sticky; top: 84px; align-self: start; min-width: 0; }
+      .lp3-pipe-fig .lp3-stage { height: min(70vh, 640px); }
+      .lp3-steps { display: flex; flex-direction: column; min-width: 0; }
+      .lp3-step { min-height: 78vh; display: flex; flex-direction: column; justify-content: center;
+        padding-left: 20px; border-left: 2px solid var(--lp-line); transition: border-color .3s; }
+      .lp3-step.on { border-left-color: var(--lp-indigo); }
+      .lp3-step .lp-learn { align-self: flex-start; }
+      .lp3-step-visual { margin-top: 20px; }
+      .lp3-ask { padding: 14px 16px; font-size: 14.5px; display: flex; gap: 10px; align-items: baseline; }
+      .lp3-ask span { font-family: 'JetBrains Mono', monospace; color: var(--lp-indigo); font-weight: 700; }
+      @media (max-width: 860px) {
+        .lp3-pipe { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+        .lp3-pipe-fig { order: -1; top: 60px; z-index: 5; background: #fff; padding: 8px 0; }
+        .lp3-pipe-fig .lp3-stage { height: 38vh; }
+        .lp3-pipe-fig figcaption { display: none; }
+        .lp3-step { min-height: 0; padding-top: 36px; padding-bottom: 36px; }
+      }
+
+      .lp3-loop { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, .85fr); gap: 52px; align-items: start; }
+      .lp3-loop-2 { margin-top: 72px; padding-top: 56px; border-top: 1px solid var(--lp-line); }
+      .lp3-loopfig { min-width: 0; }
+      .lp3-loopfig .lp3-stage { height: min(64vh, 540px); }
+      @media (max-width: 860px) {
+        .lp3-loop { grid-template-columns: minmax(0, 1fr); gap: 28px; }
+        .lp3-loopfig .lp3-stage { height: 46vh; }
+      }
+      .lp3-rail { list-style: none; margin: 22px 0 0; padding: 0; display: flex; flex-direction: column; }
+      .lp3-rail li { position: relative; }
+      .lp3-rail li:not(:last-child)::after { content: ""; position: absolute; left: 25px; top: 44px; bottom: -6px;
+        width: 1px; background: var(--lp-line); }
+      .lp3-rail-btn { display: flex; gap: 14px; align-items: flex-start; width: 100%; text-align: left;
+        background: none; border: 1px solid transparent; border-radius: 10px; padding: 8px 10px; cursor: pointer; color: var(--lp-ink); }
+      .lp3-rail-btn:hover { background: var(--lp-bg2); }
+      .lp3-rail-btn.on { background: var(--lp-soft); border-color: var(--lp-indigo); }
+      .lp3-rail-n { flex: none; width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--lp-line);
+        background: #fff; display: grid; place-items: center; font-family: 'JetBrains Mono', monospace;
+        font-size: 12px; color: var(--lp-muted); position: relative; z-index: 1; }
+      .lp3-rail-btn.on .lp3-rail-n { border-color: var(--lp-indigo); background: var(--lp-indigo); color: #fff; }
+      .lp3-rail-btn.done .lp3-rail-n { border-color: #7bc493; color: #1f8a4c; background: #eefaf2; }
+      .lp3-rail-btn b, .lp3-tab b { display: block; font-size: 14.5px; font-weight: 600; }
+      .lp3-rail-btn small, .lp3-tab small { display: block; font-size: 12.5px; color: var(--lp-muted); margin-top: 1px; }
+      .lp3-tabs { display: flex; flex-direction: column; gap: 8px; }
+      .lp3-tab { display: flex; gap: 14px; align-items: baseline; text-align: left; width: 100%; padding: 13px 16px;
+        border-radius: 10px; border: 1px solid var(--lp-line); background: none; cursor: pointer; color: var(--lp-ink); }
+      .lp3-tab:hover { border-color: var(--lp-indigo); }
+      .lp3-tab.on { background: var(--lp-soft); border-color: var(--lp-indigo); }
+      .lp3-tab-n { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--lp-muted); }
+      .lp3-tab.on .lp3-tab-n { color: var(--lp-indigo); }
+      .lp3-panel { padding-top: 24px; }
+      /* the active stage fills left to right while it plays, then the next one takes over */
+      .lp3-rail-btn, .lp3-tab { position: relative; overflow: hidden; }
+      .lp3-auto .lp3-rail-btn.on::after, .lp3-auto .lp3-tab.on::after { content: ""; position: absolute; left: 0; bottom: 0;
+        height: 3px; width: 100%; background: var(--lp-indigo); transform-origin: left;
+        animation: lp3-hold var(--lp3-hold, 7000ms) linear both; }
+      @keyframes lp3-hold { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+      @media (prefers-reduced-motion: reduce) { .lp3-auto .lp3-rail-btn.on::after, .lp3-auto .lp3-tab.on::after { display: none; } }
+
+      /* ── Careers page ─────────────────────────────────────────────────── */
+      .lpc { max-width: 1140px; margin: 0 auto; padding: 64px 24px 88px; text-align: left; }
+      .lpc a.lp-cta { text-decoration: none; display: inline-block; white-space: nowrap; }
+      .lpc-hero { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); gap: 56px; align-items: center; }
+      .lpc-title { font-weight: 700; font-size: clamp(34px, 4.6vw, 56px); line-height: 1.05; letter-spacing: -.025em; margin: 0 0 18px; }
+      .lpc-sub { color: var(--lp-muted); font-size: 18px; line-height: 1.55; max-width: 46ch; margin: 0 0 28px; }
+      .lpc-open { border: 1px solid var(--lp-line); border-radius: 16px; background: var(--lp-bg2); padding: 10px; }
+      .lpc-open-h { display: flex; align-items: center; gap: 8px; padding: 10px 12px 12px;
+        font-family: 'JetBrains Mono', monospace; font-size: 11.5px; letter-spacing: .12em;
+        text-transform: uppercase; color: var(--lp-muted); }
+      .lpc-dot { width: 8px; height: 8px; border-radius: 50%; background: #1f9d55; box-shadow: 0 0 0 4px rgba(31,157,85,.16); }
+      .lpc-open-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%;
+        text-align: left; background: #fff; border: 1px solid var(--lp-line); border-radius: 11px;
+        padding: 14px 16px; cursor: pointer; color: var(--lp-ink); transition: border-color .15s ease, transform .15s ease; }
+      .lpc-open-row + .lpc-open-row { margin-top: 8px; }
+      .lpc-open-row:hover { border-color: var(--lp-indigo); transform: translateX(2px); }
+      .lpc-open-row b { display: block; font-size: 15px; font-weight: 600; line-height: 1.35; }
+      .lpc-open-row small { display: block; font-size: 13px; color: var(--lp-muted); margin-top: 3px; }
+      .lpc-open-row > span:last-child { color: var(--lp-indigo); font-weight: 700; }
+
+      .lpc-why { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 40px; margin: 72px 0 80px; }
+      .lpc-why > div { border-top: 2px solid var(--lp-ink); padding-top: 16px; }
+      .lpc-why h3 { font-size: 19px; font-weight: 700; letter-spacing: -.01em; margin: 0 0 8px; }
+      .lpc-why p { color: var(--lp-muted); font-size: 15px; line-height: 1.6; margin: 0; }
+
+      .lpc-roles { scroll-margin-top: 84px; }
+      .lpc-roles-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 22px; }
+      .lpc-h2 { font-weight: 700; font-size: clamp(28px, 3.4vw, 40px); letter-spacing: -.02em; margin: 0; }
+      .lpc-count { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--lp-muted); }
+      .lpc-role { border: 1px solid var(--lp-line); border-radius: 16px; background: #fff; padding: 30px 32px;
+        scroll-margin-top: 84px; transition: border-color .2s ease, box-shadow .2s ease; }
+      .lpc-role + .lpc-role { margin-top: 18px; }
+      .lpc-role:hover { border-color: #c9c5fb; box-shadow: 0 10px 30px rgba(91,79,240,.07); }
+      .lpc-role-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+      .lpc-role-headmain { min-width: 0; }
+      .lpc-role-title { font-size: 23px; font-weight: 700; letter-spacing: -.015em; line-height: 1.25; margin: 0 0 14px; }
+      .lpc-facts { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+      .lpc-facts li { font-size: 13px; font-weight: 500; color: var(--lp-ink); background: var(--lp-soft);
+        border-radius: 999px; padding: 5px 12px; }
+      .lpc-role-blurb { color: var(--lp-muted); font-size: 15.5px; line-height: 1.7; margin: 22px 0 0; max-width: 78ch; }
+      .lpc-role-after { font-size: 14px; line-height: 1.6; color: var(--lp-muted); margin: 14px 0 0; max-width: 78ch; }
+      .lpc-role-after b { color: var(--lp-ink); font-weight: 600; margin-right: 8px; }
+      .lpc-toggle { display: inline-flex; align-items: center; gap: 8px; margin-top: 22px; background: none;
+        border: none; padding: 0; cursor: pointer; color: var(--lp-indigo); font-size: 14.5px; font-weight: 600; }
+      .lpc-toggle:hover { text-decoration: underline; }
+      .lpc-toggle .lp-caret { transition: transform .2s ease; }
+      .lpc-toggle .lp-caret.up { transform: rotate(180deg); }
+      .lpc-role-body { margin-top: 26px; padding-top: 26px; border-top: 1px solid var(--lp-line); }
+      .lpc-sec h4 { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; font-weight: 500;
+        letter-spacing: .12em; text-transform: uppercase; color: var(--lp-indigo); margin: 0 0 12px; }
+      .lpc-sec ul { margin: 0; padding-left: 18px; color: var(--lp-muted); font-size: 14.5px; line-height: 1.65; }
+      .lpc-sec li { margin-bottom: 10px; }
+      .lpc-sec li::marker { color: var(--lp-muted2); }
+      .lpc-sec-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 36px; margin-top: 26px; }
+      .lpc-howto { margin-top: 28px; background: var(--lp-bg2); border: 1px solid var(--lp-line);
+        border-radius: 12px; padding: 20px 22px; }
+      .lpc-howto b { font-size: 14.5px; }
+      .lpc-howto p { color: var(--lp-muted); font-size: 14px; line-height: 1.65; margin: 6px 0 16px; max-width: 78ch; }
+      .lpc-howto p a { color: var(--lp-indigo); }
+      @media (max-width: 860px) {
+        .lpc { padding-top: 44px; }
+        .lpc-hero { grid-template-columns: minmax(0, 1fr); gap: 32px; }
+        .lpc-why { grid-template-columns: minmax(0, 1fr); gap: 26px; margin: 52px 0 56px; }
+        .lpc-role { padding: 22px 20px; }
+        .lpc-role-head { flex-direction: column; gap: 16px; }
+        .lpc-sec-grid { grid-template-columns: minmax(0, 1fr); gap: 26px; }
+      }
+
+      /* ── About + Contact page ─────────────────────────────────────────── */
+      .lpa { max-width: 1140px; margin: 0 auto; padding: 72px 24px 96px; text-align: left; }
+      .lpa-hero { text-align: center; max-width: 820px; margin: 0 auto; }
+      .lpa-title { font-weight: 700; font-size: clamp(36px, 5.2vw, 64px); line-height: 1.04;
+        letter-spacing: -.03em; margin: 22px 0 20px; }
+      .lpa-sub { color: var(--lp-muted); font-size: 19px; line-height: 1.55; max-width: 60ch; margin: 0 auto 30px; }
+      .lpa-builds { list-style: none; margin: 0 auto 32px; padding: 0; display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--lp-line); border-radius: 14px;
+        overflow: hidden; text-align: left; }
+      .lpa-builds li { padding: 16px 20px; background: var(--lp-bg2); }
+      .lpa-builds li + li { border-left: 1px solid var(--lp-line); }
+      .lpa-builds b { display: block; font-size: 17px; font-weight: 700; letter-spacing: -.01em; }
+      .lpa-builds span { display: block; font-size: 14px; color: var(--lp-muted); margin-top: 3px; }
+      @media (max-width: 640px) {
+        .lpa-builds { grid-template-columns: minmax(0, 1fr); }
+        .lpa-builds li + li { border-left: 0; border-top: 1px solid var(--lp-line); }
+      }
+      .lpa-hero-cta { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+
+      .lpa-quote { margin: 72px auto 0; max-width: 860px; padding: 34px 0; border-top: 1px solid var(--lp-line);
+        border-bottom: 1px solid var(--lp-line); font-size: clamp(19px, 2.1vw, 24px); line-height: 1.5;
+        letter-spacing: -.01em; color: var(--lp-ink); text-align: center; }
+      .lpa-quote span { display: block; font-family: 'JetBrains Mono', monospace; font-size: 11.5px;
+        letter-spacing: .14em; text-transform: uppercase; color: var(--lp-indigo); margin-bottom: 14px; }
+
+      .lpa-team { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 40px; margin-top: 88px; scroll-margin-top: 90px; }
+      .lpa-lede { color: var(--lp-muted); font-size: 18px; line-height: 1.6; max-width: 62ch; margin: 4px 0 20px; }
+      .lpa .lp-learn { margin-top: 0; }
+
+      /* Contact: one panel, two tones */
+      .lpa-card { display: grid; grid-template-columns: minmax(0, .82fr) minmax(0, 1.18fr); margin-top: 88px;
+        border-radius: 24px; overflow: hidden; border: 1px solid var(--lp-line);
+        box-shadow: 0 24px 70px rgba(20,22,28,.10); scroll-margin-top: 90px; }
+      .lpa-dark { padding: 48px 44px; color: #fff;
+        background: radial-gradient(120% 80% at 0% 0%, rgba(91,79,240,.55), transparent 60%),
+                    radial-gradient(90% 70% at 100% 100%, rgba(143,131,247,.22), transparent 60%), #14161c; }
+      .lpa-dark h2 { font-size: clamp(30px, 3.4vw, 42px); font-weight: 700; letter-spacing: -.02em; line-height: 1.08; margin: 0 0 14px; }
+      .lpa-dark > p { color: rgba(255,255,255,.74); font-size: 16.5px; line-height: 1.6; margin: 0; max-width: 40ch; }
+      .lpa-channels { margin: 40px 0 0; }
+      .lpa-channels > div { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 16px;
+        padding: 18px 0; border-top: 1px solid rgba(255,255,255,.16); }
+      .lpa-channels dt { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; letter-spacing: .12em;
+        text-transform: uppercase; color: rgba(255,255,255,.55); padding-top: 3px; }
+      .lpa-channels dd { margin: 0; font-size: 15.5px; font-weight: 500; overflow-wrap: anywhere; }
+      .lpa-channels a, .lpa-linkbtn { color: #fff; text-decoration: underline; text-decoration-color: rgba(255,255,255,.4);
+        text-underline-offset: 4px; }
+      .lpa-channels a:hover, .lpa-linkbtn:hover { text-decoration-color: #fff; }
+      .lpa-linkbtn { background: none; border: none; padding: 0; cursor: pointer; font-size: 15.5px; font-weight: 500; }
+      .lpa-address { font-style: normal; font-weight: 400; color: rgba(255,255,255,.74); line-height: 1.65; }
+      .lpa-address::first-line { color: #fff; font-weight: 500; }
+
+      .lpa-form { background: #fff; padding: 48px 44px; display: flex; flex-direction: column; gap: 18px; }
+      .lpa-form-title { font-size: 22px; font-weight: 700; letter-spacing: -.01em; margin: 0; }
+      .lpa-topics { border: 0; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+      .lpa-topics legend, .lpa-field > span { display: block; padding: 0; font-size: 13.5px; font-weight: 600;
+        color: var(--lp-ink); margin-bottom: 8px; }
+      .lpa-field > span em { font-style: normal; font-weight: 400; color: var(--lp-muted2); margin-left: 6px; }
+      .lpa-topic { height: 36px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--lp-line);
+        background: #fff; color: var(--lp-muted); font-size: 14px; font-weight: 500; cursor: pointer; }
+      .lpa-topic:hover { border-color: var(--lp-indigo); }
+      .lpa-topic.on { border-color: var(--lp-indigo); background: var(--lp-soft); color: var(--lp-indigo); }
+      .lpa-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+      .lpa-field { display: block; min-width: 0; }
+      .lpa-field input, .lpa-field textarea { display: block; width: 100%; box-sizing: border-box;
+        font: inherit; font-size: 15px; color: var(--lp-ink); background: var(--lp-bg2); border: 1px solid #d5d8e0;
+        border-radius: 10px; padding: 12px 14px; transition: border-color .15s ease, box-shadow .15s ease, background .15s ease; }
+      .lpa-field textarea { resize: vertical; min-height: 140px; line-height: 1.55; }
+      .lpa-field input::placeholder, .lpa-field textarea::placeholder { color: #a3a8b6; }
+      .lpa-field input:focus, .lpa-field textarea:focus { outline: none; background: #fff; border-color: var(--lp-indigo);
+        box-shadow: 0 0 0 4px rgba(91,79,240,.14); }
+      .lpa-error { margin: 0; padding: 11px 14px; border-radius: 10px; background: #fdf0ee; color: #b3261e; font-size: 14px; }
+      .lpa-send { align-self: flex-start; min-width: 170px; }
+      .lpa-send:disabled { opacity: .6; cursor: default; }
+      .lpa-sent { align-items: flex-start; justify-content: center; gap: 10px; }
+      .lpa-sent h3 { font-size: 22px; margin: 6px 0 0; }
+      .lpa-sent p { color: var(--lp-muted); font-size: 15.5px; margin: 0 0 12px; }
+      .lpa-sent-ic { width: 44px; height: 44px; border-radius: 50%; background: #eefaf2; color: #1f8a4c;
+        display: grid; place-items: center; font-size: 20px; font-weight: 700; }
+      @media (max-width: 860px) {
+        .lpa { padding-top: 48px; }
+        .lpa-quote { margin-top: 52px; padding: 26px 0; }
+        .lpa-team { grid-template-columns: minmax(0, 1fr); gap: 12px; margin-top: 60px; }
+        .lpa-card { grid-template-columns: minmax(0, 1fr); margin-top: 60px; border-radius: 18px; }
+        .lpa-dark, .lpa-form { padding: 30px 22px; }
+        .lpa-row { grid-template-columns: minmax(0, 1fr); }
+      }
     `}</style>
   );
 }

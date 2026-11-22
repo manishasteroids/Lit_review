@@ -515,3 +515,48 @@ def apply_dispute(hyp_run_id: str, body: ApplyDisputeBody, user_id: str = Depend
     if not updated:
         raise HTTPException(404, "Hypothesis run not found.")
     return updated
+
+
+@router.get("/runs/{hyp_run_id}/export/{fmt}")
+def export_hypothesis_run(hyp_run_id: str, fmt: str, user_id: str = Depends(require_user)):
+    """Download a Hypothesis Agent run's hypotheses + experiment plans as
+    .docx or .pdf. Reuses the exporters the (retired) Methods tab used --
+    same document, built locally with no LLM cost -- fed from this run's own
+    plan and critique, with the SOURCE Sift run read only for the papers and
+    extractions behind the evidence-trail table."""
+    from fastapi.responses import Response
+    from api.routes import _ordered_for_export, _safe_filename
+    from core import exporters
+
+    run = get_hypothesis_run(hyp_run_id, user_id)
+    if not run:
+        raise HTTPException(404, "Hypothesis run not found.")
+    d = run["data"] or {}
+    plan = d.get("plan") or {}
+    if not plan.get("hypotheses"):
+        raise HTTPException(400, "This run has no hypotheses to export.")
+    source = get_run(run["source_run_id"], user_id)
+    papers = _ordered_for_export(source)
+    topic = d.get("topic") or source.topic or "hypotheses"
+    stem = _safe_filename(topic) + "_hypotheses"
+
+    try:
+        if fmt == "docx":
+            content = exporters.build_experiments_docx(topic, plan, papers, source.extractions, d.get("critique"))
+            media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        elif fmt == "pdf":
+            content = exporters.build_experiments_pdf(topic, plan, papers, source.extractions, d.get("critique"))
+            media = "application/pdf"
+        else:
+            raise HTTPException(400, "Unsupported format. Use docx or pdf.")
+    except ImportError as e:
+        raise HTTPException(500, f"Export dependency missing: {e}. Run: pip install -r requirements.txt")
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"Export failed: {e}")
+
+    return Response(
+        content=content, media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{stem}.{fmt}"'},
+    )

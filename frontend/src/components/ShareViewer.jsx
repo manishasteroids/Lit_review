@@ -36,8 +36,12 @@ export default function ShareViewer({ token }) {
   async function openRunDetail(runId) {
     setOpenRun({ loading: true });
     try {
-      const r = await api.shareGetRun(token, runId, email.trim());
-      setOpenRun(r);
+      const [r, hyp, studio] = await Promise.all([
+        api.shareGetRun(token, runId, email.trim()),
+        api.shareGetHypothesis(token, runId, email.trim()).catch(() => ({ hypothesis: null })),
+        api.shareGetStudio(token, runId, email.trim()).catch(() => ({ messages: [] })),
+      ]);
+      setOpenRun({ ...r, hypothesis: hyp.hypothesis, studioMessages: studio.messages || [] });
     } catch (e2) {
       setOpenRun({ error: e2.message || "Could not load this review." });
     }
@@ -186,9 +190,70 @@ function RunDetail({ run, onBack }) {
               </div>
             ))}
           </Section>
+
+          {run.hypothesis && <HypothesisSection hyp={run.hypothesis} />}
+
+          {run.studioMessages && run.studioMessages.length > 0 && (
+            <Section title="Studio conversation">
+              {run.studioMessages.map((m, i) => (
+                <div key={i} style={{ marginBottom: 12 }}>
+                  <div style={S.sectionLbl}>{m.role === "user" ? "Question" : "Sift"}</div>
+                  <div style={S.prose}>{m.content}</div>
+                </div>
+              ))}
+            </Section>
+          )}
         </>
       )}
     </div>
+  );
+}
+
+// Hypothesis Agent's closing recommendation — the one artifact a signed-in
+// collaborator sees on the Hypothesis tab. `data` is the full pipeline
+// output (see backend/core/hypothesis_db.py); meta_review/plan/
+// champion_index only exist once the full pipeline has actually run to
+// completion, so every field here is read defensively.
+function HypothesisSection({ hyp }) {
+  const d = hyp?.data || {};
+  const meta = d.meta_review;
+  const hyps = d.plan?.hypotheses || [];
+  const championIdx = d.champion_index;
+  const champion = typeof championIdx === "number" ? hyps[championIdx] : null;
+  if (!meta && !champion) return null;
+  return (
+    <Section title="Hypothesis Agent recommendation">
+      {champion && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={S.sectionLbl}>Champion hypothesis</div>
+          <div style={S.prose}>{champion.statement || champion.title || champion.hypothesis}</div>
+        </div>
+      )}
+      {meta?.recommendation && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={S.sectionLbl}>Recommendation{typeof meta.confidence === "number" ? ` · ${meta.confidence}% confidence` : ""}</div>
+          <div style={S.prose}>{meta.recommendation}</div>
+        </div>
+      )}
+      {meta?.why_champion_won && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={S.sectionLbl}>Why it won</div>
+          <div style={S.prose}>{meta.why_champion_won}</div>
+        </div>
+      )}
+      {meta?.when_to_reconsider_runner_up && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={S.sectionLbl}>Reconsider the runner-up if</div>
+          <div style={S.prose}>{meta.when_to_reconsider_runner_up}</div>
+        </div>
+      )}
+      {meta?.caveats?.length > 0 && (
+        <div>
+          <div style={S.sectionLbl}>Watch out for</div>
+          <div style={S.prose}>{meta.caveats.join(" · ")}</div>
+        </div>
+      )}
+    </Section>
   );
 }
 

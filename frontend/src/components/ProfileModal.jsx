@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from "react";
 import { api } from "../api/client.js";
+import { FollowingSettings } from "./WatchList.jsx";
 
 /**
- * Account dialog with two tabs:
- *   Profile  — read-only view of who you are (name, email, ORCID, Scholar)
- *   Settings — edit display name, affiliation, ORCID and Scholar profile
+ * Account dialog with three tabs:
+ *   Profile   — read-only view of who you are (name, email, ORCID, Scholar)
+ *   Settings  — edit display name, affiliation, ORCID and Scholar profile
+ *   Following — researchers and laboratories whose new papers show on Home
  *
  * `tab` sets which one opens first (from the account dropdown).
  */
@@ -70,17 +72,19 @@ export default function ProfileModal({ user, tab = "profile", onClose }) {
 
   return (
     <div style={S.scrim} onClick={onClose}>
-      <div style={S.modal} onClick={(e) => e.stopPropagation()}>
+      <div style={{ ...S.modal, ...(active === "following" ? S.modalWide : null) }} onClick={(e) => e.stopPropagation()}>
         <button onClick={onClose} style={S.close} aria-label="Close">×</button>
 
         <div style={S.tabs}>
-          {[["profile", "Profile"], ["settings", "Settings"]].map(([id, label]) => (
+          {[["profile", "Profile"], ["settings", "Settings"], ["following", "Following"]].map(([id, label]) => (
             <button key={id} onClick={() => setActive(id)}
               style={{ ...S.tab, ...(active === id ? S.tabOn : null) }}>{label}</button>
           ))}
         </div>
 
-        {loading ? (
+        {active === "following" ? (
+          <FollowingSettings />
+        ) : loading ? (
           <div style={S.muted}>Loading…</div>
         ) : active === "profile" ? (
           <div>
@@ -172,6 +176,7 @@ const S = {
     boxShadow: "0 20px 60px rgba(0,0,0,.25)", fontFamily: "'Space Grotesk',sans-serif",
     color: "#111", position: "relative",
   },
+  modalWide: { maxWidth: 720, maxHeight: "88vh", overflowY: "auto" },
   close: {
     position: "absolute", top: 12, right: 15, background: "none", border: "none",
     fontSize: 22, color: "#9a9aab", cursor: "pointer", lineHeight: 1,

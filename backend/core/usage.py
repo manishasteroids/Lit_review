@@ -240,3 +240,142 @@ def get_usage_trend(user_id: str, days: int = 30, tz_offset_min: int = 0) -> dic
         "by_stage": [dict(r) for r in by_stage],
         "by_model": [dict(r) for r in by_model],
     }
+
+
+def get_usage_breakdown(
+    user_id: str,
+    days: Optional[int] = None,
+    project_id: Optional[str] = None,
+    model: Optional[str] = None,
+    tz_offset_min: int = 0,
+) -> dict:
+    """Usage grouped by RUN (search) and by PROJECT for one user, optionally
+    limited to the last `days` days (None = all time).
+
+    Written to be engine-agnostic (SQLite + Postgres): the time window is a
+    plain ISO-string comparison on created_at (stored as UTC ISO text), and the
+    per-project rollup is done in Python from the per-run rows — no
+    datetime()/strftime() SQL, which differs between the two engines.
+    Runs not filed under any project roll up into an "Unassigned" bucket.
+    """
+    from datetime import timedelta
+
+    base_where = f"s.user_id = {_PH}"
+    base_params: list = [user_id]
+    if days:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
+        base_where += f" AND c.created_at >= {_PH}"
+        base_params.append(cutoff)
+
+    # Optional filters layer on top of the user+range base. project_id == "none"
+    # means "Unassigned" (no project, or a project that no longer exists).
+    where, params = base_where, list(base_params)
+    if project_id == "none":
+        where += " AND (s.project_id IS NULL OR s.project_id = '' " \
+                 "OR s.project_id NOT IN (SELECT id FROM projects))"
+    elif project_id:
+        where += f" AND s.project_id = {_PH}"
+        params.append(project_id)
+    if model:
+        where += f" AND c.model = {_PH}"
+        params.append(model)
+
+    with _conn() as conn:
+        # Per-call rows (4 narrow columns) so days can be bucketed in the
+        # user's LOCAL time zone in Python — keeps the SQL engine-agnostic.
+        call_rows = conn.execute(
+            "SELECT c.created_at AS at, c.in_tok AS in_tok, c.out_tok AS out_tok, "
+            "c.cost_usd AS cost_usd "
+            f"FROM llm_calls c JOIN sessions s ON c.session_id = s.id WHERE {where}",
+            tuple(params),
+        ).fetchall()
+        # Filter-dropdown options: every project/model seen in the range,
+        # independent of the currently selected filters.
+        opt_rows = conn.execute(
+            "SELECT DISTINCT s.project_id AS project_id, c.model AS model "
+            f"FROM llm_calls c JOIN sessions s ON c.session_id = s.id WHERE {base_where}",
+            tuple(base_params),
+        ).fetchall()
+        rows = conn.execute(
+            "SELECT s.id AS session_id, s.topic AS topic, s.project_id AS project_id, "
+            "MAX(c.created_at) AS at, COUNT(*) AS calls, "
+            "COALESCE(SUM(c.in_tok),0) AS in_tok, COALESCE(SUM(c.out_tok),0) AS out_tok, "
+            "COALESCE(SUM(c.cost_usd),0) AS cost_usd "
+            "FROM llm_calls c JOIN sessions s ON c.session_id = s.id "
+            f"WHERE {where} "
+            "GROUP BY s.id, s.topic, s.project_id ORDER BY MAX(c.created_at) DESC",
+            tuple(params),
+        ).fetchall()
+        runs = [dict(r) for r in rows]
+
+        names: dict = {}
+        opt_list = [dict(o) for o in opt_rows]
+        pids = sorted(
+            {r["project_id"] for r in runs if r.get("project_id")}
+            | {o["project_id"] for o in opt_list if o.get("project_id")}
+        )
+        if pids:
+            marks = ",".join([_PH] * len(pids))
+            for p in conn.execute(
+                f"SELECT id, name FROM projects WHERE id IN ({marks})", tuple(pids)
+            ).fetchall():
+                p = dict(p)
+                names[p["id"]] = p["name"]
+
+    by_project: dict = {}
+    total = {"calls": 0, "in_tok": 0, "out_tok": 0, "cost_usd": 0.0, "runs": len(runs)}
+    for r in runs:
+        pid = r.get("project_id") or None
+        r["project_name"] = names.get(pid) if pid else None
+        key = pid if pid in names else None   # deleted/unknown project -> Unassigned
+        b = by_project.setdefault(key, {
+            "project_id": key, "project_name": names.get(key) if key else "Unassigned",
+            "runs": 0, "calls": 0, "in_tok": 0, "out_tok": 0, "cost_usd": 0.0, "last_at": None,
+        })
+        b["runs"] += 1
+        for f in ("calls", "in_tok", "out_tok", "cost_usd"):
+            b[f] += r[f] or 0
+            total[f] += r[f] or 0
+        if r["at"] and (b["last_at"] is None or r["at"] > b["last_at"]):
+            b["last_at"] = r["at"]
+
+    # Per-day rollup in the user's local time (created_at is UTC ISO text;
+    # local = utc - offset, where offset is JS getTimezoneOffset()).
+    by_day: dict = {}
+    shift = timedelta(minutes=-int(tz_offset_min or 0))
+    for r in call_rows:
+        r = dict(r)
+        try:
+            ts = datetime.fromisoformat(str(r["at"]).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            day = (ts + shift).strftime("%Y-%m-%d")
+        except Exception:  # noqa: BLE001 — skip unparseable timestamps
+            continue
+        d = by_day.setdefault(day, {"day": day, "calls": 0, "in_tok": 0, "out_tok": 0, "cost_usd": 0.0})
+        d["calls"] += 1
+        d["in_tok"] += r["in_tok"] or 0
+        d["out_tok"] += r["out_tok"] or 0
+        d["cost_usd"] += r["cost_usd"] or 0
+
+    # Dropdown options. Unassigned shows up if any call has no (valid) project.
+    option_projects, has_unassigned = {}, False
+    for o in opt_list:
+        if o.get("project_id") and o["project_id"] in names:
+            option_projects[o["project_id"]] = names[o["project_id"]]
+        else:
+            has_unassigned = True
+    options = {
+        "projects": [{"id": k, "name": v} for k, v in sorted(option_projects.items(), key=lambda kv: kv[1].lower())]
+                    + ([{"id": "none", "name": "Unassigned"}] if has_unassigned else []),
+        "models": sorted({o["model"] for o in opt_list if o.get("model")}),
+    }
+
+    return {
+        "days": days,
+        "total": total,
+        "by_run": runs[:200],
+        "by_project": sorted(by_project.values(), key=lambda b: b["cost_usd"], reverse=True),
+        "by_day": [by_day[k] for k in sorted(by_day, reverse=True)],
+        "options": options,
+    }

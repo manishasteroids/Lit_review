@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from "react";
 import { Filter, Check, X, ChevronRight, RotateCw, ChevronUp, ChevronDown } from "./icons.jsx";
-import PaperChatPanel from "./PaperChatPanel.jsx";
 import PdfViewer from "./PdfViewer.jsx";
 import { api } from "../api/client.js";
 
@@ -153,9 +152,8 @@ export default function PaperFilter({ papers, approved, scope, busy, onToggle, o
                   {p.url ? " · " : ""}
                   {p.url && <a href={p.url} target="_blank" rel="noreferrer">link</a>}
                   {" · "}
-                  <button className="pt-chat-btn" onClick={() => setReadPaper(p)}>read</button>
-                  {" · "}
-                  <button className="pt-chat-btn" onClick={() => setChatPaper(p)}>chat</button>
+                  <button className="pt-chat-btn" onClick={() => setChatPaper(p)}
+                    title="Open the paper with the chat beside it">read &amp; chat</button>
                   {" · "}
                   <button className="pt-chat-btn" disabled={a?.loading} onClick={() => runAssess(p)}>
                     {a?.loading ? "assessing…" : a?.data ? "re-assess" : "assess"}
@@ -221,20 +219,15 @@ export default function PaperFilter({ papers, approved, scope, busy, onToggle, o
         <ExportPapersButtons runId={runId} included={approved} />
       </div>
 
-      {chatPaper && (
-        <PaperChatPanel
-          runId={runId}
-          paper={chatPaper}
-          cite={chatPaper.idx + 1}
-          apiKey={apiKey}
-          model={model}
-          onClose={() => setChatPaper(null)}
-        />
-      )}
-
-      {readPaper && (
-        <PdfViewer runId={runId} paper={readPaper} onClose={() => setReadPaper(null)} />
-      )}
+      {(readPaper || chatPaper) && (() => {
+        const p = readPaper || chatPaper;
+        return (
+          <PdfViewer key={(p.url || p.title || "") + (chatPaper ? ":c" : ":r")}
+            runId={runId} paper={p} cite={p.idx + 1} apiKey={apiKey} model={model}
+            initialChat={!readPaper}
+            onClose={() => { setReadPaper(null); setChatPaper(null); }} />
+        );
+      })()}
 
       {papers.length > 4 && <ScrollNav />}
     </div>

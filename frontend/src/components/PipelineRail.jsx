@@ -35,8 +35,10 @@ export const STAGES = [
   { key: "extract", label: "Reader & Extractor", sub: "Parses text, extracts info", icon: FileText, kind: "step" },
   { key: "synthesize", label: "Critic & Synthesizer", sub: "Detects gaps & biases", icon: Brain, kind: "step" },
   { key: "write", label: "Writer Agent", sub: "Structured literature review", icon: PenTool, kind: "output" },
-  { key: "experiments", label: "Method & Experiment Designer", sub: "Testable experiment plans", icon: FlaskConical, kind: "output" },
 ];
+// The old final step, "Method & Experiment Designer", is retired along with
+// the Methods tab: hypothesis generation is Infinity's own pipeline now
+// (HypothesisPipelineRail).
 
 export default function PipelineRail({ stage, busy, done, kg, ranked, dataReady, models, hasPlan }) {
   const curIdx = STAGES.findIndex((s) => s.key === stage);
