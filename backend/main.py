@@ -80,4 +80,10 @@ app.include_router(watch_router)
 
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    # anthropic_sdk: lets you confirm a deploy actually picked up requirements.txt
+    try:
+        import anthropic
+        sdk = getattr(anthropic, "__version__", "?")
+    except Exception:  # noqa: BLE001
+        sdk = None
+    return {"ok": True, "anthropic_sdk": sdk}

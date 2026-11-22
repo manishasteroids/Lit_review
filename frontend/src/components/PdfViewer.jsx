@@ -158,6 +158,22 @@ export default function PdfViewer({ runId, paper, onClose, extraction, cite, api
   const [chatW, setChatW] = useState(savedChatW);
   const [chatSeed, setChatSeed] = useState(null);   // {text, n}: selected passage to ask about
 
+  // The reader covers the page: stop the page behind it from scrolling too
+  // (the floating chat used to do this; the docked chat no longer does).
+  useEffect(() => {
+    const { overflow, paddingRight } = document.body.style;
+    const htmlOverflow = document.documentElement.style.overflow;
+    const gap = window.innerWidth - document.documentElement.clientWidth;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    if (gap > 0) document.body.style.paddingRight = `${gap}px`;
+    return () => {
+      document.body.style.overflow = overflow;
+      document.body.style.paddingRight = paddingRight;
+      document.documentElement.style.overflow = htmlOverflow;
+    };
+  }, []);
+
   function startChatResize(e) {
     e.preventDefault();
     const s = { mx: e.clientX, w: chatW };
@@ -1426,7 +1442,7 @@ const headerStyle = {
 };
 
 const bodyStyle = {
-  flex: "1 1 auto", overflow: "auto", position: "relative",
+  flex: "1 1 auto", overflow: "auto", position: "relative", overscrollBehavior: "contain",
   display: "flex", flexDirection: "column", alignItems: "safe center",
   padding: 24, background: "var(--panel2, #eef0f4)",
 };

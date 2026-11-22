@@ -115,6 +115,10 @@ class Settings:
     contact_from_email: str = os.environ.get("CONTACT_FROM_EMAIL", "onboarding@resend.dev")
     contact_to_email: str = os.environ.get("CONTACT_TO_EMAIL", "contact@orcusintelligencelab.com")
 
+    # OpenAlex requires a free API key since 2026-02-13 (openalex.org/settings/api).
+    # Without it, requests run out of a tiny daily allowance and then fail.
+    openalex_api_key: str = os.environ.get("OPENALEX_API_KEY", "")
+
     # Careers page "Apply" form — same Resend delivery path as the contact
     # form above, just a different recipient and a multipart body (resume +
     # cover letter attachments) instead of a plain text message.
@@ -126,6 +130,8 @@ class Settings:
     billing_enforce: bool = os.environ.get("BILLING_ENFORCE", "0") in ("1", "true", "True")
     trial_days: int = int(os.environ.get("TRIAL_DAYS", "7"))
     trial_credit_usd: float = float(os.environ.get("TRIAL_CREDIT_USD", "3.0"))
+    # Comma-separated emails allowed to open the admin Users page (/api/admin/*).
+    admin_emails: str = os.environ.get("ADMIN_EMAILS", "")
     # Comma-separated emails that always get full access, never metered.
     billing_bypass_emails: str = os.environ.get("BILLING_BYPASS_EMAILS", "")
     # Stripe Payment Links (Dashboard > Payment Links), one per paid plan.

@@ -15,6 +15,7 @@ import DataAnalysisView from "./components/DataAnalysisView.jsx";
 import EvaluationView from "./components/EvaluationView.jsx";
 import UsageView from "./components/UsageView.jsx";
 import PlanPanel from "./components/PlanPanel.jsx";
+import AdminUsers from "./components/AdminUsers.jsx";
 import LandingPage from "./components/LandingPage.jsx";
 import HistoryView from "./components/HistoryView.jsx";
 import ProfileModal from "./components/ProfileModal.jsx";
@@ -223,6 +224,12 @@ export default function App() {
   const [error, setError] = useState(null);
   // Set when the user's plan downgraded the requested search mode (trial over)
   const [planNotice, setPlanNotice] = useState(null);
+  // Owner-only Users page: the nav item shows only if the server says so
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => {
+    if (!session) { setIsAdmin(false); return; }
+    api.adminMe().then((r) => setIsAdmin(!!r?.is_admin)).catch(() => setIsAdmin(false));
+  }, [session]);
 
   const [notes, setNotes] = useState({}); // paper idx -> note text
   const [accountTab, setAccountTab] = useState(null);  // "profile" | "settings" | null
@@ -1349,6 +1356,8 @@ export default function App() {
             onPhysicalAI={() => setView("physical-ai")}
             onDataAnalysis={(which) => { setDataAnalysisWhich(which); setView("data-analysis"); }}
             onOpenBilling={() => setView("billing")}
+            isAdmin={isAdmin}
+            onOpenAdmin={() => setView("admin")}
             onOpenProfile={() => setAccountTab("profile")}
             onOpenSettings={() => setAccountTab("settings")}
             onDeleteAllData={deleteAllData}
@@ -1675,6 +1684,21 @@ export default function App() {
                 />
               </div>
             </div>
+          </div>
+        )}
+        {view === "admin" && isAdmin && (
+          <div style={{ maxWidth: 1100, margin: "0 auto", padding: "24px 32px 80px", width: "100%" }}>
+            <button
+              type="button" onClick={() => setView("home")}
+              style={{
+                display: "flex", alignItems: "center", gap: 6, background: "none", border: "none",
+                color: "var(--muted)", fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+                padding: 0, marginBottom: 14, fontFamily: "inherit",
+              }}
+            >
+              <ArrowLeft size={13} /> Home
+            </button>
+            <div className="card"><AdminUsers /></div>
           </div>
         )}
         {view === "billing" && (

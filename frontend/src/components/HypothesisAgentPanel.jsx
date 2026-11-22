@@ -1003,18 +1003,39 @@ function DisputeEntry({ d, onApply, busy, papers, citeNum }) {
 // by default now that it has a picture to anchor it rather than being a
 // wall of "H3 vs H6 -> winner H3" lines on its own.
 function BracketSection({ bracket, hypotheses, accents }) {
+  // Collapsible: the bracket is "how it decided", not the answer. Collapsed it
+  // still says who won; the choice is remembered for next time.
+  const [open, setOpen] = useState(() => {
+    try { return localStorage.getItem("sift-bracket-open") !== "0"; } catch { return true; }
+  });
+  const toggle = () => setOpen((v) => {
+    try { localStorage.setItem("sift-bracket-open", v ? "0" : "1"); } catch { /* ignore */ }
+    return !v;
+  });
+  const n = (bracket.matches || []).filter((m) => !m.bye).length;
+  const champ = bracket.champion || [...(bracket.matches || [])].sort((x, y) => (y.round || 0) - (x.round || 0))[0]?.winner;
   return (
     <div style={{
       marginTop: 4, padding: "16px 18px", borderRadius: 12,
       border: "1px solid var(--border,#e5e7eb)", background: "var(--chip,#f1f0fb)",
     }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, marginBottom: 12 }}>
+      <button type="button" onClick={toggle} aria-expanded={open}
+        style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, width: "100%",
+          background: "none", border: "none", padding: 0, cursor: "pointer", color: "inherit", textAlign: "left",
+          marginBottom: open ? 12 : 0, fontFamily: "inherit" }}>
+        <span aria-hidden="true" style={{ display: "inline-block", width: 12, transition: "transform .15s",
+          transform: open ? "rotate(90deg)" : "none", color: "var(--muted,#6b7280)" }}>▸</span>
         <span aria-hidden="true">🥊</span>
-        Ranking bracket — {(bracket.matches || []).filter((m) => !m.bye).length} head-to-head match
-        {(bracket.matches || []).filter((m) => !m.bye).length === 1 ? "" : "es"}, single elimination
-      </div>
-      <BracketDiagram bracket={bracket} hypotheses={hypotheses} accents={accents} />
-      <MatchReasoning bracket={bracket} />
+        Ranking bracket — {n} head-to-head match{n === 1 ? "" : "es"}, single elimination
+        {!open && champ && <span style={{ fontWeight: 500, color: "var(--muted,#6b7280)", marginLeft: 6 }}>· winner {champ}</span>}
+        <span style={{ marginLeft: "auto", fontSize: 12, fontWeight: 500, color: "var(--indigo,#6d5df6)" }}>{open ? "Hide" : "Show"}</span>
+      </button>
+      {open && (
+        <>
+          <BracketDiagram bracket={bracket} hypotheses={hypotheses} accents={accents} />
+          <MatchReasoning bracket={bracket} />
+        </>
+      )}
     </div>
   );
 }

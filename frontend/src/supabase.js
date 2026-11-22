@@ -22,6 +22,13 @@ function readAuthRedirectError() {
 }
 export const authRedirectError = readAuthRedirectError();
 
+// True when the visitor arrived from a "reset your password" email link.
+// Captured at import time, before the client below tidies the address.
+export const authRecoveryLink = (() => {
+  try { return /type=recovery/.test(window.location.hash) || /type=recovery/.test(window.location.search); }
+  catch { return false; }
+})();
+
 export const authEnabled = Boolean(url && anon);
 export const supabase = authEnabled
   ? createClient(url, anon, {

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { authEnabled, supabase, authRedirectError } from "./supabase.js";
+import { authEnabled, supabase, authRedirectError, authRecoveryLink } from "./supabase.js";
 
 // True when frontend/.env still has the template value from .env.example, in
 // which case every sign-in request goes to a host that doesn't exist.
@@ -221,7 +221,16 @@ export function AuthModalHost() {
   const [open, setOpen] = useState(false);
   const [initialMode, setInitialMode] = useState("signin");
   const resolver = useRef(null);
+  const recoveryRef = useRef(false); // true while the "set a new password" form is showing
   const [redirectError, setRedirectError] = useState(null);
+
+  // Arrived from the reset-password email: show the new-password form.
+  useEffect(() => {
+    if (!authEnabled || !authRecoveryLink) return;
+    recoveryRef.current = true;
+    setInitialMode("recovery");
+    setOpen(true);
+  }, []);
 
   // Came back from Google/GitHub with a failure: open the dialog and say why,
   // then drop the error from the address so a refresh doesn't show it again.
@@ -243,7 +252,13 @@ export function AuthModalHost() {
       });
     // Resolve as soon as a session appears (covers OAuth redirect too).
     const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
-      if (s && resolver.current) {
+      if (_e === "PASSWORD_RECOVERY") {
+        recoveryRef.current = true;
+        setInitialMode("recovery");
+        setOpen(true);
+        return;
+      }
+      if (s && resolver.current && !recoveryRef.current) {
         resolver.current(true);
         resolver.current = null;
         setOpen(false);
@@ -255,13 +270,22 @@ export function AuthModalHost() {
     };
   }, []);
  
+  function recoveryDone() {
+    recoveryRef.current = false;
+    if (resolver.current) { resolver.current(true); resolver.current = null; }
+    setOpen(false);
+  }
+
   function dismiss() {
+    // Closing the reset form without choosing a password must not leave the
+    // person signed in on the strength of the emailed link alone.
+    if (recoveryRef.current) { recoveryRef.current = false; signOut(); }
     if (resolver.current) { resolver.current(false); resolver.current = null; }
     setOpen(false);
   }
  
   if (!open) return null;
-  return <LoginModal onDismiss={dismiss} initialMode={initialMode} initialMsg={redirectError} />;
+  return <LoginModal key={initialMode} onDismiss={dismiss} onRecoveryDone={recoveryDone} initialMode={initialMode} initialMsg={redirectError} />;
 }
  
 /* ------------------------------------------------------------------ */
@@ -292,10 +316,11 @@ function Field({ label, ...props }) {
   );
 }
 
-function LoginModal({ onDismiss, initialMode, initialMsg = null }) {
+function LoginModal({ onDismiss, onRecoveryDone, initialMode, initialMsg = null }) {
   const [mode, setMode] = useState(initialMode || "signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [password2, setPassword2] = useState(""); // confirm, for the new-password form
   // Signup-only profile fields — collected once at account creation and
   // stashed in Supabase's user_metadata (no separate profiles table needed;
   // displayName() above already reads user_metadata.full_name).
@@ -308,6 +333,7 @@ function LoginModal({ onDismiss, initialMode, initialMsg = null }) {
   // used to share the error colour and read like a failure.
   const [msgKind, setMsgKind] = useState("error");
   const [busy, setBusy] = useState(false);
+  const [forgotEmailHint, setForgotEmailHint] = useState(false);
 
   useEffect(() => {
     const onKey = (e) => e.key === "Escape" && onDismiss();
@@ -328,6 +354,28 @@ function LoginModal({ onDismiss, initialMode, initialMsg = null }) {
     setBusy(true); setMsg(null); setMsgKind("error");
     const cleanEmail = email.trim();
     try {
+      if (mode === "forgot") {
+        const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, { redirectTo: window.location.origin });
+        if (error && !/rate|too many|seconds/i.test(error.message)) { setMsg(friendlyAuthError(error)); return; }
+        if (error) { setMsg("Please wait a minute before requesting another link."); return; }
+        // Same message whether or not the address has an account, so this
+        // form can't be used to find out who is registered.
+        setMsgKind("success");
+        setMsg(`If an account exists for ${cleanEmail}, we've sent a link to reset your password. It can take a minute; check spam too.`);
+        return;
+      }
+      if (mode === "recovery") {
+        if (password.length < 8) { setMsg("Use at least 8 characters."); return; }
+        if (password !== password2) { setMsg("The two passwords don't match."); return; }
+        const { error } = await supabase.auth.updateUser({ password });
+        if (error) { setMsg(friendlyAuthError(error)); return; }
+        setMsgKind("success");
+        setMsg("Password updated. You're signed in.");
+        // Drop the recovery tokens from the address, then close.
+        window.history.replaceState(null, "", window.location.pathname);
+        setTimeout(() => onRecoveryDone?.(), 1200);
+        return;
+      }
       if (mode === "signin") {
         const { error } = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
         if (error) {
@@ -391,13 +439,16 @@ function LoginModal({ onDismiss, initialMode, initialMsg = null }) {
     <div
       onClick={onDismiss}
       style={{
-        position: "fixed", inset: 0, background: "rgba(17,17,27,0.45)",
+        position: "fixed", inset: 0,
+        // The reset form opens on a temporary session from the emailed link;
+        // cover the app completely so the account isn't visible behind it.
+        background: mode === "recovery" ? "#f3f2fb" : "rgba(17,17,27,0.45)",
         // The overlay itself scrolls: a form taller than the window (signup on
         // a laptop) scrolls inside it, and margin:auto on the card still
         // centres it whenever it does fit.
         display: "flex", alignItems: "flex-start", justifyContent: "center",
         overflowY: "auto", overscrollBehavior: "contain",
-        zIndex: 9999, padding: 20, backdropFilter: "blur(2px)",
+        zIndex: 9999, padding: 20, backdropFilter: mode === "recovery" ? "none" : "blur(2px)",
       }}
     >
       <div
@@ -417,11 +468,19 @@ function LoginModal({ onDismiss, initialMode, initialMsg = null }) {
           Multi-agent literature review
         </div>
         <h2 style={{ fontSize: 23, fontWeight: 700, margin: "8px 0 6px" }}>
-          {mode === "signin" ? "Sign in to continue" : "Create your account"}
+          {mode === "signin" ? "Sign in to continue"
+            : mode === "signup" ? "Create your account"
+            : mode === "forgot" ? "Reset your password"
+            : "Choose a new password"}
         </h2>
         <p style={{ color: "#6b6b7b", fontSize: 14, marginTop: 0, marginBottom: 22 }}>
-          Sift saves your searches, notes and reviews to your account.
+          {mode === "forgot"
+            ? "Enter the email you signed up with and we'll send you a reset link."
+            : mode === "recovery"
+              ? "Enter a new password for your account."
+              : "Sift saves your searches, notes and reviews to your account."}
         </p>
+        {(mode === "signin" || mode === "signup") && (<>
  
         <button onClick={google} type="button" style={{
           width: "100%", padding: "12px 14px", borderRadius: 10, border: "1px solid #e3e3ec",
@@ -444,6 +503,7 @@ function LoginModal({ onDismiss, initialMode, initialMsg = null }) {
         <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "18px 0", color: "#a0a0b0", fontSize: 13 }}>
           <div style={{ flex: 1, height: 1, background: "#e3e3ec" }} /> or <div style={{ flex: 1, height: 1, background: "#e3e3ec" }} />
         </div>
+        </>)}
  
         <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {mode === "signup" && (
@@ -454,11 +514,31 @@ function LoginModal({ onDismiss, initialMode, initialMsg = null }) {
                 onChange={(e) => setAffiliation(e.target.value)} />
             </>
           )}
-          <Field label="Email address" type="email" required placeholder="you@example.com" value={email}
-            onChange={(e) => setEmail(e.target.value)} autoFocus={mode === "signin"} autoComplete="email" />
-          <Field label="Password" type="password" required placeholder="••••••••" value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete={mode === "signin" ? "current-password" : "new-password"} />
+          {mode !== "recovery" && (
+            <Field label="Email address" type="email" required placeholder="you@example.com" value={email}
+              onChange={(e) => setEmail(e.target.value)} autoFocus={mode === "signin" || mode === "forgot"} autoComplete="email" />
+          )}
+          {mode !== "forgot" && (
+            <Field label={mode === "recovery" ? "New password" : "Password"} type="password" required placeholder="••••••••" value={password}
+              onChange={(e) => setPassword(e.target.value)} autoFocus={mode === "recovery"}
+              autoComplete={mode === "signin" ? "current-password" : "new-password"} />
+          )}
+          {mode === "recovery" && (
+            <Field label="Confirm new password" type="password" required placeholder="••••••••" value={password2}
+              onChange={(e) => setPassword2(e.target.value)} autoComplete="new-password" />
+          )}
+          {mode === "signin" && (
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginTop: -4 }}>
+              <button type="button" onClick={() => { setMode("forgot"); setMsg(null); }}
+                style={{ background: "none", border: "none", color: ACCENT, fontWeight: 600, cursor: "pointer", padding: 0, fontSize: 13, fontFamily: "inherit" }}>
+                Forgot password?
+              </button>
+              <button type="button" onClick={() => { setMode("forgot"); setMsg(null); setMsgKind("error"); setForgotEmailHint(true); }}
+                style={{ background: "none", border: "none", color: "#6b6b7b", cursor: "pointer", padding: 0, fontSize: 13, fontFamily: "inherit" }}>
+                Forgot email?
+              </button>
+            </div>
+          )}
           {mode === "signup" && (
             <>
               <Field label="Phone number (optional)" type="tel" placeholder="+1 555 000 1234" value={phone}
@@ -473,7 +553,8 @@ function LoginModal({ onDismiss, initialMode, initialMsg = null }) {
             cursor: busy ? "default" : "pointer", fontFamily: "inherit", marginTop: 4,
             opacity: busy ? 0.7 : 1,
           }}>
-            {busy ? "…" : mode === "signin" ? "Sign in" : "Create account"}
+            {busy ? "…" : mode === "signin" ? "Sign in" : mode === "signup" ? "Create account"
+              : mode === "forgot" ? "Send reset link" : "Update password"}
           </button>
         </form>
  
@@ -483,6 +564,22 @@ function LoginModal({ onDismiss, initialMode, initialMsg = null }) {
           </div>
         )}
  
+        {mode === "forgot" && forgotEmailHint && (
+          <div style={{ fontSize: 13, color: "#6b6b7b", marginTop: 12, lineHeight: 1.5 }}>
+            Don't remember which email you used? Try <b>Continue with Google</b> or <b>GitHub</b> on the
+            sign-in screen (it's the same account if the email matches), or write to{" "}
+            <a href="mailto:contact@orcusintelligencelab.com" style={{ color: ACCENT }}>contact@orcusintelligencelab.com</a>.
+          </div>
+        )}
+        {mode === "forgot" && (
+          <div style={{ fontSize: 14, color: "#6b6b7b", marginTop: 18 }}>
+            <button onClick={() => { setMode("signin"); setMsg(null); setForgotEmailHint(false); }}
+              style={{ background: "none", border: "none", color: ACCENT, fontWeight: 600, cursor: "pointer", fontSize: 14, padding: 0 }}>
+              ← Back to sign in
+            </button>
+          </div>
+        )}
+        {(mode === "signin" || mode === "signup") && (
         <div style={{ fontSize: 14, color: "#6b6b7b", marginTop: 18 }}>
           {mode === "signin" ? "New here? " : "Already have an account? "}
           <button onClick={() => {
@@ -493,6 +590,7 @@ function LoginModal({ onDismiss, initialMode, initialMsg = null }) {
             {mode === "signin" ? "Create an account" : "Sign in"}
           </button>
         </div>
+        )}
       </div>
     </div>
   );

@@ -114,6 +114,7 @@ def _openalex(client: httpx.Client, kws: list[str], since: str) -> list[dict]:
         "search": " ".join(kws), "filter": f"from_publication_date:{since}",
         "sort": "relevance_score:desc", "per_page": POOL,
         "mailto": getattr(settings, "unpaywall_email", "") or "research@example.com",
+        **({"api_key": settings.openalex_api_key} if getattr(settings, "openalex_api_key", "") else {}),
     })
     r.raise_for_status()
     out = []

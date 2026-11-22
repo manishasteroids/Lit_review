@@ -665,6 +665,12 @@ export const api = {
   getUsageTrend: (days = 30) =>
     getJSON("/api/usage/trend?days=" + days + "&tz_offset=" + new Date().getTimezoneOffset()),
 
+  // Owner-only: is this user an admin, and the full user list
+  adminMe: () => getJSON("/api/admin/me"),
+  adminUsers: () => getJSON("/api/admin/users"),
+  adminUserAction: (userId, action, days) =>
+    request(`/api/admin/users/${encodeURIComponent(userId)}/action`, { action, days: days || undefined }),
+
   // Plan, free-trial progress, and which Stripe upgrade links are configured
   getBillingStatus: () => getJSON("/api/billing/status"),
   // Stripe Payment Link for "pro" | "max", tagged with this user's id

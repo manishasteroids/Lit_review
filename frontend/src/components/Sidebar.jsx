@@ -18,6 +18,7 @@ import { BookOpen, Lightbulb, Cpu, BarChart3, Coins, Plus } from "./icons.jsx";
 export default function Sidebar({
   activeView, onNewProject, onGoHome, onLiteratureReview, onHypothesisGeneration,
   onPhysicalAI, onDataAnalysis, onOpenBilling, onOpenProfile, onOpenSettings, onDeleteAllData,
+  isAdmin, onOpenAdmin,
 }) {
   const session = useSession();
 
@@ -47,6 +48,10 @@ export default function Sidebar({
       <div style={S.footer}>
         <NavItem icon={<Coins size={16} />} label={<span style={{ fontWeight: 600 }}>Account and Billing</span>}
           active={activeView === "billing"} onClick={onOpenBilling} />
+        {isAdmin && (
+          <NavItem icon={<Cpu size={16} />} label={<span style={{ fontWeight: 600 }}>Admin: Users</span>}
+            active={activeView === "admin"} onClick={onOpenAdmin} />
+        )}
         <div style={{ padding: "8px 10px 2px" }}>
           {session ? (
             <AccountRow

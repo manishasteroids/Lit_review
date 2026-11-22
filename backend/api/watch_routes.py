@@ -35,7 +35,13 @@ class GroupIn(BaseModel):
 def search(kind: str, q: str, institution: str = "", user_id: str = Depends(require_user)):
     try:
         return {"results": watch.search(kind, q, institution)}
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger("sift.watch").warning("OpenAlex search failed: %r", e)
+        code = getattr(getattr(e, "response", None), "status_code", None)
+        if code in (401, 402, 403, 409, 429):
+            raise HTTPException(502, "OpenAlex is refusing requests (it now needs an API key, or the daily "
+                                     "allowance is used up). Ask the site admin to set OPENALEX_API_KEY.")
         raise HTTPException(502, "Couldn't reach OpenAlex just now -- try again in a moment.")
 
 

@@ -71,6 +71,15 @@ def _mailto() -> str:
     return getattr(settings, "unpaywall_email", "") or "research@example.com"
 
 
+def _oa() -> dict:
+    """Query params every OpenAlex call carries: the contact email, plus the
+    API key (required since 2026-02-13) when one is configured."""
+    p = {"mailto": _mailto()}
+    if getattr(settings, "openalex_api_key", ""):
+        p["api_key"] = settings.openalex_api_key
+    return p
+
+
 # ── OpenAlex lookups ────────────────────────────────────────────────────────
 def search(kind: str, q: str, institution: str = "") -> list[dict]:
     """People or institutions matching a name, for the Follow search box.
@@ -79,7 +88,7 @@ def search(kind: str, q: str, institution: str = "") -> list[dict]:
     if kind not in KINDS or len(q) < 2:
         return []
     path = "authors" if kind == "scholar" else "institutions"
-    params = {"search": q, "per_page": 15, "mailto": _mailto()}
+    params = {"search": q, "per_page": 15, **_oa()}
     inst = short_id(institution)
     if kind == "scholar" and inst:
         params["filter"] = f"last_known_institutions.id:{inst}"
@@ -91,13 +100,13 @@ def search(kind: str, q: str, institution: str = "") -> list[dict]:
             # Full-text search needs whole words; autocomplete also matches a
             # partly typed name ("Fei-Fe"). It returns short records, so look
             # the matches up again to get institutions and topics.
-            a = c.get(f"{API}/autocomplete/{path}", params={"q": q, "mailto": _mailto()})
+            a = c.get(f"{API}/autocomplete/{path}", params={"q": q, **_oa()})
             a.raise_for_status()
             ids = [short_id(x.get("id", "")) for x in (a.json().get("results") or [])][:10]
             ids = [i for i in ids if i]
             if ids:
                 r = c.get(f"{API}/{path}", params={"filter": "openalex:" + "|".join(ids), "per_page": 10,
-                                                    "mailto": _mailto()})
+                                                    **_oa()})
                 r.raise_for_status()
                 rows = r.json().get("results") or []
     # Many people share a name: put the most-cited first, which is usually the one meant.
@@ -131,7 +140,7 @@ def suggest_members(institution: str, topic: str) -> list[dict]:
     with httpx.Client(timeout=15, headers=UA, follow_redirects=True) as c:
         r = c.get(f"{API}/works", params={"search": " ".join(words[:8]),
                                           "filter": f"institutions.id:{inst},from_publication_date:{since}",
-                                          "per_page": 100, "mailto": _mailto()})
+                                          "per_page": 100, **_oa()})
         r.raise_for_status()
         rows = r.json().get("results") or []
     people: dict[str, dict] = {}
@@ -163,7 +172,7 @@ def recent_works(kind: str, oid: str, keywords: list[str] | None = None,
     else:
         field = "author.id" if kind == "scholar" else "institutions.id"
     params = {"filter": f"{field}:{oid},from_publication_date:{since}",
-              "sort": "publication_date:desc", "per_page": 15, "mailto": _mailto()}
+              "sort": "publication_date:desc", "per_page": 15, **_oa()}
     if kind == "lab" and keywords:
         params["search"] = " ".join(keywords[:5])
     with httpx.Client(timeout=12, headers=UA, follow_redirects=True) as c:
@@ -456,7 +465,7 @@ def _find_institution(client: httpx.Client, site: str, candidates: list[str]) ->
     want = _reg_domain(urlparse(site).hostname or "")
     for q in candidates[:6]:
         try:
-            r = client.get(f"{API}/institutions", params={"search": q, "per_page": 5, "mailto": _mailto()})
+            r = client.get(f"{API}/institutions", params={"search": q, "per_page": 5, **_oa()})
             r.raise_for_status()
         except Exception:  # noqa: BLE001
             continue

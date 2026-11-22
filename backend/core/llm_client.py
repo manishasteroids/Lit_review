@@ -180,7 +180,20 @@ class LLMClient:
 
         t0 = time.perf_counter()
         try:
-            resp = self.client.messages.create(**kwargs, timeout=per_call_timeout)
+            try:
+                resp = self.client.messages.create(**kwargs, timeout=per_call_timeout)
+            except TypeError as te:
+                # An old anthropic SDK in the deployed container rejects
+                # `temperature` before any request is sent. Never fail a stage
+                # over a sampling hint: retry once without it, and say which
+                # SDK is installed so the deploy can be fixed.
+                if "temperature" not in str(te) or "temperature" not in kwargs:
+                    raise
+                log.warning("anthropic SDK %s rejects temperature (%s) -- retrying without it; "
+                            "upgrade the deployed anthropic package",
+                            getattr(anthropic, "__version__", "?"), te)
+                kwargs.pop("temperature", None)
+                resp = self.client.messages.create(**kwargs, timeout=per_call_timeout)
         except (anthropic.APITimeoutError, anthropic.RateLimitError,
                 anthropic.OverloadedError, anthropic.InternalServerError,
                 anthropic.APIConnectionError) as e:

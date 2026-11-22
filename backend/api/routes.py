@@ -2573,6 +2573,128 @@ def usage_breakdown(days: int = 0, project_id: str = "", model: str = "", tz_off
                                project_id or None, model or None, tz_offset)
 
 
+# ── Admin (owner-only) ────────────────────────────────────────────────────
+
+def _require_admin(user_id: str) -> None:
+    """403 unless the signed-in user's email is in ADMIN_EMAILS."""
+    from core.db import _conn, _PH
+    admins = {e.strip().lower() for e in settings.admin_emails.split(",") if e.strip()}
+    email = None
+    if admins:
+        with _conn() as conn:
+            row = conn.execute(f"SELECT email FROM known_users WHERE user_id = {_PH}", (user_id,)).fetchone()
+        email = dict(row)["email"].lower() if row else None
+    if not email or email not in admins:
+        raise HTTPException(403, "Admins only.")
+
+
+@router.get("/admin/me")
+def admin_me(user_id: str = Depends(require_user)):
+    """Whether to show the admin nav. Never errors for normal users."""
+    try:
+        _require_admin(user_id)
+        return {"is_admin": True}
+    except HTTPException:
+        return {"is_admin": False}
+
+
+@router.get("/admin/users")
+def admin_users(user_id: str = Depends(require_user)):
+    """Everyone who has signed in, with plan/trial status, run count and cost."""
+    _require_admin(user_id)
+    from datetime import timedelta
+    from core.db import _conn
+    from core.billing import PAID_STATUSES
+    with _conn() as conn:
+        users = [dict(r) for r in conn.execute("SELECT user_id, email, last_seen FROM known_users").fetchall()]
+        subs = {dict(r)["user_id"]: dict(r) for r in conn.execute(
+            "SELECT user_id, plan, status, trial_started_at FROM subscriptions").fetchall()}
+        runs = {dict(r)["user_id"]: dict(r)["c"] for r in conn.execute(
+            "SELECT user_id, COUNT(*) AS c FROM sessions GROUP BY user_id").fetchall()}
+        cost = {dict(r)["user_id"]: float(dict(r)["t"] or 0) for r in conn.execute(
+            "SELECT s.user_id AS user_id, SUM(c.cost_usd) AS t FROM llm_calls c "
+            "JOIN sessions s ON c.session_id = s.id GROUP BY s.user_id").fetchall()}
+    now = datetime.now(timezone.utc)
+    out = []
+    for u in users:
+        sub = subs.get(u["user_id"])
+        if not sub:
+            plan = "not started"
+        elif sub["status"] in PAID_STATUSES and sub["plan"] in ("pro", "max"):
+            plan = sub["plan"]
+        else:
+            started = datetime.fromisoformat(sub["trial_started_at"])
+            active = started + timedelta(days=settings.trial_days) > now
+            plan = "trial" if active else "free"
+        out.append({"email": u["email"], "user_id": u["user_id"], "last_seen": u["last_seen"],
+                    "plan": plan, "trial_started_at": sub["trial_started_at"] if sub else None,
+                    "runs": runs.get(u["user_id"], 0), "cost_usd": round(cost.get(u["user_id"], 0.0), 4)})
+    out.sort(key=lambda r: r["last_seen"] or "", reverse=True)
+    return {"count": len(out), "users": out}
+
+
+class AdminActionBody(BaseModel):
+    action: str            # grant_pro | grant_max | set_free | extend_trial | reset_trial | delete_data
+    days: int | None = None  # for extend_trial
+
+
+def _admin_audit(admin_id: str, action: str, target: str, detail: str = "") -> None:
+    from core.db import _conn, _PH
+    with _conn() as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS admin_audit (id TEXT PRIMARY KEY, admin_id TEXT, action TEXT, "
+            "target TEXT, detail TEXT, at TEXT)")
+        import uuid
+        conn.execute(
+            f"INSERT INTO admin_audit (id, admin_id, action, target, detail, at) VALUES ({_PH},{_PH},{_PH},{_PH},{_PH},{_PH})",
+            (uuid.uuid4().hex, admin_id, action, target, detail, datetime.now(timezone.utc).isoformat()))
+
+
+@router.post("/admin/users/{target_id}/action")
+def admin_user_action(target_id: str, body: AdminActionBody, user_id: str = Depends(require_user)):
+    """Owner-only account actions. Every call is written to admin_audit.
+    Subscribers can't reach this: _require_admin 403s anyone not in ADMIN_EMAILS."""
+    _require_admin(user_id)
+    from datetime import timedelta
+    from core.db import _conn, _PH
+    from core import billing
+
+    with _conn() as conn:
+        row = conn.execute(f"SELECT email FROM known_users WHERE user_id = {_PH}", (target_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Unknown user.")
+    email = dict(row)["email"]
+    act = body.action
+    sub = billing._get_or_create(target_id)
+
+    if act in ("grant_pro", "grant_max"):
+        billing._set(target_id, plan="pro" if act == "grant_pro" else "max", status="active")
+    elif act == "set_free":
+        billing._set(target_id, plan="free", status="none")
+    elif act == "extend_trial":
+        d = body.days or 0
+        if not 1 <= d <= 365:
+            raise HTTPException(400, "days must be 1-365.")
+        started = datetime.fromisoformat(sub["trial_started_at"]) + timedelta(days=d)
+        # Moving the start later extends the deadline AND restarts the credit
+        # window (credits are counted from trial_started_at).
+        billing._set(target_id, trial_started_at=started.isoformat())
+    elif act == "reset_trial":
+        billing._set(target_id, trial_started_at=datetime.now(timezone.utc).isoformat())
+    elif act == "delete_data":
+        if target_id == user_id:
+            raise HTTPException(400, "Use 'Delete all my data' for your own account.")
+        delete_all_for_user(target_id)
+        with _conn() as conn:
+            conn.execute(f"DELETE FROM subscriptions WHERE user_id = {_PH}", (target_id,))
+            conn.execute(f"DELETE FROM known_users WHERE user_id = {_PH}", (target_id,))
+    else:
+        raise HTTPException(400, "Unknown action.")
+
+    _admin_audit(user_id, act, target_id, f"{email} days={body.days}")
+    return {"ok": True}
+
+
 # ── Plans, free trial & Stripe ────────────────────────────────────────────
 
 @router.get("/billing/status")
